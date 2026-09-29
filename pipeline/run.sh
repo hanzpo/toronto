@@ -37,5 +37,6 @@ uv run python -m tpipe.region
 uv run python -m tpipe.osm_extract
 uv run python -m tpipe.osm_tiles
 uv run python -m tpipe.graph
+uv run python -m tpipe.congestion
 uv run python -m tpipe.transit
 uv run python -m tpipe.landmarks
