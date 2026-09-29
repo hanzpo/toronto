@@ -167,6 +167,8 @@ class Collector:
         self.l_len = array("I")
         self.l_lon = array("d")
         self.l_lat = array("d")
+        self.l_nid = array("q")
+        self.l_speed = array("f")
         self.l_width = array("f")
         self.l_lanes = array("B")
         self.l_flags = array("B")
@@ -181,6 +183,7 @@ class Collector:
         self.a_lat = array("d")
         # nodes of interest (traffic signals, stations)
         self.n_kind = array("B")  # 0 signals, 1 stop sign, 2 crossing
+        self.n_id = array("q")
         self.n_lon = array("d")
         self.n_lat = array("d")
 
@@ -307,10 +310,7 @@ class Collector:
                 width = 45.0 if t.get("aeroway") == "runway" else 23.0
         else:
             return
-        try:
-            pts = [(n.lon, n.lat) for n in w.nodes]
-        except osmium.InvalidLocationError:
-            pts = [(n.lon, n.lat) for n in w.nodes if n.location.valid()]
+        pts = [(n.lon, n.lat, n.ref) for n in w.nodes if n.location.valid()]
         if len(pts) < 2:
             return
         flags = 0
@@ -330,9 +330,10 @@ class Collector:
         if t.get("junction") == "roundabout":
             flags |= 16
         layer = _metres(t.get("layer"))
-        for x, y in pts:
+        for x, y, ref in pts:
             self.l_lon.append(x)
             self.l_lat.append(y)
+            self.l_nid.append(ref)
         self.l_len.append(len(pts))
         self.l_kind.append(kind)
         self.l_class.append(cls)
@@ -342,6 +343,10 @@ class Collector:
         self.l_flags.append(flags)
         self.l_layer.append(int(max(-5, min(5, layer))) if layer == layer else 0)
         self.l_name.append(t.get("name") or t.get("ref") or "")
+        sp = _metres(t.get("maxspeed"))
+        if sp == sp and "mph" in (t.get("maxspeed") or ""):
+            sp *= 1.609
+        self.l_speed.append(sp)
 
     def node(self, n) -> None:
         t = n.tags
@@ -350,6 +355,7 @@ class Collector:
         if k is None:
             return
         self.n_kind.append(k)
+        self.n_id.append(n.id)
         self.n_lon.append(n.location.lon)
         self.n_lat.append(n.location.lat)
 
@@ -402,7 +408,7 @@ def run(path: str) -> None:
         kind=arr(c.l_kind, np.uint8), cls=arr(c.l_class, np.uint8), id=arr(c.l_id, np.float64),
         len=arr(c.l_len, np.uint32), xy=proj(c.l_lon, c.l_lat), width=arr(c.l_width, np.float32),
         lanes=arr(c.l_lanes, np.uint8), flags=arr(c.l_flags, np.uint8), layer=arr(c.l_layer, np.int8),
-        name=np.array(c.l_name, dtype=object),
+        name=np.array(c.l_name, dtype=object), nid=arr(c.l_nid, np.int64), speed=arr(c.l_speed, np.float32),
     )
     np.savez(
         geo.WORK / "osm_areas.npz",
@@ -411,7 +417,8 @@ def run(path: str) -> None:
     )
     nx, ny = geo.project(np.frombuffer(c.n_lon, dtype=np.float64), np.frombuffer(c.n_lat, dtype=np.float64)) \
         if len(c.n_lon) else (np.zeros(0), np.zeros(0))
-    np.savez(geo.WORK / "osm_nodes.npz", kind=arr(c.n_kind, np.uint8), xy=np.stack([nx, ny], axis=1))
+    np.savez(geo.WORK / "osm_nodes.npz", kind=arr(c.n_kind, np.uint8), id=arr(c.n_id, np.int64),
+             xy=np.stack([nx, ny], axis=1))
     print(f"done in {time.time() - t0:.0f}s")
 
 

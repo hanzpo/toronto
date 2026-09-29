@@ -127,3 +127,20 @@ Rail
 "rotation": rad, "suppress": [osmIds...] }]` — `rotation` is CCW about +y from
 the model's canonical orientation; `suppress` lists OSM building ids the tile
 renderer must skip because the custom model replaces them.
+
+## Road graph (`data/graph/{tx}_{ty}.bin.gz`, level-0 grid)
+
+Drivable roads (classes 0–6) split at intersections; built by
+`pipeline/tpipe/graph.py`. Each edge lives in the tile containing its
+midpoint; nodes are duplicated into every tile that references them and are
+unified client-side by OSM id. Positions are tile-local like render tiles.
+
+- `n_id` f64 (OSM node id) · `n_xyz` f32 [3·nN] · `n_flags` u8 (`1 traffic
+  signals · 2 stop sign`)
+- `e_from`, `e_to` u32 — indices into this tile's node table. Geometry runs
+  from → to. Two-way roads are one edge with lanes in both directions.
+- `e_off` u32 [nE+1] · `e_xyz` f32 — densified (≤ 12 m) draped geometry incl.
+  bridge/tunnel profiles, first/last vertex = from/to node.
+- `e_len` f32 m · `e_class` u8 (road classes) · `e_lanes_fwd` / `e_lanes_bwd`
+  u8 (bwd = 0 ⇒ one-way) · `e_speed` f32 m/s (maxspeed or class default) ·
+  `e_flags` u8 (road flags) · `e_name` u16 (header `names`) · `e_osm` f64.
