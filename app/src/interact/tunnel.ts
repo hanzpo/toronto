@@ -52,6 +52,7 @@ function rail(x: number, under = false): Strip[] {
 const STEP = 4;
 const BACK = 220;
 const AHEAD = 650;
+const END_EXT = 110;
 const REBUILD = 90;
 
 export interface TunnelInfo {
@@ -75,6 +76,8 @@ export class TunnelBuilder {
   /** per-sample underground flag of the current window (for tunnel queries) */
   private underS0 = 0;
   private under = new Uint8Array(0);
+  private builtAt = 0;
+  private firstBuildAt = 0;
 
   constructor(heightAt: (e: number, n: number) => number) {
     this.heightAt = heightAt;
@@ -93,6 +96,7 @@ export class TunnelBuilder {
   setPath(path: PatternPath | null, mode: Mode, vehLen: number) {
     if (path !== this.path) this.center = -1e9;
     this.path = path;
+    this.firstBuildAt = 0;
     this.mode = mode;
     this.vehLen = vehLen;
     this.stopLen = mode === 'subway' ? 152 : mode === 'lrt' ? 90 : mode === 'commuter_rail' ? 320 : vehLen + 20;
@@ -107,7 +111,12 @@ export class TunnelBuilder {
 
   update(s: number) {
     if (!this.path) return;
-    if (Math.abs(s - this.center) < REBUILD) return;
+    // Terrain tiles may still be streaming in right after a takeover (heights
+    // fall back to 0), which misclassifies underground track. Keep rebuilding
+    // for a while so the tube appears once the terrain has loaded.
+    const now = performance.now();
+    const settling = now - this.firstBuildAt < 20000 && now - this.builtAt > 1500;
+    if (Math.abs(s - this.center) < REBUILD && !settling) return;
     this.center = s;
     this.build(s);
   }
@@ -132,8 +141,11 @@ export class TunnelBuilder {
   private build(sc: number) {
     const path = this.path!;
     this.clear();
+    this.builtAt = performance.now();
+    if (!this.firstBuildAt) this.firstBuildAt = this.builtAt;
     this.center = sc;
-    const s0 = Math.max(0, sc - BACK), s1 = Math.min(path.length, sc + AHEAD);
+    // extend past the path ends: a train at a terminus overhangs the last stop
+    const s0 = Math.max(-END_EXT, sc - BACK), s1 = Math.min(path.length + END_EXT, sc + AHEAD);
     const n = Math.max(2, Math.floor((s1 - s0) / STEP) + 1);
     const origin = path.point(sc, [0, 0, 0]);
     const ox = origin[0], oy = origin[1], oz = origin[2];
@@ -151,7 +163,7 @@ export class TunnelBuilder {
     const realStops = path.stops.filter((q) => !q.virtual);
     for (let k = 0; k < n; k++) {
       const s = s0 + k * STEP;
-      path.point(s, p); path.point(s - 3, a); path.point(s + 3, b);
+      path.pointX(s, p); path.pointX(s - 3, a); path.pointX(s + 3, b);
       const dx = b[0] - a[0], dy = b[1] - a[1];
       const hl = Math.hypot(dx, dy) || 1;
       rx[k] = dy / hl; ry[k] = -dx / hl;
@@ -236,6 +248,21 @@ export class TunnelBuilder {
       this.mesh = mesh;
     }
 
+    // end-of-line walls where an underground line terminates in the window, so
+    // the cab view at a terminus doesn't look out of the tube into the void
+    for (const [atEnd, k] of [[s1 >= path.length + END_EXT, n - 1], [s0 <= -END_EXT, 0]] as const) {
+      if (!atEnd || !under[k]) continue;
+      const pose = path.pose(k ? path.length + END_EXT - 4 : 4 - END_EXT);
+      const wall = new THREE.Mesh(
+        new THREE.BoxGeometry(2, 12, 16),
+        new THREE.MeshStandardMaterial({ color: 0x55524d, roughness: 0.95 }),
+      );
+      wall.position.set(pose.e, pose.z + 4, -pose.n);
+      wall.rotation.y = pose.heading;
+      this.group.add(wall);
+      this.signs.push(wall);
+    }
+
     // tunnel light fixtures every 25 m on the right wall (not in stations)
     if (underground) {
       const mats: THREE.Matrix4[] = [];
@@ -243,7 +270,7 @@ export class TunnelBuilder {
       for (let s = first + 12.5; s < s1; s += 25) {
         const k = Math.round((s - s0) / STEP);
         if (k < 0 || k >= n || !under[k] || stn[k] > 0.2) continue;
-        path.point(s, p);
+        path.pointX(s, p);
         const x = 2.15;
         const e = p[0] + rx[k] * x, nn = p[1] + ry[k] * x;
         const m = new THREE.Matrix4().compose(

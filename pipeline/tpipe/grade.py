@@ -46,8 +46,13 @@ def profile(
     clearance: float = 6.0,
     cover: float = 10.0,
     ramp: float = 80.0,
+    open_ends: bool = False,
 ) -> np.ndarray:
-    """Elevation per vertex. `bridge`/`tunnel` are per-vertex bool masks."""
+    """Elevation per vertex. `bridge`/`tunnel` are per-vertex bool masks.
+
+    With `open_ends`, a run touching the first/last vertex continues past the
+    end of the line (e.g. a subway terminus underground) instead of ramping
+    back to the surface there."""
     z = ground.astype(np.float64).copy()
     if len(xy) < 2:
         return z
@@ -58,11 +63,20 @@ def profile(
         for i, j in _runs(mask):
             a = max(i - 1, 0)
             b = min(j + 1, len(xy) - 1)
-            span = d[b] - d[a]
-            t = (d[i : j + 1] - d[a]) / span if span > 0 else np.zeros(j - i + 1)
-            interp = ground[a] + (ground[b] - ground[a]) * t
-            edge = np.minimum(d[i : j + 1] - d[a], d[b] - d[i : j + 1])
+            has_a = not open_ends or i > 0
+            has_b = not open_ends or j < len(xy) - 1
+            seg = d[i : j + 1]
+            if has_a and has_b:
+                span = d[b] - d[a]
+                t = (seg - d[a]) / span if span > 0 else np.zeros(j - i + 1)
+                interp = ground[a] + (ground[b] - ground[a]) * t
+            else:  # an end is open: follow the terrain, ramping only at closed ends
+                interp = None
+            edge = np.minimum(seg - d[a] if has_a else np.inf, d[b] - seg if has_b else np.inf)
             k = np.clip(edge / ramp, 0.0, 1.0) if ramp > 0 else 1.0
             target = ground[i : j + 1] + sign * amount * k
-            z[i : j + 1] = np.maximum(interp, target) if sign > 0 else np.minimum(interp, target)
+            if interp is None:
+                z[i : j + 1] = target
+            else:
+                z[i : j + 1] = np.maximum(interp, target) if sign > 0 else np.minimum(interp, target)
     return z

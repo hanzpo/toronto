@@ -421,7 +421,8 @@ class Agency:
             t2 = tun[seg] & tun[np.minimum(seg + 1, len(tun) - 1)]
             b2[0], t2[0] = bri[0], tun[0]
             ground = self.ter.sample(dxy[:, 0], dxy[:, 1])
-            z = grade_profile(dxy, ground, b2, t2, clearance=6.0, cover=COVER.get(mode, 10.0), ramp=150.0)
+            z = grade_profile(dxy, ground, b2, t2, clearance=6.0, cover=COVER.get(mode, 10.0), ramp=150.0,
+                              open_ends=True)
             out = np.column_stack([dxy, z])
             out = out[rdp3(out, RAIL_TOL)]
         else:

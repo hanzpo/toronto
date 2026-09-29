@@ -85,18 +85,34 @@ export class PatternPath {
     return out;
   }
 
+  /** like point(), but continues straight past either end of the path */
+  pointX(s: number, out: number[] | Float64Array = [0, 0, 0]): number[] | Float64Array {
+    if (s >= 0 && s <= this.length) return this.point(s, out);
+    const q = this.pose(s, 6, _px);
+    out[0] = q.e; out[1] = q.n; out[2] = q.z;
+    return out;
+  }
+
   /** position + heading/pitch from points ±half m around s (like the runtime) */
   pose(s: number, half = 6, out: Pose = { e: 0, n: 0, z: 0, heading: 0, pitch: 0 }): Pose {
-    const p = this.point(s, _a);
-    out.e = p[0]; out.n = p[1]; out.z = p[2];
-    const b = this.point(s - half, _b);
-    const c = this.point(s + half, _c);
-    const dx = c[0] - b[0], dy = c[1] - b[1];
+    // The direction window slides to stay inside the path, and positions past
+    // either end are extrapolated along it — at a terminus the cab (train
+    // front) can sit beyond the last shape vertex.
+    const len = this.length;
+    const w = Math.min(2 * half, len);
+    const sa = Math.min(Math.max(s - half, 0), len - w);
+    const b = this.point(sa, _b);
+    const c = this.point(sa + w, _c);
+    const dx = c[0] - b[0], dy = c[1] - b[1], dz = c[2] - b[2];
     const hd = Math.hypot(dx, dy);
     if (hd > 1e-3) {
       out.heading = Math.atan2(dy, dx);
-      out.pitch = Math.atan2(c[2] - b[2], hd);
+      out.pitch = Math.atan2(dz, hd);
     }
+    const p = this.point(s, _a);
+    const over = s > len ? s - len : s < 0 ? s : 0;
+    const k = over && w > 0 ? over / w : 0;
+    out.e = p[0] + dx * k; out.n = p[1] + dy * k; out.z = p[2] + dz * k;
     return out;
   }
 
@@ -174,3 +190,5 @@ export function pathForTrip(sys: TransitSystem, info: TripInfo): PatternPath | n
   (path as { stops: PathStop[] }).stops = stops;
   return path;
 }
+
+const _px: Pose = { e: 0, n: 0, z: 0, heading: 0, pitch: 0 };

@@ -519,7 +519,11 @@ export class InteractLayer implements Layer {
     const path = this.path;
     const tmp = [0, 0, 0];
     const rail = (sAt: number, lift: number): [number, number, number] => {
-      if (path) path.point(sAt, tmp); else { tmp[0] = pose.e; tmp[1] = pose.n; tmp[2] = pose.z; }
+      if (path) {
+        // pose() extrapolates past the path ends (train front at a terminus)
+        const q = path.pose(sAt, 6, _railPose);
+        tmp[0] = q.e; tmp[1] = q.n; tmp[2] = q.z;
+      } else { tmp[0] = pose.e; tmp[1] = pose.n; tmp[2] = pose.z; }
       // surface running: stay on top of the rendered terrain
       const g = H(tmp[0], tmp[1]);
       const z = tmp[2] < g - 4.5 ? tmp[2] : Math.max(tmp[2], g);
@@ -1168,3 +1172,5 @@ function esc(s: string) {
 }
 
 export { EB };
+
+const _railPose: Pose = { e: 0, n: 0, z: 0, heading: 0, pitch: 0 };
