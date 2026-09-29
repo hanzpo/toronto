@@ -5,7 +5,10 @@
    heights of the massing sections inside them; when the sections differ
    (tower on a podium) they become building parts, so the real stepped shape
    is kept.
-2. Everywhere else: large untagged buildings get a height estimate from the
+2. Overture Maps buildings with `height` / `num_floors` (aggregated from
+   OSM, Esri Community Maps and others) fill remaining untagged buildings
+   anywhere in the region (raw/overture/buildings_heights.parquet, see run.sh).
+3. Large untagged buildings still left get a height estimate from the
    Copernicus surface model (DSM minus the building-free terrain).
 
 Applied to the extracted OSM building arrays before tiling.
@@ -96,6 +99,27 @@ def enrich(d: dict) -> dict:
                     new_parts.append((b, mgeoms[mi], float(h)))
                 n_split += 1
         print(f"  massing: {len(mgeoms):,} sections -> {n_set:,} heights, {n_split:,} buildings split into parts")
+
+    # Overture heights for the rest
+    ov = geo.RAW / "overture" / "buildings_heights.parquet"
+    if ov.exists() and ov.stat().st_size > 0:
+        import duckdb
+
+        rows = duckdb.sql(f"select wkb, height, num_floors from '{ov}'").fetchnumpy()
+        og = shapely.from_wkb(np.array([bytes(b) for b in rows["wkb"]], dtype=object))
+        tr = Transformer.from_crs("EPSG:4326", geo.PROJ, always_xy=True)
+        og = shapely.transform(og, lambda c: np.column_stack(tr.transform(c[:, 0], c[:, 1])))
+        oh = np.asarray(rows["height"], dtype=np.float64)
+        fl = np.asarray(rows["num_floors"], dtype=np.float64)
+        oh = np.where(np.isnan(oh), fl * 3.3, oh)
+        pairs = tree.query(shapely.point_on_surface(og), predicate="within")
+        todo = np.isnan(d["height"][cand[pairs[1]]]) & (oh[pairs[0]] > 2) & (oh[pairs[0]] < 400)
+        best = {}
+        for mi, ci in zip(pairs[0][todo], pairs[1][todo]):
+            best[ci] = max(best.get(ci, 0.0), oh[mi])
+        for ci, h in best.items():
+            d["height"][cand[ci]] = h
+        print(f"  overture: {len(og):,} buildings with heights -> {len(best):,} OSM buildings filled")
 
     # DSM estimate for large buildings still without a height
     terrain = get_terrain()

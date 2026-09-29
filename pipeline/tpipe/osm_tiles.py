@@ -597,6 +597,8 @@ def write_manifest(tiles, region, partial):
     muni = json.loads((geo.WORK / "region.json").read_text())["municipalities"]
     manifest = {
         "version": 1,
+        # bumps on every build; clients append ?v=build to tile URLs (cache busting)
+        "build": int(time.time()),
         "projection": geo.PROJ,
         "origin": [geo.ORIGIN_LAT, geo.ORIGIN_LON],
         "datum": geo.DATUM_M,

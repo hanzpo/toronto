@@ -26,9 +26,16 @@ for lat in 42 43 44; do for lon in 081 080 079; do
 done; done
 uv run python -m tpipe.terrain
 
-# 3. Region, OSM extraction, tile pyramid, transit, landmarks
+# 3. Building heights: City of Toronto 3D Massing + Overture Maps buildings
+mkdir -p raw/massing raw/overture
+[ -f raw/massing/massing.zip ] || curl -sL -o raw/massing/massing.zip "https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/387b2e3b-2a76-4199-8b3b-0b7d22e2ec10/resource/667237d6-4d3c-4cf3-8cb7-e91c48d59375/download/3dmassingshapefile_2025_wgs84.zip"
+(cd raw/massing && unzip -o -q massing.zip)
+[ -s raw/overture/buildings_heights.parquet ] || uv run python -m tpipe.overture
+
+# 4. Region, OSM extraction, tile pyramid, transit, landmarks
 uv run python -m tpipe.region
 uv run python -m tpipe.osm_extract
 uv run python -m tpipe.osm_tiles
+uv run python -m tpipe.graph
 uv run python -m tpipe.transit
 uv run python -m tpipe.landmarks

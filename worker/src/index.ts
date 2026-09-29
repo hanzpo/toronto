@@ -27,18 +27,23 @@ function withHeaders(res: Response, extra: Record<string, string> = {}): Respons
   return out
 }
 
-function loadIndex(env: Env, pack: string) {
-  let p = packIndex.get(pack)
+// Keyed by pack + data build (?v=), so re-uploaded packs are picked up.
+function loadIndex(env: Env, pack: string, version: string) {
+  const key = `${pack}@${version}`
+  let p = packIndex.get(key)
   if (!p) {
     p = env.DATA.get(`packs/${pack}.idx.json`).then((o) => (o ? o.json() : null))
-    packIndex.set(pack, p)
+    packIndex.set(key, p)
   }
   return p
 }
 
 async function serveData(req: Request, env: Env, ctx: ExecutionContext, path: string): Promise<Response> {
+  // JSON (manifest, transit index, landmarks) is small and changes with each
+  // data upload: serve it fresh. Binary tiles are cached per ?v=build URL.
+  const cacheable = !path.endsWith('.json')
   const cache = caches.default
-  const hit = await cache.match(req)
+  const hit = cacheable ? await cache.match(req) : undefined
   if (hit) return hit
 
   let res: Response
@@ -49,7 +54,7 @@ async function serveData(req: Request, env: Env, ctx: ExecutionContext, path: st
     const [lv, tx, ty] = [Number(m[1]), Number(m[2]), Number(m[3])]
     const f = 4 ** (2 - lv)
     const pack = `${g ? 'g' : ''}${Math.floor(tx / f)}_${Math.floor(ty / f)}`
-    const idx = await loadIndex(env, pack)
+    const idx = await loadIndex(env, pack, new URL(req.url).searchParams.get('v') ?? '')
     const entry = idx?.[`${lv}/${tx}_${ty}`]
     if (!entry) return withHeaders(new Response('not found', { status: 404 }))
     const obj = await env.DATA.get(`packs/${pack}.pack`, { range: { offset: entry[0], length: entry[1] } })
@@ -62,11 +67,11 @@ async function serveData(req: Request, env: Env, ctx: ExecutionContext, path: st
     if (!obj) return withHeaders(new Response('not found', { status: 404 }))
     const type = path.endsWith('.json') ? 'application/json' : 'application/octet-stream'
     res = new Response(obj.body, {
-      headers: { 'Content-Type': type, 'Cache-Control': 'public, max-age=3600', ETag: obj.httpEtag },
+      headers: { 'Content-Type': type, 'Cache-Control': cacheable ? 'public, max-age=3600' : 'no-cache', ETag: obj.httpEtag },
     })
   }
   res = withHeaders(res)
-  ctx.waitUntil(cache.put(req, res.clone()))
+  if (cacheable) ctx.waitUntil(cache.put(req, res.clone()))
   return res
 }
 

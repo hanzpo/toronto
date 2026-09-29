@@ -10,6 +10,8 @@ import { useApp } from '../../state/store';
 
 export interface Manifest {
   version: number;
+  /** data build id; appended to tile URLs as ?v= for cache busting */
+  build?: number;
   tileSize: Record<string, number>;
   terrainGrid: Record<string, number>;
   groundRes: number;
@@ -98,7 +100,7 @@ export class TileManager {
   }
 
   async init() {
-    const r = await fetch(`${this.dataRoot}/manifest.json`);
+    const r = await fetch(`${this.dataRoot}/manifest.json`, { cache: 'no-cache' });
     if (!r.ok) throw new Error(`manifest: HTTP ${r.status}`);
     this.manifest = await r.json();
     for (const L of ['0', '1', '2']) {
@@ -305,7 +307,7 @@ export class TileManager {
       this.workerLoad[wi]++;
       const L = String(t.L);
       this.workers[wi].postMessage({
-        type: 'load', id, url: `${this.dataRoot}/tiles/${t.L}/${t.tx}_${t.ty}.bin.gz`,
+        type: 'load', id, url: `${this.dataRoot}/tiles/${t.L}/${t.tx}_${t.ty}.bin.gz${this.manifest.build ? `?v=${this.manifest.build}` : ''}`,
         level: t.L, tx: t.tx, ty: t.ty, size: t.S, grid: this.manifest.terrainGrid[L] ?? 33,
       } satisfies WorkerIn);
     }
