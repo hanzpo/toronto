@@ -31,6 +31,9 @@ let cacheVal: TorontoParts | null = null;
 export function torontoParts(ms: number): TorontoParts {
   const key = Math.floor(ms / 1000);
   if (key === cacheKey && cacheVal) {
+    // the calendar parts are cached per second, but the sub-second fraction
+    // must stay live — otherwise everything driven by secOfDay moves in 1 s steps
+    cacheVal.secOfDay = cacheVal.hour * 3600 + cacheVal.minute * 60 + cacheVal.second + (ms - key * 1000) / 1000;
     return cacheVal;
   }
   const p: Record<string, string> = {};
@@ -39,7 +42,7 @@ export function torontoParts(ms: number): TorontoParts {
   cacheVal = {
     year: +p.year, month: +p.month, day: +p.day, hour, minute, second,
     weekday: WD[p.weekday] ?? 0,
-    secOfDay: hour * 3600 + minute * 60 + second + (ms % 1000) / 1000,
+    secOfDay: hour * 3600 + minute * 60 + second + (ms - key * 1000) / 1000,
   };
   cacheKey = key;
   return cacheVal;
