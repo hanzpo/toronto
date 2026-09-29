@@ -59,7 +59,7 @@ export class Engine {
   lastDrawCalls = 0;
   lastTriangles = 0;
 
-  private dataRoot: string;
+  readonly dataRoot: string;
   constructor(container: HTMLElement, dataRoot: string) {
     this.dataRoot = dataRoot;
     this.container = container;

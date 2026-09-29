@@ -3,6 +3,8 @@ import { Engine } from './engine/Engine';
 import { config, resolveDataRoot } from './engine/config';
 import { DebugOverlayLayer } from './render/overlay/DebugOverlayLayer';
 import { LabelsLayer } from './render/LabelsLayer';
+import { LandmarksLayer } from './layers/LandmarksLayer';
+import { TransitLayer } from './layers/TransitLayer';
 import { setEngine } from './engine/instance';
 import { Hud } from './ui/Hud';
 import { clock } from './state/clock';
@@ -24,6 +26,10 @@ export default function App() {
         await engine.init();
         if (cancelled) { engine.dispose(); return; }
         await engine.addLayer(new LabelsLayer());
+        await engine.addLayer(new LandmarksLayer());
+        const transit = new TransitLayer(engine.dataRoot);
+        await engine.addLayer(transit);
+        Object.assign(window as object, { __transit: transit });
         if (config.debug) await engine.addLayer(new DebugOverlayLayer());
         setEngine(engine);
         Object.assign(window as object, { __engine: engine, __clock: clock, __app: useApp });
