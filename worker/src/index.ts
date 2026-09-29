@@ -59,8 +59,13 @@ async function serveData(req: Request, env: Env, ctx: ExecutionContext, path: st
     if (!entry) return withHeaders(new Response('not found', { status: 404 }))
     const obj = await env.DATA.get(`packs/${pack}.pack`, { range: { offset: entry[0], length: entry[1] } })
     if (!obj) return withHeaders(new Response('not found', { status: 404 }))
+    // URLs carry ?v=<data build>, so a given URL never changes: cache for a year
+    const versioned = new URL(req.url).searchParams.has('v')
     res = new Response(obj.body, {
-      headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'public, max-age=86400' },
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Cache-Control': versioned ? 'public, max-age=31536000, immutable' : 'public, max-age=3600',
+      },
     })
   } else {
     const obj = await env.DATA.get(path.slice(1))

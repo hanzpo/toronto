@@ -1,18 +1,11 @@
 // Tile worker: fetch + gunzip + decode TBN1 + build transferable geometry.
 import { decodeTbn } from '../data/tbn';
 
-/** gunzip unless the server/browser already decoded it (Content-Encoding: gzip) */
-async function bodyBytes(res: Response): Promise<ArrayBuffer> {
-  const raw = await res.arrayBuffer();
-  const u = new Uint8Array(raw, 0, Math.min(2, raw.byteLength));
-  if (u[0] !== 0x1f || u[1] !== 0x8b) return raw;
-  const ds = new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'));
-  return new Response(ds).arrayBuffer();
-}
 import { buildBuildings, buildRail, buildRoads, buildTerrain, extractHouses, TerrainSampler, type MeshBuf, type TileMeshes } from './meshing';
 
 export type WorkerIn =
-  | { type: 'config'; suppress: number[] }
+  | { type: 'config'; suppress: number[]; build: number }
+  | { type: 'prefetch'; url: string }
   | { type: 'load'; id: number; url: string; level: number; tx: number; ty: number; size: number; grid: number }
   | { type: 'cancel'; id: number };
 
@@ -20,9 +13,53 @@ export type WorkerOut =
   | { type: 'done'; id: number; result: TileMeshes; ms: { fetch: number; mesh: number } }
   | { type: 'empty'; id: number }
   | { type: 'cancelled'; id: number }
+  | { type: 'prefetched'; url: string }
   | { type: 'error'; id: number; message: string };
 
 let suppress = new Set<number>();
+
+// ---------------------------------------------------------------- persistent tile cache
+// Compressed tile bytes live in Cache Storage keyed by data build, so revisits
+// and reloads skip the network entirely; old builds are dropped on startup.
+const CACHE_PREFIX = 'tiles-';
+let cacheName = `${CACHE_PREFIX}0`;
+let cacheP: Promise<Cache | null> = Promise.resolve(null);
+const inflight = new Map<string, Promise<ArrayBuffer | null>>();
+
+function openCache(build: number) {
+  cacheName = `${CACHE_PREFIX}${build}`;
+  if (typeof caches === 'undefined') return;
+  cacheP = caches.open(cacheName).catch(() => null);
+  caches.keys().then((ks) => ks.forEach((k) => k.startsWith(CACHE_PREFIX) && k !== cacheName && caches.delete(k))).catch(() => {});
+}
+
+/** Compressed bytes for a tile URL (cache → network), or null on 404. Network
+ * downloads are shared between a prefetch and a real load of the same tile
+ * and are never aborted, so bytes already in flight end up cached. */
+function tileBytes(url: string): Promise<ArrayBuffer | null> {
+  let p = inflight.get(url);
+  if (p) return p;
+  p = (async () => {
+    const cache = await cacheP;
+    const hit = cache ? await cache.match(url).catch(() => undefined) : undefined;
+    if (hit) return hit.arrayBuffer();
+    const res = await fetch(url);
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
+    const buf = await res.arrayBuffer();
+    if (cache) cache.put(url, new Response(buf.slice(0), { headers: { 'Content-Type': 'application/octet-stream' } })).catch(() => {});
+    return buf;
+  })().finally(() => inflight.delete(url));
+  inflight.set(url, p);
+  return p;
+}
+
+async function gunzipBytes(raw: ArrayBuffer): Promise<ArrayBuffer> {
+  const u = new Uint8Array(raw, 0, Math.min(2, raw.byteLength));
+  if (u[0] !== 0x1f || u[1] !== 0x8b) return raw;
+  const ds = new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'));
+  return new Response(ds).arrayBuffer();
+}
 const jobs = new Map<number, AbortController>();
 
 function transfers(m: MeshBuf | null, out: Transferable[]) {
@@ -35,6 +72,11 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
   const msg = ev.data;
   if (msg.type === 'config') {
     suppress = new Set(msg.suppress);
+    openCache(msg.build);
+    return;
+  }
+  if (msg.type === 'prefetch') {
+    tileBytes(msg.url).catch(() => null).finally(() => post({ type: 'prefetched', url: msg.url }));
     return;
   }
   if (msg.type === 'cancel') {
@@ -46,10 +88,10 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
   jobs.set(id, ac);
   const t0 = performance.now();
   try {
-    const res = await fetch(url, { signal: ac.signal });
-    if (res.status === 404) { post({ type: 'empty', id }); return; }
-    if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
-    const buf = await bodyBytes(res);
+    const raw = await tileBytes(url);
+    if (ac.signal.aborted) { post({ type: 'cancelled', id }); return; }
+    if (!raw) { post({ type: 'empty', id }); return; }
+    const buf = await gunzipBytes(raw);
     if (ac.signal.aborted) { post({ type: 'cancelled', id }); return; }
     const t1 = performance.now();
     const { arrays: a } = decodeTbn(buf);

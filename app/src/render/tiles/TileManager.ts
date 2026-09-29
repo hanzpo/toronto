@@ -53,12 +53,26 @@ export interface Tile {
   kids: Tile[] | null;
   counts: TileMeshes['counts'] | null;
   retryAt: number;
+  /** LOD hysteresis: currently refined into children */
+  refined: boolean;
 }
 
 const key = (L: number, tx: number, ty: number) => `${L}/${tx}/${ty}`;
 
+function meshBytes(r: TileMeshes): number {
+  let b = 0;
+  for (const m of [r.terrain, r.buildings, r.roads, r.rail]) {
+    if (m) b += m.position.byteLength + m.normal.byteLength + m.index.byteLength + (m.color?.byteLength ?? 0);
+  }
+  return b;
+}
+
 /** Distance (m) below which a tile of level L is refined into its children. */
 const REFINE_K: Record<number, number> = { 2: 0.85, 1: 1.0 };
+/** a refined tile only merges back once 25% further away than it refined (no LOD thrash) */
+const HYSTERESIS = 1.25;
+/** max geometry bytes turned into GPU objects per frame (uploads happen at render) */
+const UPLOAD_BUDGET = 12 * 1024 * 1024;
 
 const MAX_BYTES = 900 * 1024 * 1024;
 const MAX_TILES = 1400;
@@ -81,6 +95,11 @@ export class TileManager {
   private box = new THREE.Box3();
   private now = 0;
   private requests: Tile[] = [];
+  // prefetch: speculative network fetches into the worker's Cache Storage
+  private prefetched = new Set<string>();
+  private prefetchInFlight = 0;
+  private vel = { e: 0, n: 0, h: 0, lastE: NaN, lastN: NaN, lastH: NaN };
+  private pfList: { t: Tile; d: number }[] = [];
   readonly buildingMat = vertexColorMaterial('buildings', { emissiveWindows: true });
   readonly roadMat = vertexColorMaterial('roads', { pull: 0.0009, pullConst: 0.25 });
   readonly railMat = vertexColorMaterial('rail', { pull: 0.0011, pullConst: 0.35 });
@@ -90,6 +109,8 @@ export class TileManager {
   /** time spent building GPU objects on the main thread (last 50 tiles) */
   buildMs: number[] = [];
   onFirstReady: (() => void) | null = null;
+  /** set by the engine: compile a new page's material off the critical path */
+  warm: ((obj: THREE.Object3D) => void) | null = null;
   lodScale = 1;
 
   dataRoot: string;
@@ -111,7 +132,7 @@ export class TileManager {
           key: key(l, tx, ty), L: l, tx, ty, S, state: 'none', jobId: 0, group: null, terrain: null,
           buildings: null, roads: null, rail: null, heights: null, grid: 0, minH: 0, maxH: 120,
           houses: null, housesShown: false, page: null, layer: -1, bytes: 0, lastUsed: 0, drawn: false,
-          requestedAt: 0, priority: 0, kids: null, counts: null, retryAt: 0,
+          requestedAt: 0, priority: 0, kids: null, counts: null, retryAt: 0, refined: false,
         };
         this.tiles.set(t.key, t);
         if (l === 2) this.roots.push(t);
@@ -133,7 +154,7 @@ export class TileManager {
     for (let i = 0; i < n; i++) {
       const w = new Worker(new URL('../../workers/tileWorker.ts', import.meta.url), { type: 'module' });
       w.onmessage = (ev: MessageEvent<WorkerOut>) => this.onWorker(i, ev.data);
-      w.postMessage({ type: 'config', suppress } satisfies WorkerIn);
+      w.postMessage({ type: 'config', suppress, build: this.manifest.build ?? 0 } satisfies WorkerIn);
       this.workers.push(w);
       this.workerLoad.push(0);
     }
@@ -188,6 +209,7 @@ export class TileManager {
     this.drawnList = [];
     this.requests.length = 0;
     for (const t of this.roots) this.visit(t, E, N, H);
+    this.velocity(ctx, E, N);
 
     // visibility transitions
     for (const t of prevDrawn) t.drawn = false;
@@ -216,6 +238,7 @@ export class TileManager {
     this.houses.setVisible(layers.houses);
 
     this.dispatch();
+    this.prefetch(E, N, H);
     this.consumeResults();
     this.evict();
     this.houses.flush();
@@ -244,39 +267,88 @@ export class TileManager {
     this.requests.push(t);
   }
 
-  private done(t: Tile) {
-    return t.state === 'ready' || t.state === 'empty' || t.state === 'error';
-  }
-
-  private visit(t: Tile, E: number, N: number, H: number) {
+  /**
+   * Hole-free LOD selection. Returns true when `t`'s area is fully covered by
+   * drawn tiles. A tile refines only if every *visible* child subtree can be
+   * drawn; otherwise the partial children are rolled back and the tile itself
+   * (or, if it isn't loaded, its nearest loaded ancestor) is drawn instead.
+   * Off-screen children don't block refinement — they load at low priority so
+   * rotating the camera rarely reveals anything missing.
+   */
+  private visit(t: Tile, E: number, N: number, H: number): boolean {
     t.lastUsed = this.now;
     const d = this.tileDist(t, E, N, H);
     const vis = this.inFrustum(t);
     const kids = t.L > 0 ? this.kidsOf(t) : [];
-    const refine = kids.length > 0 && d < t.S * (REFINE_K[t.L] ?? 0) * this.lodScale;
-    if (refine) {
-      let allReady = true;
-      for (const k of kids) {
-        if (!this.done(k)) {
-          allReady = false;
-          this.request(k, this.tileDist(k, E, N, H), vis && this.inFrustum(k));
-        }
-      }
-      if (allReady) {
-        for (const k of kids) this.visit(k, E, N, H);
-        return;
-      }
-      if (t.state === 'ready') { this.drawnList.push(t); return; }
-      this.request(t, d, vis);
-      for (const k of kids) if (k.state === 'ready') this.drawnList.push(k);
-      return;
+    if (kids.length) {
+      const k = t.S * (REFINE_K[t.L] ?? 0) * this.lodScale;
+      t.refined = d < (t.refined ? k * HYSTERESIS : k);
+    } else {
+      t.refined = false;
     }
-    if (t.state === 'ready') { this.drawnList.push(t); return; }
+    if (t.refined) {
+      const mark = this.drawnList.length;
+      let ok = true;
+      for (const c of kids) {
+        if (!this.visit(c, E, N, H) && this.inFrustum(c)) ok = false;
+      }
+      if (ok) return true;
+      this.drawnList.length = mark; // partial refinement → fall back to this tile
+    }
+    if (t.state === 'ready') { this.drawnList.push(t); return true; }
+    if (t.state === 'empty') return true;
     this.request(t, d, vis);
-    // zooming out before the parent is loaded: keep children to avoid holes
-    for (const k of kids) {
-      if (k.state === 'ready') { k.lastUsed = this.now; this.drawnList.push(k); }
+    return false;
+  }
+
+  /** smoothed camera velocity (m/s) for predictive prefetching */
+  private velocity(ctx: FrameContext, E: number, N: number) {
+    const v = this.vel, H = ctx.cameraPos.y;
+    if (!Number.isNaN(v.lastE) && ctx.dt > 0) {
+      const a = Math.min(1, ctx.dt * 4);
+      v.e += ((E - v.lastE) / ctx.dt - v.e) * a;
+      v.n += ((N - v.lastN) / ctx.dt - v.n) * a;
+      v.h += ((H - v.lastH) / ctx.dt - v.h) * a;
     }
+    v.lastE = E; v.lastN = N; v.lastH = H;
+  }
+
+  /**
+   * When the loader is idle, warm the cache with tiles the camera is likely to
+   * need next: the LOD selection re-run with a wider refine range around the
+   * position the camera will reach in ~2 s. Only the compressed bytes are
+   * fetched (into Cache Storage); meshing happens when a tile is really needed.
+   */
+  private prefetch(E: number, N: number, H: number) {
+    const cap = this.workers.length * 2;
+    if (this.prefetchInFlight >= cap) return;
+    let pending = 0;
+    for (const t of this.requests) if (t.state === 'none') pending++;
+    if (pending > 0 || this.jobs.size > this.workers.length) return;
+    const v = this.vel, ahead = 2.0;
+    const pE = E + v.e * ahead, pN = N + v.n * ahead, pH = Math.max(20, H + v.h * ahead);
+    this.pfList.length = 0;
+    const walk = (t: Tile) => {
+      const d = this.tileDist(t, pE, pN, pH);
+      const kids = t.L > 0 ? this.kidsOf(t) : [];
+      if (t.state !== 'ready' && t.state !== 'loading' && t.state !== 'empty' && !this.prefetched.has(t.key)) {
+        this.pfList.push({ t, d: d / (1 + t.L * 1.5) });
+      }
+      if (kids.length && d < t.S * (REFINE_K[t.L] ?? 0) * this.lodScale * 1.6) for (const c of kids) walk(c);
+    };
+    for (const r of this.roots) walk(r);
+    this.pfList.sort((a, b) => a.d - b.d);
+    for (const { t } of this.pfList) {
+      if (this.prefetchInFlight >= cap) break;
+      this.prefetched.add(t.key);
+      this.prefetchInFlight++;
+      const wi = (this.jobSeq++) % this.workers.length;
+      this.workers[wi].postMessage({ type: 'prefetch', url: this.tileUrl(t) } satisfies WorkerIn);
+    }
+  }
+
+  private tileUrl(t: Tile) {
+    return `${this.dataRoot}/tiles/${t.L}/${t.tx}_${t.ty}.bin.gz${this.manifest.build ? `?v=${this.manifest.build}` : ''}`;
   }
 
   private dispatch() {
@@ -307,13 +379,14 @@ export class TileManager {
       this.workerLoad[wi]++;
       const L = String(t.L);
       this.workers[wi].postMessage({
-        type: 'load', id, url: `${this.dataRoot}/tiles/${t.L}/${t.tx}_${t.ty}.bin.gz${this.manifest.build ? `?v=${this.manifest.build}` : ''}`,
+        type: 'load', id, url: this.tileUrl(t),
         level: t.L, tx: t.tx, ty: t.ty, size: t.S, grid: this.manifest.terrainGrid[L] ?? 33,
       } satisfies WorkerIn);
     }
   }
 
   private onWorker(wi: number, m: WorkerOut) {
+    if (m.type === 'prefetched') { this.prefetchInFlight--; return; }
     const t = this.jobs.get(m.id);
     if (!t) return; // cancelled
     this.jobs.delete(m.id);
@@ -335,13 +408,39 @@ export class TileManager {
 
   private consumeResults() {
     const t0 = performance.now();
-    while (this.results.length && performance.now() - t0 < 6) {
+    let bytes = 0;
+    // coarse + near first: those are what fill holes
+    if (this.results.length > 1) this.results.sort((a, b) => b.tile.L - a.tile.L || a.tile.priority - b.tile.priority);
+    if (this.results.length) this.ensureSparePage();
+    while (this.results.length && performance.now() - t0 < 6 && bytes < UPLOAD_BUDGET) {
       const { tile, res } = this.results.shift()!;
+      bytes += meshBytes(res);
       const s = performance.now();
       this.build(tile, res);
       this.buildMs.push(performance.now() - s);
       if (this.buildMs.length > 50) this.buildMs.shift();
     }
+  }
+
+  /** New ground page; its material is compiled right away (not on first draw). */
+  private addPage(): GroundPage {
+    const page = new GroundPage();
+    this.pages.push(page);
+    if (this.warm) {
+      const g = new THREE.PlaneGeometry(1, 1);
+      const m = new THREE.Mesh(g, page.material);
+      m.userData.groundLayer = 0;
+      m.userData.tileSize = 1024;
+      this.warm(m);
+    }
+    return page;
+  }
+
+  /** keep a spare page ahead of demand so allocating never builds a shader mid-zoom */
+  private ensureSparePage() {
+    let free = 0;
+    for (const p of this.pages) free += p.free.length;
+    if (free < 64) this.addPage();
   }
 
   private geometry(m: MeshBuf, sphere: THREE.Sphere): THREE.BufferGeometry {
@@ -377,7 +476,7 @@ export class TileManager {
 
     // terrain
     let page = this.pages.find((p) => p.free.length > 0);
-    if (!page) { page = new GroundPage(); this.pages.push(page); }
+    if (!page) page = this.addPage();
     t.page = page;
     t.layer = page.alloc(r.ground);
     const terrain = new THREE.Mesh(this.geometry(r.terrain, sphere), page.material);
@@ -441,7 +540,7 @@ export class TileManager {
     if (this.bytes < MAX_BYTES && this.readyCount < MAX_TILES) return;
     const cands: Tile[] = [];
     for (const t of this.tiles.values()) {
-      if (t.state === 'ready' && !t.drawn && this.now - t.lastUsed > 0.5) cands.push(t);
+      if (t.state === 'ready' && t.L < 2 && !t.drawn && this.now - t.lastUsed > 0.5) cands.push(t);
     }
     cands.sort((a, b) => a.lastUsed - b.lastUsed);
     for (const t of cands) {

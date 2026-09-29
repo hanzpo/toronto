@@ -498,25 +498,28 @@ def build_tile(level, tx, ty):
 
 
 def work_l2(key):
+    """Write one L2 tile and its descendants. Children come in complete sets
+    of 16: a tile either has no children or all of them (filling cells just
+    outside the region), so refining a tile never leaves holes."""
     tx2, ty2 = key
     out = {0: [], 1: [], 2: []}
     size = build_tile(2, tx2, ty2)
     out[2].append((tx2, ty2))
     reg = G["region_prep"]
+    b2 = shapely.box(tx2 * S2, ty2 * S2, (tx2 + 1) * S2, (ty2 + 1) * S2)
+    if not reg.intersects(b2):
+        return key, out, size
     for j1 in range(4):
         for i1 in range(4):
             tx1, ty1 = tx2 * 4 + i1, ty2 * 4 + j1
+            size += build_tile(1, tx1, ty1)
+            out[1].append((tx1, ty1))
             b1 = shapely.box(tx1 * S1, ty1 * S1, (tx1 + 1) * S1, (ty1 + 1) * S1)
             if not reg.intersects(b1):
                 continue
-            size += build_tile(1, tx1, ty1)
-            out[1].append((tx1, ty1))
             for j0 in range(4):
                 for i0 in range(4):
                     tx0, ty0 = tx1 * 4 + i0, ty1 * 4 + j0
-                    b0 = shapely.box(tx0 * S0, ty0 * S0, (tx0 + 1) * S0, (ty0 + 1) * S0)
-                    if not reg.intersects(b0):
-                        continue
                     size += build_tile(0, tx0, ty0)
                     out[0].append((tx0, ty0))
     return key, out, size

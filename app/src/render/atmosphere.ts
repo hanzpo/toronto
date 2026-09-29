@@ -97,17 +97,26 @@ export class Atmosphere {
 
     // lights
     this.sun.color.copy(U.sunColor.value);
-    this.sun.intensity = 2.6 * day * (1 - a * 0.5);
-    this.hemi.intensity = 0.25 + 1.05 * day;
+    // strong key light, modest sky fill: sunlit vs shaded faces and shadows read clearly
+    this.sun.intensity = 3.1 * day * (1 - a * 0.5);
+    this.hemi.intensity = 0.3 + 0.55 * day;
     this.hemi.color.setRGB(0.85 + 0.1 * day, 0.9 + 0.05 * day, 1.0);
     this.hemi.groundColor.setRGB(0.5 * day + 0.08, 0.48 * day + 0.08, 0.42 * day + 0.1);
     if (day < 0.05) { this.hemi.color.setRGB(0.45, 0.52, 0.75); this.hemi.intensity = 0.45; }
 
-    // shadow frustum around the focus point; only when zoomed in and the sun is up
+    // Shadow frustum around the focus point. castShadow is never toggled:
+    // flipping it rebuilds every lit material's shader (a multi-100 ms stall
+    // when zooming across the cutoff). Instead the shadow fades out by
+    // altitude / sun elevation and the shadow pass stops rendering when unseen.
     const focus = ctx.focus;
-    const wantShadows = this.shadowsEnabled && ctx.altitude < 2500 && elev > 0.03;
-    this.sun.castShadow = wantShadows;
-    const r = THREE.MathUtils.clamp(ctx.altitude * 1.2 + 150, 200, 1800);
+    const fade = this.shadowsEnabled
+      ? (1 - THREE.MathUtils.smoothstep(ctx.altitude, 1800, 2800)) * THREE.MathUtils.smoothstep(elev, 0.02, 0.08)
+      : 0;
+    this.sun.shadow.intensity = fade;
+    this.sun.shadow.autoUpdate = fade > 0.001;
+    // frustum radius in discrete steps: continuous resizing makes shadows shimmer
+    const want = THREE.MathUtils.clamp(ctx.altitude * 1.2 + 150, 200, 1800);
+    const r = Math.min(1800, 200 * Math.pow(1.25, Math.ceil(Math.log(want / 200) / Math.log(1.25))));
     const sc = this.sun.shadow.camera as THREE.OrthographicCamera;
     if (sc.right !== r) {
       sc.left = -r; sc.right = r; sc.top = r; sc.bottom = -r;

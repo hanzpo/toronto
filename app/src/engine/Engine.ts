@@ -56,6 +56,8 @@ export class Engine {
   private disposed = false;
   private picker = new THREE.Raycaster();
   private ndc = new THREE.Vector2();
+  /** frame timing breakdown; frames over 40 ms are kept in `long` (debugging hitches) */
+  readonly perf = { parts: [] as [string, number][], long: [] as { at: number; ms: number; parts: string }[] };
   lastDrawCalls = 0;
   lastTriangles = 0;
 
@@ -105,6 +107,11 @@ export class Engine {
     this.tiles = new TileManager(this.dataRoot);
     this.tiles.lodScale = config.lodScale;
     await this.tiles.init();
+    this.tiles.warm = (obj) => {
+      const holder = new THREE.Group();
+      holder.add(obj);
+      renderer.compileAsync(holder, this.camera, this.scene).catch(() => {}).finally(() => (obj as THREE.Mesh).geometry?.dispose());
+    };
     this.scene.add(this.tiles.root);
     this.scene.add(this.overlayRoot);
 
@@ -240,10 +247,22 @@ export class Engine {
     sunDirection(ctx.simMs, this.sun);
     this.atmosphere.shadowsEnabled = st.shadows;
     this.atmosphere.update(ctx, this.sun);
+    const perf = this.perf;
+    let t = performance.now();
+    perf.parts.length = 0;
+    const mark = (name: string) => { const n = performance.now(); perf.parts.push([name, n - t]); t = n; };
+    mark('pre');
     this.tiles.update(ctx);
-    for (const l of this.layers) l.update(ctx);
+    mark('tiles');
+    for (const l of this.layers) { l.update(ctx); mark(l.id); }
 
     this.renderer.render(this.scene, this.camera);
+    mark('render');
+    const total = performance.now() - now;
+    if (total > 40) {
+      perf.long.push({ at: ctx.time, ms: total, parts: perf.parts.filter((p) => p[1] > 2).map(([k, v]) => `${k}:${v.toFixed(0)}`).join(' ') });
+      if (perf.long.length > 200) perf.long.shift();
+    }
     const info = this.renderer.info.render;
     this.lastDrawCalls = info.drawCalls;
     this.lastTriangles = info.triangles;

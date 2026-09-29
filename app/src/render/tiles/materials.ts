@@ -71,7 +71,9 @@ export const baseTone = Fn(([c]: [N]) => {
 
 // ---------------------------------------------------------------------------- terrain
 
-export const GROUND_LAYERS = 64; // layers per page (DataArrayTexture)
+// Layers per page (DataArrayTexture; 256 is WebGPU's guaranteed minimum).
+// Every page has its own material, so fewer, larger pages mean fewer shader builds.
+export const GROUND_LAYERS = 256;
 
 export class GroundPage {
   tex: THREE.DataArrayTexture;
