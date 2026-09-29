@@ -1,0 +1,32 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_sim_free: (a: number, b: number) => void;
+export const sim_add_tile: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number, a1: number, b1: number, c1: number) => void;
+export const sim_car_count: (a: number) => number;
+export const sim_car_ptr: (a: number) => number;
+export const sim_has_tile: (a: number, b: number, c: number) => number;
+export const sim_major_ratios: (a: number, b: number, c: number) => [number, number];
+export const sim_measured: (a: number) => [number, number];
+export const sim_new: (a: number, b: number, c: number) => number;
+export const sim_ped_count: (a: number) => number;
+export const sim_ped_ptr: (a: number) => number;
+export const sim_player_state: (a: number) => [number, number];
+export const sim_player_step: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+export const sim_release_player: (a: number) => void;
+export const sim_remove_tile: (a: number, b: number, c: number) => void;
+export const sim_set_fast: (a: number, b: number) => void;
+export const sim_set_majors: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
+export const sim_set_stops: (a: number, b: number, c: number) => void;
+export const sim_set_time: (a: number, b: number, c: number) => void;
+export const sim_set_view: (a: number, b: number, c: number, d: number, e: number) => void;
+export const sim_spawn_player: (a: number, b: number, c: number, d: number) => number;
+export const sim_stats: (a: number) => [number, number];
+export const sim_step: (a: number, b: number) => void;
+export const sim_take_over: (a: number, b: number) => number;
+export const sim_tile_count: (a: number) => number;
+export const sim_write_output: (a: number, b: number, c: number) => void;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __wbindgen_start: () => void;
