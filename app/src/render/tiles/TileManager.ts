@@ -56,7 +56,7 @@ export interface Tile {
 const key = (L: number, tx: number, ty: number) => `${L}/${tx}/${ty}`;
 
 /** Distance (m) below which a tile of level L is refined into its children. */
-const REFINE_K: Record<number, number> = { 2: 0.85, 1: 0.72 };
+const REFINE_K: Record<number, number> = { 2: 0.85, 1: 1.0 };
 
 const MAX_BYTES = 900 * 1024 * 1024;
 const MAX_TILES = 1400;
