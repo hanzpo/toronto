@@ -3,6 +3,9 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp, type AnalyticsKey, type BaseLayerKey } from '../state/store';
 import { SPEEDS, clock, dayTypeOf, type DayType } from '../state/clock';
 import { getEngine } from '../engine/instance';
+import { Panels } from './panels/Panels';
+import { SearchBox } from './panels/Search';
+import { useInteract } from '../interact/state';
 
 // ---------------------------------------------------------------------------- helpers
 
@@ -124,7 +127,7 @@ const ANALYTICS: { k: AnalyticsKey; label: string; color: string; sub?: string }
   { k: 'via', label: 'VIA Rail', color: 'var(--via)' },
   { k: 'bus', label: 'Buses', color: 'var(--bus)' },
   { k: 'vehicles', label: 'Live vehicles', color: 'var(--live)', sub: 'schedule positions' },
-  { k: 'congestion', label: 'Congestion', color: 'var(--warn)', sub: 'coming soon' },
+  { k: 'congestion', label: 'Congestion', color: 'var(--warn)', sub: 'major roads · model + live' },
 ];
 
 function LayersPanel() {
@@ -240,74 +243,32 @@ function ScaleBar() {
   );
 }
 
-// ---------------------------------------------------------------------------- search
-
-const PLACES: { name: string; e: number; n: number; dist: number }[] = [
-  { name: 'Union Station', e: 210, n: -880, dist: 1400 },
-  { name: 'CN Tower', e: -700, n: -1300, dist: 1200 },
-  { name: 'City Hall', e: 0, n: 0, dist: 900 },
-  { name: 'Yonge–Dundas', e: 240, n: 320, dist: 900 },
-  { name: 'Pearson Airport', e: -19870, n: 2640, dist: 7000 },
-  { name: 'Hamilton', e: -39130, n: -44140, dist: 12000 },
-  { name: 'Niagara Falls', e: 24040, n: -62680, dist: 9000 },
-  { name: 'Kitchener', e: -89340, n: -22460, dist: 12000 },
-  { name: 'Barrie', e: -24400, n: 81770, dist: 12000 },
-  { name: 'Oshawa', e: 41600, n: 27100, dist: 10000 },
-  { name: 'Whole region', e: -17750, n: 11400, dist: 230000 },
-];
-
-function Search() {
-  const [q, setQ] = useState('');
-  const [focus, setFocus] = useState(false);
-  const munis = getEngine()?.tiles.manifest.municipalities ?? [];
-  const all = [...PLACES, ...munis.filter((m) => !PLACES.some((p) => p.name === m.name)).map((m) => ({ name: m.name, e: m.label[0], n: m.label[1], dist: 9000 }))];
-  const hits = all.filter((p) => p.name.toLowerCase().includes(q.toLowerCase())).slice(0, 12);
-  const go = (p: (typeof PLACES)[number]) => {
-    const e = getEngine();
-    e?.controls.flyTo({ e: p.e, n: p.n, dist: p.dist, pitch: p.dist > 50000 ? 1.2 : 0.7 }, 2.6);
-    setQ(''); (document.activeElement as HTMLElement)?.blur();
-  };
-  return (
-    <div className="search panel">
-      <svg viewBox="0 0 16 16" aria-hidden><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 L14 14" /></svg>
-      <input
-        placeholder="Search places, stations, routes…" value={q}
-        onChange={(e) => setQ(e.target.value)} onFocus={() => setFocus(true)} onBlur={() => setTimeout(() => setFocus(false), 150)}
-        onKeyDown={(e) => { if (e.key === 'Enter' && hits[0]) go(hits[0]); }}
-      />
-      {focus && (
-        <ul className="search-results">
-          {hits.map((p) => <li key={p.name}><button onMouseDown={() => go(p)}>{p.name}</button></li>)}
-        </ul>
-      )}
-    </div>
-  );
-}
-
 // ---------------------------------------------------------------------------- root
 
 export function Hud() {
   useKeyboardShortcuts();
   const mode = useApp((s) => s.analyticsMode);
   const selected = useApp((s) => s.selected);
+  const takeover = useInteract((s) => s.mode !== 'free');
   return (
-    <div className={`hud ${mode ? 'analytics' : ''}`}>
+    <div className={`hud ${mode ? 'analytics' : ''} ${takeover ? 'takeover' : ''}`}>
       <TopBar />
-      <Search />
+      <SearchBox />
       <LayersPanel />
       <Stats />
       <div className="navcluster">
         <ScaleBar />
         <Compass />
       </div>
-      {selected && (
+      <Panels />
+      {selected && selected.kind !== 'vehicle' && selected.kind !== 'stop' && (
         <div className="selection panel">
           <small>{selected.kind}</small>
           <b>{selected.label ?? selected.id}</b>
           <button onClick={() => useApp.getState().select(null)}>×</button>
         </div>
       )}
-      <div className="hint">drag pan · right-drag rotate · wheel zoom · WASD/QE · space pause · [ ] speed · V analytics · H hide</div>
+      <div className="hint">click a vehicle or station · drag pan · right-drag rotate · wheel zoom · WASD/QE · space pause · [ ] speed · V analytics · H hide</div>
     </div>
   );
 }

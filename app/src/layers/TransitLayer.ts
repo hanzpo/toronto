@@ -5,6 +5,7 @@ import type { Engine } from '../engine/Engine';
 import type { FrameContext, Layer } from '../engine/types';
 import { LineOverlay } from '../render/overlay/LineOverlay';
 import { MarkerOverlay } from '../render/overlay/MarkerOverlay';
+import { VEHICLE_MODELS } from '../models/vehicles';
 import { clock } from '../state/clock';
 import { useApp, type AnalyticsKey } from '../state/store';
 import { MODES, TransitSystem, fetchLoader, type Mode, type Profile } from '../transit';
@@ -36,9 +37,23 @@ function hex(c: string): number {
   return parseInt(c.replace('#', ''), 16) || 0x888888;
 }
 
+/** A player-driven pose drawn instead of a trip's scheduled position. */
+export interface TripOverride {
+  x: number; y: number; z: number; heading: number;
+  mode: Mode; route: number;
+}
+
 export class TransitLayer implements Layer {
   readonly id = 'transit';
   readonly system: TransitSystem;
+  /** trip -> pose drawn instead of the schedule (player-operated), or null to hide the trip */
+  readonly overrides = new Map<number, TripOverride | null>();
+  /** drawn[i] = 1 if slot i of system.vehicles was drawn last frame (for picking) */
+  drawn = new Uint8Array(0);
+  /** service-day seconds of the last evaluate() */
+  lastT = 0;
+  /** hide the route lines (e.g. while the camera is inside a vehicle) */
+  hideLines = false;
   private lines = new Map<Mode, LineOverlay>();
   private markers = new Map<Mode, MarkerOverlay>();
   private routeColor: number[] = [];
@@ -57,7 +72,7 @@ export class TransitLayer implements Layer {
       const s = STYLE[m];
       this.lines.set(m, new LineOverlay(engine, { name: `lines-${m}`, width: s.lineWidth, lift: 3, order: m === 'bus' ? 1 : 2 }));
       this.markers.set(m, new MarkerOverlay(engine, {
-        name: `veh-${m}`, capacity: m === 'bus' ? 6000 : 800, shape: s.shape, size: s.size,
+        name: `veh-${m}`, capacity: m === 'bus' ? 6000 : 800, shape: VEHICLE_MODELS[m].geometry(), size: VEHICLE_MODELS[m].size,
         minPixels: s.minPixels, lift: 0.2,
       }));
     }
@@ -109,25 +124,38 @@ export class TransitLayer implements Layer {
       const on = an[STYLE[m].key];
       const ov = this.lines.get(m)!;
       if (on && !this.linesBuilt.has(m) && this.system.tripCount > 0) this.buildLines(m);
-      ov.setVisible(on);
+      ov.setVisible(on && !this.hideLines);
       ov.update(ctx);
     }
     // vehicles
     const counts = new Map<Mode, number>();
     for (const m of MODE_LIST) counts.set(m, 0);
     if (an.vehicles && this.system.tripCount > 0) {
-      const v = this.system.evaluate(clock.serviceDay().sec);
+      this.lastT = clock.serviceDay().sec;
+      const v = this.system.evaluate(this.lastT);
       const near = ctx.altitude < 3000;
+      if (this.drawn.length < v.capacity) this.drawn = new Uint8Array(v.capacity);
+      this.drawn.fill(0, 0, v.count);
       for (let i = 0; i < v.count; i++) {
         const mode = MODE_LIST_BY_ID[v.mode[i]];
         if (!mode) continue;
         if (!near && !an[STYLE[mode].key]) continue;
+        if (this.overrides.size && this.overrides.has(v.trip[i])) continue;
+        this.drawn[i] = 1;
         const mk = this.markers.get(mode)!;
         const k = counts.get(mode)!;
         if (k >= mk.capacity) continue;
         mk.setMarker(k, v.x[i], v.y[i], v.z[i], v.heading[i], this.routeColor[v.route[i]] ?? 0xffffff);
         counts.set(mode, k + 1);
       }
+    }
+    for (const o of this.overrides.values()) {
+      if (!o) continue;
+      const mk = this.markers.get(o.mode)!;
+      const k = counts.get(o.mode)!;
+      if (k >= mk.capacity) continue;
+      mk.setMarker(k, o.x, o.y, o.z, o.heading, this.routeColor[o.route] ?? 0xffffff);
+      counts.set(o.mode, k + 1);
     }
     for (const m of MODE_LIST) {
       const mk = this.markers.get(m)!;

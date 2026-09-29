@@ -5,6 +5,7 @@ import { DebugOverlayLayer } from './render/overlay/DebugOverlayLayer';
 import { LabelsLayer } from './render/LabelsLayer';
 import { LandmarksLayer } from './layers/LandmarksLayer';
 import { TransitLayer } from './layers/TransitLayer';
+import { InteractLayer } from './interact/InteractLayer';
 import { setEngine } from './engine/instance';
 import { Hud } from './ui/Hud';
 import { clock } from './state/clock';
@@ -30,6 +31,9 @@ export default function App() {
         const transit = new TransitLayer(engine.dataRoot);
         await engine.addLayer(transit);
         Object.assign(window as object, { __transit: transit });
+        await engine.addLayer(new InteractLayer());
+        { const stations = new (await import('./layers/StationsLayer')).StationsLayer(transit.system); await engine.addLayer(stations); Object.assign(window as object, { __stations: stations }); }
+        { const traffic = new (await import('./layers/TrafficLayer')).TrafficLayer(transit); await engine.addLayer(traffic); Object.assign(window as object, { __traffic: traffic }); }
         if (config.debug) await engine.addLayer(new DebugOverlayLayer());
         setEngine(engine);
         Object.assign(window as object, { __engine: engine, __clock: clock, __app: useApp });
