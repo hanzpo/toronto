@@ -1,0 +1,14 @@
+[project]
+name = "toronto-pipeline"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "mapbox-earcut>=2.1.0",
+    "numpy>=2.5.3",
+    "osmium>=4.3.1",
+    "pyproj>=3.8.0",
+    "rasterio>=1.5.1",
+    "scipy>=1.18.1",
+    "shapely>=2.1.2",
+]

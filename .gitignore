@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+.wrangler/
+.dev.vars
+
+# pipeline inputs/outputs (large, reproducible)
+pipeline/raw/
+pipeline/work/
+pipeline/.venv/
+__pycache__/
+app/public/data/
+out/
+
+# rust
+target/
