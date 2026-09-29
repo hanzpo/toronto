@@ -298,23 +298,26 @@ def prepare_areas():
     return dict(geoms=polys[order], cls=cls[order], tree=STRtree(polys[order]))
 
 
-def coastline_water(lines):
-    """Polygonize coastline + bbox into faces; faces containing lake seeds are water."""
-    ids = lines["raster_lines"]["ids"]
-    kind = lines["attr"]["kind"][ids]
-    coast = lines["raster_lines"]["geoms"][kind == 3]
-    if len(coast) == 0:
-        return []
+def great_lakes():
+    """Lake Ontario / Lake Erie multipolygons (assembled from ON + NY data in
+    work/lakes.osm.pbf, see run.sh). Their shores cross provincial/state
+    extracts, so they are not complete in the region extract itself."""
+    import osmium
+    from shapely import wkb
+    from shapely.ops import transform
+
+    fab = osmium.geom.WKBFactory()
     x0, y0, x1, y1 = geo.projected_bbox()
-    frame = shapely.box(x0 - 10, y0 - 10, x1 + 10, y1 + 10)
-    merged = shapely.unary_union(list(coast) + [frame.exterior])
-    faces = shapely.get_parts(shapely.polygonize(shapely.get_parts(merged)))
-    seeds_ll = [(-79.2, 43.5), (-78.6, 43.6), (-79.8, 43.4), (-79.5, 43.45), (-79.05, 43.35), (-79.3, 42.80), (-78.95, 42.83)]
-    sx, sy = geo.project(np.array([p[0] for p in seeds_ll]), np.array([p[1] for p in seeds_ll]))
-    seeds = shapely.points(sx, sy)
-    water = [f for f in faces if any(f.contains(s) for s in seeds)]
-    print(f"coastline: {len(coast)} ways -> {len(faces)} faces, {len(water)} water")
-    return water
+    frame = shapely.box(x0 - 20000, y0 - 20000, x1 + 20000, y1 + 20000)
+    out = []
+    for o in osmium.FileProcessor(str(geo.WORK / "lakes.osm.pbf")).with_locations().with_areas():
+        if o.is_area() and o.tags.get("natural") == "water" and o.tags.get("name") in ("Lake Ontario", "Lake Erie"):
+            g = wkb.loads(fab.create_multipolygon(o), hex=True)
+            g = shapely.clip_by_rect(g, -81.3, 42.5, -77.9, 45.0)
+            g = transform(lambda x, y, z=None: geo.project(x, y), g).intersection(frame)
+            out += list(shapely.get_parts(g))
+    print(f"great lakes: {len(out)} polygons")
+    return out
 
 
 # ---------------------------------------------------------------- per tile
@@ -328,7 +331,7 @@ def rasterize_ground(level, tx, ty):
     px = s / RES
     tr = Affine(px, 0, x0, 0, -px, y0 + s)  # rasterio: row 0 = north
     tile = shapely.box(x0, y0, x0 + s, y0 + s)
-    shapes = []
+    shapes = [(w.intersection(tile), G_WATER) for w in G["coast_water"] if w.intersects(tile)]
     A = G["areas"]
     hits = np.sort(A["tree"].query(tile, predicate="intersects"))
     min_area = (px * 1.5) ** 2 if level > 0 else 0
@@ -337,9 +340,6 @@ def rasterize_ground(level, tx, ty):
         if level > 0 and g.area < min_area:
             continue
         shapes.append((g, int(A["cls"][i])))
-    for w in G["coast_water"]:
-        if w.intersects(tile):
-            shapes.append((w.intersection(tile), G_WATER))
     # waterways / runways (buffered lines)
     RL = G["lines"]["raster_lines"]
     hit = RL["tree"].query(tile, predicate="intersects")
@@ -347,7 +347,7 @@ def rasterize_ground(level, tx, ty):
     for j in hit:
         li = RL["ids"][j]
         k = attr["kind"][li]
-        if k == 3:
+        if k == 3:  # coastline: lakes come from great_lakes()
             continue
         w = max(float(attr["width"][li]), px * (0.7 if level else 0.5))
         if level > 0 and k == 2 and attr["width"][li] < px * 0.4:
@@ -557,7 +557,7 @@ def main():
     G["pieces"] = {lv: split_by_tile(lines[lv], lv) for lv in (0, 1, 2)}
     print(f"prepared lines in {time.time() - t0:.0f}s")
     G["areas"] = prepare_areas()
-    G["coast_water"] = coastline_water(lines)
+    G["coast_water"] = great_lakes()
     print(f"prepared areas in {time.time() - t0:.0f}s")
 
     x0, y0, x1, y1 = geo.projected_bbox()
