@@ -3,7 +3,8 @@
 // use SharedArrayBuffer between the sim worker and the renderer.
 //
 // Tiles are stored as one pack per level-2 tile (pipeline/tpipe/pack.py):
-// /data/tiles/L/tx_ty.bin.gz is a range read inside packs/{tx2}_{ty2}.pack.
+// /data/tiles/L/tx_ty.bin.gz is a range read inside packs/{tx2}_{ty2}.pack,
+// /data/graph/tx_ty.bin.gz inside packs/g{tx2}_{ty2}.pack.
 
 interface Env {
   ASSETS: Fetcher
@@ -17,6 +18,7 @@ const ISOLATION: Record<string, string> = {
 }
 
 const TILE_RE = /^\/data\/tiles\/(\d)\/(-?\d+)_(-?\d+)\.bin\.gz$/
+const GRAPH_RE = /^\/data\/graph\/(-?\d+)_(-?\d+)\.bin\.gz$/
 const packIndex = new Map<string, Promise<Record<string, [number, number]> | null>>()
 
 function withHeaders(res: Response, extra: Record<string, string> = {}): Response {
@@ -40,11 +42,13 @@ async function serveData(req: Request, env: Env, ctx: ExecutionContext, path: st
   if (hit) return hit
 
   let res: Response
-  const m = TILE_RE.exec(path)
+  const t = TILE_RE.exec(path)
+  const g = t ? null : GRAPH_RE.exec(path)
+  const m = t ?? (g ? [g[0], '0', g[1], g[2]] : null)
   if (m) {
     const [lv, tx, ty] = [Number(m[1]), Number(m[2]), Number(m[3])]
     const f = 4 ** (2 - lv)
-    const pack = `${Math.floor(tx / f)}_${Math.floor(ty / f)}`
+    const pack = `${g ? 'g' : ''}${Math.floor(tx / f)}_${Math.floor(ty / f)}`
     const idx = await loadIndex(env, pack)
     const entry = idx?.[`${lv}/${tx}_${ty}`]
     if (!entry) return withHeaders(new Response('not found', { status: 404 }))
@@ -69,7 +73,12 @@ async function serveData(req: Request, env: Env, ctx: ExecutionContext, path: st
 export default {
   async fetch(req, env, ctx): Promise<Response> {
     const url = new URL(req.url)
-    if (url.pathname.startsWith('/data/') && req.method === 'GET') {
+    if (url.pathname.startsWith('/data/')) {
+      if (req.method === 'HEAD') {
+        const res = await serveData(new Request(req.url, { method: 'GET', headers: req.headers }), env, ctx, url.pathname)
+        return new Response(null, { status: res.status, headers: res.headers })
+      }
+      if (req.method !== 'GET') return withHeaders(new Response('method not allowed', { status: 405 }))
       return serveData(req, env, ctx, url.pathname)
     }
     return withHeaders(await env.ASSETS.fetch(req))

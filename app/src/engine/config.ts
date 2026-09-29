@@ -17,6 +17,7 @@ export const config = {
 export async function resolveDataRoot(): Promise<string> {
   const base = import.meta.env.BASE_URL.replace(/\/$/, '');
   if (config.dataRoot) return `${base}/${config.dataRoot.replace(/^\/|\/$/g, '')}`;
+  if (import.meta.env.PROD) return `${base}/data`; // served from R2 by the Worker
   try {
     const r = await fetch(`${base}/data/manifest.json`, { method: 'HEAD' });
     if (r.ok && (r.headers.get('content-type') ?? '').includes('json')) return `${base}/data`;
