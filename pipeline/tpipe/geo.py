@@ -7,6 +7,7 @@ from data/manifest.json.
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -15,8 +16,8 @@ from pyproj import Transformer
 ROOT = Path(__file__).resolve().parents[2]
 PIPE = ROOT / "pipeline"
 RAW = PIPE / "raw"
-WORK = PIPE / "work"
-OUT = ROOT / "app" / "public" / "data"
+WORK = Path(os.environ.get("TPIPE_WORK", PIPE / "work"))
+OUT = Path(os.environ.get("TPIPE_OUT", ROOT / "app" / "public" / "data"))
 
 # Transverse Mercator centred on Toronto City Hall. Scale error stays below
 # 0.02% across the whole region, so everything is "to scale" in metres.
