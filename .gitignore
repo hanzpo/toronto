@@ -16,3 +16,4 @@ out/
 # rust
 target/
 worker/node_modules/
+app/public/data-synthetic/
