@@ -15,3 +15,4 @@ out/
 
 # rust
 target/
+worker/node_modules/
