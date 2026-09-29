@@ -72,6 +72,11 @@ export class MarkerOverlay {
     g.index = base.index;
     g.setAttribute('position', base.attributes.position);
     g.setAttribute('normal', base.attributes.normal);
+    // optional per-vertex colours + livery mask (app/src/models): the instance
+    // colour only tints vertices with livery = 1
+    const hasVC = !!base.attributes.color, hasLiv = !!base.attributes.livery;
+    if (hasVC) g.setAttribute('color', base.attributes.color);
+    if (hasLiv) g.setAttribute('livery', base.attributes.livery);
     this.world = new Float64Array(this.capacity * 3);
     this.iPos = new THREE.InstancedBufferAttribute(new Float32Array(this.capacity * 4), 4);
     this.iCol = new THREE.InstancedBufferAttribute(new Float32Array(this.capacity * 3), 3);
@@ -101,7 +106,9 @@ export class MarkerOverlay {
       return r.add(off);
     })();
     // cheap fake lighting so boxes read as 3D
-    m.colorNode = vec4(iCol.mul(mix(float(0.62), float(1.08), normalLocal.y.mul(0.5).add(0.5))), 1);
+    const vc = hasVC ? attribute('color', 'vec3') : vec3(1, 1, 1);
+    const tint = hasLiv ? mix(vec3(1, 1, 1), iCol, attribute('livery', 'float')) : iCol;
+    m.colorNode = vec4(vc.mul(tint).mul(mix(float(0.62), float(1.08), normalLocal.y.mul(0.5).add(0.5))), 1);
     this.mesh = new THREE.Mesh(g, m);
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = 120;
