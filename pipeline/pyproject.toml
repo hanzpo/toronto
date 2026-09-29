@@ -4,10 +4,12 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.13"
 dependencies = [
+    "duckdb>=1.5.6",
     "mapbox-earcut>=2.1.0",
     "numpy>=2.5.3",
     "osmium>=4.3.1",
     "polars>=1.44.2",
+    "pyogrio>=0.13.0",
     "pyproj>=3.8.0",
     "rasterio>=1.5.1",
     "scipy>=1.18.1",

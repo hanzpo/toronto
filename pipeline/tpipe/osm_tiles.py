@@ -66,7 +66,9 @@ def _linestrings(parts):
 
 
 def prepare_buildings(terrain):
-    d = np.load(geo.WORK / "osm_buildings.npz", allow_pickle=True)
+    from .heights import enrich
+
+    d = enrich(dict(np.load(geo.WORK / "osm_buildings.npz", allow_pickle=True)))
     xy = d["xy"]
     nring = d["nring"].astype(np.int64)
     ringlen = d["ringlen"].astype(np.int64)

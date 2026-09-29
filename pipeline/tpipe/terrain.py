@@ -45,11 +45,13 @@ def build() -> None:
         col, row = inv * (np.asarray(lon), np.asarray(lat))
         out[j] = ndimage.map_coordinates(dem, [row - 0.5, col - 0.5], order=1, mode="nearest")
 
+    dsm = out.copy()  # raw surface model (incl. buildings) for height estimates
     out = ndimage.grey_opening(out, size=(7, 7))
     out = ndimage.gaussian_filter(out, sigma=1.0)
     out -= geo.DATUM_M
     geo.WORK.mkdir(parents=True, exist_ok=True)
     np.savez(geo.WORK / "terrain.npz", h=np.round(out * 10).astype(np.int16), x0=x0, y0=y0, cell=CELL)
+    np.save(geo.WORK / "dsm.npy", np.round((dsm - geo.DATUM_M) * 10).astype(np.int16))
 
 
 class Terrain:
@@ -75,6 +77,17 @@ class Terrain:
         t = np.linspace(0.0, size, n)
         gx, gy = np.meshgrid(x0 + t, y0 + t)
         return self.sample(gx, gy)
+
+
+def sample_dsm(t: Terrain, x, y):
+    """Raw DSM (surface incl. buildings/trees), datum metres."""
+    from scipy import ndimage
+
+    if not hasattr(t, "dsm"):
+        t.dsm = np.load(geo.WORK / "dsm.npy", mmap_mode="r").astype(np.float32) / 10.0
+    c = (np.asarray(x) - t.x0) / t.cell
+    r = (np.asarray(y) - t.y0) / t.cell
+    return ndimage.map_coordinates(t.dsm, [r.ravel(), c.ravel()], order=1, mode="nearest").reshape(np.shape(x))
 
 
 @lru_cache(maxsize=1)
