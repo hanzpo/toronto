@@ -26,7 +26,7 @@ uv run python -m tpipe.qa.viewpoints            # seeded sweep poses -> app/publ
 
 - **`--workers`**: default 2, maximum 4. Each block is 4×4 level-0 tiles plus a
   one-tile halo. Workers keep a 48-tile LRU cache and are recycled every 40
-  blocks. The whole region takes about 3 minutes, with a total peak memory of about 1.2 GB at 2 workers.
+  blocks. The whole region takes about 3 minutes on an idle machine (about 10 minutes while other agents load it), with a total peak memory of about 1.2 GB at 2 workers.
 - **`--bbox=E0,N0,E1,N1`**: world metres. Write it with `=`, because the value
   starts with `-`.
 - **`--max-per-cat`**: default 2000. This caps how many findings per category
@@ -85,9 +85,9 @@ Thresholds are constants at the top of each module.
 |---|---|---|
 | prop_in_lane | signal_pole, lamp | The client-placed pole or lamp is more than 0.3 m inside a carriageway (classes 0–6) at its own level (screenshot 4). |
 | tree_on_road | trunk_in_carriageway, crown_through_deck, crown_over_highway | The trunk is more than 0.2 m inside a ribbon, including ramps and decks; the crown pokes through a deck lower than the tree; or the crown reaches ≥ 1.5 m over motorway or trunk lanes. |
-| tree_on_rail | trunk_on_track, crown_over_track | The trunk is within 3 m of a track centreline, or the crown edge is within 0.75 m of it (non-tram). |
+| tree_on_rail | trunk_on_track | The trunk is within 3 m of a track centreline. Crowns over tracks are `tree_over_track`. |
 | tree_on_airfield / tree_on_water | trunk | The land cover under the trunk is aeroway, runway or airfield grass, or water. |
-| building_overlap | duplicate_record, coplanar_roof, contained, volume_overlap, house_in_building | Footprints overlap by ≥ 4 m² and ≥ 10 % of the smaller one, with overlapping height ranges. Roofs within 0.5 m of each other z-fight (screenshot 6). |
+| building_overlap | duplicate_record, coplanar_roof, contained, volume_overlap | Footprints overlap by ≥ 4 m² and ≥ 10 % of the smaller one, with overlapping height ranges. Roofs within 0.5 m of each other z-fight (screenshot 6). Houses are covered by `house_overlap`. |
 | floating_object | building_floats, building_buried, house_floats | The base is more than 1.5 m above the highest terrain under the footprint, or more than 3 m below the lowest. |
 | raster_shore | stair_steps | A level-0 tile without vector water has ≥ 60 water/land edge pixels. Tiles are skipped automatically once vector water arrays appear (`VECTOR_WATER_KEYS`). |
 
@@ -113,6 +113,38 @@ heading sector.
 | rail_kink | tile_track, graph_edge, pattern_shape, node_movement | The radius at a vertex, (l₁+l₂)/2 ÷ turn, is below the minimum for the track kind. Main lines need 150 m, sidings 60, subway 90, LRT 25 and tram 10. A movement through a graph node that breaks the heading by more than 6/8/12/20° also counts. |
 | rail_gap | hole, graph_gap, unconnected_tee | Two drawn track ends of the same class face each other within 25 m, or a graph end runs into another track within 2 m without a switch. |
 | route_track_conflict | unrouted, route_not_ok, discontinuous, against_track_direction, shared_double_track | A pattern has no continuous track route, consecutive route edges have no movement between them, an edge is used against `e_dir`, or one route runs both directions on one subway, LRT or tram edge that has a parallel twin. |
+
+**Clipping** (`checks_clip.py`, `checks_stations.py`, `checks_landmarks.py`). The
+standing rule is that nothing clips into anything, especially around stations.
+
+Buildings are the ones actually drawn: outer ring plus holes, with the
+landmark-suppressed ids removed. A building part whose bottom (`b_base +
+b_min`) is at least 5 m above the rail, or 4.5 m above the road, passes over it
+(station roofs, overhangs).
+
+| category | sub-types | rule |
+|---|---|---|
+| building_over_track | main_line, siding, subway, light_rail, streetcar, rail | A drawn track centreline (non-tunnel), within ±2.5 m, runs at least 1 m through a building footprint that doesn't clear it. The desc gives the building's bottom relative to the rail. |
+| building_over_road | motorway, arterial, local, service | Carriageway ribbons (classes 0–6) drawn at grade cover at least 8 m² of a footprint. `service` is mostly garage and dock entrances and is down-weighted. |
+| platform_track_clearance | track_through_platform, edge_too_close, edge_gap | For each `stations.json` platform rectangle, tracks of its mode that run parallel within 20° are checked. It flags a centreline that runs through the platform, or a median edge-to-centreline distance outside 1.55–1.75 m. This checks the **curated input**: `StationsLayer` snaps platforms onto the tracks at runtime (edge 1.45–1.65 m), so a finding means the snap has to fix it, or draws it as-is when it can't match a track. |
+| station_column_clearance | column | A canopy or structure column is closer than 2.2 m to a track centreline. It reads `columns` / `cols` ([[E,N],…]) on stations.json levels or `blds`. Nothing is exported yet, so the count is 0. |
+| prop_in_building | lamp, signal_pole | A client-placed prop stands more than 0.3 m inside a footprint. |
+| tree_in_building | building, house | A client-placed trunk stands more than 0.5 m inside a footprint or house, unless it fits under an overhang. |
+| tree_on_platform | (mode) | A client-placed trunk stands on an above-ground platform rectangle. |
+| tree_over_track | crown_over_track | A crown edge comes within 0.75 m of a non-tram track centreline. Trunks are covered by `tree_on_rail`. |
+| house_overlap | building, road, house | A house instance overlaps a building, a carriageway ribbon or another house by at least 6 m². |
+| vehicle_path_through_building | bus, streetcar, train | More than 16 m of bus, streetcar or LRT shape samples, or rail pattern shape samples (at 8 m spacing, surface only), lie more than 0.5 m inside a footprint the vehicle doesn't pass under. |
+| lot_over_building | building | A parking lot polygon (`gp_class 11`, which gets stalls, parked cars and lamps) covers at least 20 m² of a building. Parking structures and roofs are exempt. |
+| landmark_road_overlap | carriageway | A landmark model footprint covers at least 5 m² of carriageway drawn at grade. Bridge landmarks (with `span`) are skipped. |
+
+### Near stations and owners
+
+- Every finding has `near_station` (within 500 m of a `stations.json` complex or
+  a transit-index station) and `score` = severity × 2 near stations. Ranks
+  within a category follow `score`.
+- `issues_summary.json` has per-category `near_station` counts and an `owners`
+  map. The owners are: `roads`, `stations`, `rail`, `transit`, `buildings-props`,
+  `vegetation`, `landmarks` and `ground`. Each issue also carries `owner`.
 
 ## Workflow for agents
 

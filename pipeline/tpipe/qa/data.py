@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import functools
 import json
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -320,9 +321,20 @@ class Block:
         self.junc["r"] = np.array([max([a[1] for a in arms], default=5.0) for arms in J["arms"]], dtype=np.float64)
 
     # ------------------------------------------------------------------ buildings
-    def buildings(self):
-        """(shapely polygons of outer rings, attrs) for all buildings in block+halo."""
+    def buildings(self, holes: bool = False, keep_suppressed: bool = False):
+        """(shapely polygons, attrs) for all buildings in block+halo. Outer rings only unless
+        `holes`; buildings replaced by a landmark model (landmarks.json suppress) are dropped,
+        as the tile worker does, unless `keep_suppressed`."""
+        key = (holes, keep_suppressed)
+        cache = self.__dict__.setdefault("_bcache", {})
+        if key not in cache:
+            cache[key] = self._buildings(holes, keep_suppressed)
+        return cache[key]
+
+    def _buildings(self, holes: bool, keep_suppressed: bool):
         import shapely
+
+        sup = suppressed()
 
         polys, att = [], {k: [] for k in ("osm", "height", "min", "base", "kind", "tile")}
         for ti, d in enumerate(self.data):
@@ -339,13 +351,24 @@ class Block:
             idx = np.nonzero(ok)[0]
             if len(idx) == 0:
                 continue
+            osm = d.get("b_osm")
+            if osm is not None and sup and not keep_suppressed:
+                idx = idx[~np.isin(osm[:nb][idx].astype(np.int64), list(sup))]
+                if len(idx) == 0:
+                    continue
             counts = (b - a)[idx]
             vidx = np.concatenate([np.arange(a[i], b[i]) for i in idx])
             ring_id = np.repeat(np.arange(len(idx)), counts)
-            # close rings
             coords = xy[vidx]
             rings = shapely.linearrings(coords, indices=ring_id)
             pg = shapely.polygons(rings)
+            if holes:
+                nr = ro[1:].astype(np.int64) - r0
+                for q in np.nonzero(nr[idx] > 1)[0]:
+                    i = idx[q]
+                    hs = [xy[vo[r]:vo[r + 1]] for r in range(int(ro[i]) + 1, int(ro[i + 1])) if vo[r + 1] - vo[r] >= 3]
+                    if hs:
+                        pg[q] = shapely.Polygon(xy[a[i]:b[i]], hs)
             pg = shapely.make_valid(pg)
             polys.append(pg)
             for k, arr in (("osm", "b_osm"), ("height", "b_height"), ("min", "b_min"), ("base", "b_base"), ("kind", "b_kind")):
@@ -381,6 +404,65 @@ class Block:
         if not polys:
             return np.zeros(0, object), {k: np.zeros(0) for k in att}
         return np.concatenate(polys), {k: np.concatenate(v) for k, v in att.items()}
+
+
+@functools.lru_cache(maxsize=1)
+def suppressed() -> frozenset:
+    """OSM building ids the client skips because a landmark model replaces them."""
+    p = geo.OUT / "landmarks.json"
+    if not p.exists():
+        return frozenset()
+    return frozenset(int(o) for L in json.loads(p.read_text()) for o in L.get("suppress", []))
+
+
+@functools.lru_cache(maxsize=1)
+def stations() -> list:
+    """data/stations.json stations (empty if missing)."""
+    p = geo.OUT / "stations.json"
+    if not p.exists():
+        return []
+    d = json.loads(p.read_text())
+    return d.get("stations", d) if isinstance(d, dict) else d
+
+
+def platform_polys():
+    """(shapely rectangles, info dicts) for every platform in stations.json. `b` = compass bearing."""
+    import shapely
+
+    polys, info = [], []
+    for s in stations():
+        for L in s.get("levels", []):
+            for pl in L.get("plats", []) or []:
+                c, b, ln, w = pl.get("c"), pl.get("b", L.get("bearing", 0.0)), pl.get("len"), pl.get("w")
+                if not c or not ln or not w:
+                    continue
+                t = math.radians(b)
+                ux, uy = math.sin(t), math.cos(t)  # along the platform
+                vx, vy = uy, -ux
+                hl, hw = ln / 2, w / 2
+                pts = [(c[0] + sx * hl * ux + sy * hw * vx, c[1] + sx * hl * uy + sy * hw * vy) for sx, sy in ((1, 1), (-1, 1), (-1, -1), (1, -1))]
+                polys.append(shapely.Polygon(pts))
+                info.append({"station": s.get("name", s.get("id")), "id": s.get("id"), "mode": L.get("mode"), "grade": L.get("grade"),
+                             "type": pl.get("type"), "c": c, "b": b, "len": ln, "w": w, "u": (ux, uy), "v": (vx, vy)})
+    return np.array(polys, dtype=object), info
+
+
+def ground_polys(B: "Block", cls: int):
+    """Vector ground polygons (gp_*) of one land-cover class, world coordinates, block + halo."""
+    import shapely
+
+    out = []
+    for ti, d in enumerate(B.data):
+        off, xy, gc = d.get("gp_off"), d.get("gp_xy"), d.get("gp_class")
+        if off is None or xy is None or gc is None:
+            continue
+        ox, oy = B.origin(ti)
+        P = xy.reshape(-1, 2).astype(np.float64) * (S0 / 65535.0) + (ox, oy)
+        for k in np.nonzero(gc == cls)[0]:
+            a, b = int(off[k]), int(off[k + 1])
+            if b - a >= 3:
+                out.append(shapely.make_valid(shapely.Polygon(P[a:b])))
+    return np.array(out, dtype=object)
 
 
 def ribbon_quads(L: Lines, hw: np.ndarray, seg: np.ndarray | None = None):

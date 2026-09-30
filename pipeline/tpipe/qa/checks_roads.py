@@ -517,10 +517,12 @@ def check_crossings(ctx: RoadCtx, cats: set) -> list[dict]:
     px, py = X0[i] + dxa * ta, Y0[i] + dya * ta
     za = Z0[i] + (Z1[i] - Z0[i]) * ta
     zb = Z0[j] + (Z1[j] - Z0[j]) * tb
-    # drawn elevation: non-bridges are draped on the terrain
-    tz = B.terrain(px, py)
-    za = np.where(flg[i] & F_BRIDGE, za, np.where(np.isfinite(tz), tz, za))
-    zb = np.where(flg[j] & F_BRIDGE, zb, np.where(np.isfinite(tz), tz, zb))
+    # drawn elevation: old tiles drape non-bridges on the terrain; network-model tiles
+    # (tpipe.roadnet, r_pl present) draw every vertex at its solved elevation (embankments too)
+    if not any("r_pl" in d for d in B.data):
+        tz = B.terrain(px, py)
+        za = np.where(flg[i] & F_BRIDGE, za, np.where(np.isfinite(tz), tz, za))
+        zb = np.where(flg[j] & F_BRIDGE, zb, np.where(np.isfinite(tz), tz, zb))
     # shared node near the crossing -> real junction / level crossing
     allv = [np.column_stack([R.X, R.Y])] if R.n else []
     allo = [ctx.osm[ctx.vp]] if R.n else []

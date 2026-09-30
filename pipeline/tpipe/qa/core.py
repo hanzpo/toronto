@@ -56,5 +56,5 @@ def dedupe(findings: list[dict]) -> list[dict]:
 
 
 def order(findings: list[dict]) -> list[dict]:
-    """Deterministic order: category, severity desc, E, N, osm ids, sub."""
-    return sorted(findings, key=lambda f: (f["cat"], -f["sev"], f["e"], f["n"], f["osm"], f["sub"]))
+    """Deterministic order: category, score desc (severity x near-station boost), severity, E, N, osm ids, sub."""
+    return sorted(findings, key=lambda f: (f["cat"], -f.get("score", f["sev"]), -f["sev"], f["e"], f["n"], f["osm"], f["sub"]))

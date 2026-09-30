@@ -24,8 +24,10 @@ import multiprocessing as mp
 import sys
 import time
 
+import numpy as np
+
 from .. import geo
-from . import checks_rail, checks_transit, data
+from . import checks_rail, checks_stations, checks_transit, data
 from .core import dedupe, order, view_for
 from .runner import BLOCK_CATS, GLOBAL_CATS, _init, _run
 
@@ -33,6 +35,41 @@ OUT = geo.OUT / "qa"
 RESULTS_MD = geo.ROOT / "docs" / "qa-results.md"
 
 ALL_CATS = sorted(BLOCK_CATS | GLOBAL_CATS)
+
+NEAR_STATION = 500.0  # m: findings this close to a station get near_station + a rank boost
+STATION_BOOST = 2.0  # score = sev x boost near stations; ranks follow score
+OWNER = {  # which workstream fixes each category (docs/QA.md)
+    **{c: "roads" for c in ("road_width_step", "bridge_width_anomaly", "road_overlap_nonjunction", "flat_crossing", "deck_below_clearance",
+                            "junction_hardware_on_grade_sep", "elevation_jump", "road_below_terrain", "duplicate_footway",
+                            "footway_as_road", "sidewalk_bridge_discontinuity", "dash_phase_break")},
+    **{c: "stations" for c in ("platform_track_clearance", "station_column_clearance", "tree_on_platform")},
+    **{c: "rail" for c in ("rail_kink", "rail_gap", "route_track_conflict", "building_over_track")},
+    **{c: "transit" for c in ("transit_route_off_road", "transit_wrong_way", "vehicle_path_through_building")},
+    **{c: "buildings-props" for c in ("building_overlap", "floating_object", "prop_in_lane", "prop_in_building", "house_overlap",
+                                      "building_over_road", "lot_over_building")},
+    **{c: "vegetation" for c in ("tree_on_road", "tree_on_rail", "tree_over_track", "tree_on_airfield", "tree_on_water", "tree_in_building")},
+    **{c: "landmarks" for c in ("landmark_overlap", "landmark_road_overlap")},
+    "raster_shore": "ground",
+}
+
+
+def near_stations(findings: list[dict]) -> list[dict]:
+    """Flag findings within NEAR_STATION of a station (stations.json + transit index) and boost their score."""
+    from scipy.spatial import cKDTree
+
+    pts = [s["c"] for s in data.stations() if s.get("c")]
+    idx = geo.OUT / "transit" / "index.json"
+    if idx.exists():
+        pts += [s["pos"] for s in json.loads(idx.read_text()).get("stations", []) if s.get("pos")]
+    tree = cKDTree(np.array(pts)) if pts else None
+    for f in findings:
+        n = False
+        if tree is not None:
+            d, _ = tree.query([f["e"], f["n"]])
+            n = bool(d <= NEAR_STATION)
+        f["near_station"] = n
+        f["score"] = round(f["sev"] * (STATION_BOOST if n else 1.0), 3)
+    return findings
 
 
 def main(argv=None) -> int:
@@ -64,8 +101,10 @@ def main(argv=None) -> int:
     tasks = []
     if checks_rail.RAIL_CATS & cats:
         tasks.append(("global", ("rail", cats, bbox)))
-    if "landmark_overlap" in cats:
+    if {"landmark_overlap", "landmark_road_overlap"} & cats:
         tasks.append(("global", ("landmarks", cats, bbox)))
+    if checks_stations.STATION_CATS & cats:
+        tasks.append(("global", ("stations", cats, bbox)))
     if BLOCK_CATS & cats:
         tasks += [("block", (bx, by, cats, bbox)) for bx, by in blocks]
     findings: list[dict] = []
@@ -80,11 +119,13 @@ def main(argv=None) -> int:
             if done % 100 == 0 or kind == "global":
                 print(f"  {done}/{len(tasks)} tasks, {len(findings)} findings, {time.time() - t0:.0f}s"
                       + (f" ({what}: {sec:.0f}s)" if kind == "global" else ""), file=sys.stderr)
-    findings = order(dedupe(findings))
+    findings = order(near_stations(dedupe(findings)))
     counts: dict = {c: 0 for c in sorted(cats)}
+    near: dict = {c: 0 for c in sorted(cats)}
     subs: dict = {}
     for f in findings:
         counts[f["cat"]] += 1
+        near[f["cat"]] += bool(f["near_station"])
         subs.setdefault(f["cat"], {}).setdefault(f["sub"], 0)
         subs[f["cat"]][f["sub"]] += 1
     kept, rank = [], {}
@@ -94,8 +135,8 @@ def main(argv=None) -> int:
         if r > a.max_per_cat:
             continue
         g = {k: v for k, v in f.items() if not k.startswith("_")}
-        g = {"id": f"{f['cat']}/{r}", "cat": f["cat"], "sub": f["sub"], "rank": r, **{k: g[k] for k in ("sev", "e", "n", "z", "osm", "desc")},
-             "view": view_for(f)}
+        g = {"id": f"{f['cat']}/{r}", "cat": f["cat"], "sub": f["sub"], "rank": r, **{k: g[k] for k in ("sev", "score", "e", "n", "z", "osm", "desc")},
+             "near_station": f["near_station"], "owner": OWNER.get(f["cat"], "?"), "view": view_for(f)}
         kept.append(g)
     runtime = time.time() - t0
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
@@ -104,7 +145,7 @@ def main(argv=None) -> int:
     meta = {"version": 1, "generated": now, "build": man.get("build"), "bbox": bbox, "categories": sorted(cats)}
     (out / "issues.json").write_text(json.dumps({**meta, "issues": kept}, separators=(",", ":")))
     summary = {**meta, "runtime_s": round(runtime, 1), "workers": workers, "blocks": len(blocks), "timing_s": {k: round(v, 1) for k, v in timing.items()},
-               "counts": counts, "subs": subs, "kept": len(kept), "max_per_cat": a.max_per_cat}
+               "counts": counts, "near_station": near, "owners": {c: OWNER.get(c, "?") for c in sorted(cats)}, "subs": subs, "kept": len(kept), "max_per_cat": a.max_per_cat}
     (out / "issues_summary.json").write_text(json.dumps(summary, indent=1))
     for c in sorted(cats):
         print(f"{c:34s} {counts[c]:7d}  {subs.get(c, {})}")

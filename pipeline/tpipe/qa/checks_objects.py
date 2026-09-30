@@ -14,7 +14,7 @@ Categories:
   tree_on_airfield   trunk on aerodrome / runway / airfield grass land cover
   tree_on_water      trunk on water
   building_overlap   overlapping footprints with overlapping height ranges
-                     (coplanar roofs / walls z-fight), houses inside buildings
+                     (coplanar roofs / walls z-fight); houses: checks_clip.house_overlap
   floating_object    buildings / houses whose base is well above or below the terrain
   raster_shore       stair-stepped raster shoreline (level-0 tiles without vector water)
 """
@@ -45,7 +45,6 @@ SHRUBS = {12, 13}
 BLD_MIN_AREA = 4.0  # m2 of footprint overlap
 BLD_MIN_FRAC = 0.10  # of the smaller footprint
 ROOF_COPLANAR = 0.5  # m: tops closer than this z-fight
-HOUSE_MIN_AREA = 10.0
 FLOAT_ABOVE = 1.5  # m: base above the highest terrain under the footprint
 BURIED = 3.0  # m: base below the lowest terrain under the footprint
 SHORE_MIN_PX = 60  # water/land edge pixels (4 m) per tile to report
@@ -199,10 +198,11 @@ def _road_lbl(cw: Carriageway, b: int) -> str:
 
 
 def check_props(B: Block, cats: set) -> list[dict]:
-    want = {"prop_in_lane", "tree_on_road", "tree_on_rail", "tree_on_airfield", "tree_on_water"} & cats
+    want = {"prop_in_lane", "tree_on_road", "tree_on_rail", "tree_over_track", "tree_on_airfield", "tree_on_water"} & cats
     if not want:
         return []
-    P = load_props(B)
+    P = B.__dict__.get("_props") or load_props(B)
+    B._props = P
     out: list[dict] = []
     cw = Carriageway(B)
     src = "client placement" if P["have"].any() else "OSM/derived"
@@ -262,7 +262,7 @@ def check_props(B: Block, cats: set) -> list[dict]:
                                txt + f" ({src})", bearing=math.atan2(cw.y1[s] - cw.y0[s], cw.x1[s] - cw.x0[s])))
     # ---- trees on rails
     L = B.rails
-    if "tree_on_rail" in cats and L.n and len(idx):
+    if ({"tree_on_rail", "tree_over_track"} & cats) and L.n and len(idx):
         lf, lc = L.attrs["flags"], L.attrs["class"]
         sp = L.seg_piece
         m = (lf[sp] & F_TUNNEL) == 0
@@ -286,7 +286,10 @@ def check_props(B: Block, cats: set) -> list[dict]:
                 sev = (3 + RAIL_CLEAR - d[q]) if trunk[q] else 1.0
                 if int(tsp[i]) in SHRUBS:
                     sev *= 0.5
-                out.append(finding("tree_on_rail", "trunk_on_track" if trunk[q] else "crown_over_track", sev, tx[i], ty[i], tz[i],
+                cat = "tree_on_rail" if trunk[q] else "tree_over_track"
+                if cat not in cats:
+                    continue
+                out.append(finding(cat, "trunk_on_track" if trunk[q] else "crown_over_track", sev, tx[i], ty[i], tz[i],
                                    [L.attrs["osm"][sp[j]]],
                                    f"{spn(i)} {'trunk' if trunk[q] else 'crown'} {d[q]:.1f} m from the {kind} track centreline ({src})",
                                    bearing=math.atan2(y1[j] - y0[j], x1[j] - x0[j])))
@@ -344,19 +347,6 @@ def check_buildings(B: Block, cats: set) -> list[dict]:
                                    f"buildings {oa} ({A['height'][a]:.0f} m) and {ob} ({A['height'][b]:.0f} m) overlap {ark:.0f} m2 "
                                    f"({fr * 100:.0f}% of the smaller){'; roofs within ' + format(dtop, '.1f') + ' m (z-fighting)' if cop else ''}",
                                    key=("building_overlap", oa, ob)))
-    if "building_overlap" in cats and len(hp) and len(polys):
-        tree = shapely.STRtree(polys)
-        i, j = tree.query(hp, predicate="intersects")
-        if len(i):
-            ar = shapely.area(shapely.intersection(hp[i], polys[j]))
-            k = ar >= HOUSE_MIN_AREA
-            for a, b, arq in zip(i[k], j[k], ar[k]):
-                x, y = H["x"][a], H["y"][a]
-                if not B.in_core(x, y):
-                    continue
-                out.append(finding("building_overlap", "house_in_building", arq / 20, x, y, H["base"][a] + H["height"][a],
-                                   [H["osm"][a], A["osm"][b]], f"house {int(H['osm'][a])} overlaps building {int(A['osm'][b])} by {arq:.0f} m2",
-                                   key=("building_overlap", "h", int(H["osm"][a]), int(A["osm"][b]))))
     if "floating_object" in cats:
         # terrain range under each footprint (vertices + centroid)
         if len(polys):
@@ -429,7 +419,7 @@ def check_shore(B: Block, cats: set) -> list[dict]:
     return out
 
 
-OBJECT_CATS = {"prop_in_lane", "tree_on_road", "tree_on_rail", "tree_on_airfield", "tree_on_water",
+OBJECT_CATS = {"prop_in_lane", "tree_on_road", "tree_on_rail", "tree_over_track", "tree_on_airfield", "tree_on_water",
                "building_overlap", "floating_object", "raster_shore"}
 
 

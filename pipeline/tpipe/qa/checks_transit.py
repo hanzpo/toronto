@@ -44,6 +44,10 @@ MIN_WRONG_LEN = 15.0
 WRONG_COS = -0.7  # cos(angle) below this = against the one-way direction (> ~135 deg)
 JUNCTION_PAD = 3.0  # m beyond the junction box radius: turning movements there are not checked
 SURFACE_MODES = {"bus": 0, "streetcar": 1, "lrt": 1}
+# rail modes are sampled too (mode 2) for vehicle_path_through_building; the road checks skip them
+RAIL_MODES = {"subway": 2, "commuter_rail": 2, "airport_rail": 2, "intercity_rail": 2}
+ALL_MODES = SURFACE_MODES | RAIL_MODES
+CACHE_VERSION = 2
 
 
 def _sources() -> list:
@@ -53,7 +57,7 @@ def _sources() -> list:
 def samples(rebuild: bool = False) -> dict:
     """Deduplicated shape samples: x, y, z, heading, mode (0 bus, 1 rail), label index + labels."""
     srcs = _sources()
-    stamp = json.dumps([[p.name, p.stat().st_mtime_ns] for p in srcs])
+    stamp = json.dumps([CACHE_VERSION] + [[p.name, p.stat().st_mtime_ns] for p in srcs])
     if CACHE.exists() and not rebuild:
         d = np.load(CACHE, allow_pickle=False)
         if str(d["stamp"]) == stamp:
@@ -75,12 +79,12 @@ def samples(rebuild: bool = False) -> dict:
         shp_mode: dict[int, int] = {}
         for pi in range(len(a["pat_shape"])):
             m = modes[int(a["pat_mode"][pi])] if int(a["pat_mode"][pi]) < len(modes) else "bus"
-            if m not in SURFACE_MODES:
+            if m not in ALL_MODES:
                 continue
             s = int(a["pat_shape"][pi])
             r = routes[int(a["pat_route"][pi])] if int(a["pat_route"][pi]) < len(routes) else {}
             shp_label.setdefault(s, f"{r.get('agency', '?')} {r.get('short', '?')}")
-            shp_mode[s] = max(shp_mode.get(s, 0), SURFACE_MODES[m])
+            shp_mode[s] = max(shp_mode.get(s, 0), ALL_MODES[m])
         for s, lab in sorted(shp_label.items()):
             P = xyz[off[s]:off[s + 1]]
             if len(P) < 2:
@@ -145,7 +149,7 @@ def run(B: Block, cats: set) -> list[dict]:
     S = _get()
     if len(S["x"]) == 0:
         return []
-    m = B.in_core(S["x"], S["y"])
+    m = B.in_core(S["x"], S["y"]) & (S["mode"] < 2)
     if not m.any():
         return []
     idx = np.nonzero(m)[0]

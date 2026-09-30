@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import time
 
-from . import checks_landmarks, checks_objects, checks_rail, checks_roads, checks_transit, data
+from . import checks_clip, checks_landmarks, checks_objects, checks_rail, checks_roads, checks_stations, checks_transit, data
 
-BLOCK_CATS = checks_roads.ROAD_CATS | checks_objects.OBJECT_CATS | checks_transit.TRANSIT_CATS | {"rail_kink", "rail_gap"}
-GLOBAL_CATS = checks_rail.RAIL_CATS | {"landmark_overlap"}
+BLOCK_CATS = (checks_roads.ROAD_CATS | checks_objects.OBJECT_CATS | checks_transit.TRANSIT_CATS | checks_clip.CLIP_CATS
+              | {"rail_kink", "rail_gap"})
+GLOBAL_CATS = checks_rail.RAIL_CATS | checks_stations.STATION_CATS | {"landmark_overlap", "landmark_road_overlap"}
 
 
 def _block_task(args):
@@ -21,6 +22,7 @@ def _block_task(args):
     out += checks_objects.run(B, cats)
     out += checks_transit.run(B, cats)
     out += checks_rail.run_block(B, cats)
+    out += checks_clip.run(B, cats)
     if bbox:
         out = [f for f in out if bbox[0] <= f["e"] < bbox[2] and bbox[1] <= f["n"] < bbox[3]]
     return out
@@ -30,6 +32,8 @@ def _global_task(args):
     which, cats, bbox = args
     if which == "rail":
         return checks_rail.run_global(cats, bbox)
+    if which == "stations":
+        return checks_stations.run_global(cats, bbox)
     if which == "landmarks":
         return checks_landmarks.run_global(cats, bbox)
     return []
