@@ -399,7 +399,8 @@ export class StationsLayer implements Layer {
       const l = this.labels[i];
       const st = l.st;
       const r = Math.max(1, Math.min(3, st.rank));
-      const maxD = base[r] * altK;
+      // below 150 m nothing beyond 800 m (and that only with a clear line of sight)
+      const maxD = alt < 150 ? Math.min(800, base[r] * altK) : base[r] * altK;
       const dist = Math.hypot(st.c[0] - cp.x, -st.c[1] - cp.z);
       const inRange = alt < altMax[r] && dist < maxD;
       if (!inRange) {

@@ -75,8 +75,12 @@ class LabelBoard {
     const placed: number[] = []; // x0 y0 x1 y1
     const shown = new Set<Item>();
     for (const it of live) {
-      const x0 = it.x + it.ax * it.w - it.pad, y0 = it.y + it.ay * it.h + it.dy - it.pad;
-      const x1 = x0 + it.w + 2 * it.pad, y1 = y0 + it.h + 2 * it.pad;
+      // collision box = the label plus a margin (half its height above/below, 12 px
+      // sideways), so labels lined up along the view direction don't stack into a
+      // column: the lower-priority (farther / minor) one is dropped, never offset
+      const mx = 12 + it.pad, my = it.h * 0.5 + it.pad;
+      const x0 = it.x + it.ax * it.w - mx, y0 = it.y + it.ay * it.h + it.dy - my;
+      const x1 = x0 + it.w + 2 * mx, y1 = y0 + it.h + 2 * my;
       let hit = false;
       for (let k = 0; k < placed.length; k += 4) {
         if (x0 < placed[k + 2] && x1 > placed[k] && y0 < placed[k + 3] && y1 > placed[k + 1]) { hit = true; break; }
@@ -86,8 +90,12 @@ class LabelBoard {
       shown.add(it);
     }
     const k = 1 - Math.exp(-dt * 8);
+    let anyShown = false;
     for (const it of this.items.values()) {
       const target = shown.has(it) ? it.want : 0;
+      // not offered this frame: its screen position is stale (camera jumped, anchor out
+      // of range or off screen), so hide it now instead of fading it out in place
+      if (it.seen !== this.frame) it.cur = 0;
       it.cur += (target - it.cur) * k;
       if (Math.abs(target - it.cur) < 0.01) it.cur = target;
       const op = it.cur < 0.02 ? '0' : it.cur.toFixed(2);
@@ -100,8 +108,12 @@ class LabelBoard {
         const tf = `translate(${(it.x + it.ax * it.w).toFixed(1)}px, ${(it.y + it.ay * it.h + it.dy).toFixed(1)}px)`;
         if (tf !== it.shownTf) { it.el.style.transform = tf; it.shownTf = tf; }
       }
+      if (op !== '0') anyShown = true;
     }
     this.frame++;
+    // keep resolving while anything is still visible, even in frames where no layer
+    // offers a label (otherwise the last shown labels stay frozen on screen)
+    if (anyShown) requestAnimationFrame(() => this.schedule());
   }
 }
 
