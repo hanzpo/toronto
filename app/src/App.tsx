@@ -3,6 +3,8 @@ import { Engine } from './engine/Engine';
 import { config, resolveDataRoot } from './engine/config';
 import { setEngine } from './engine/instance';
 import { Hud } from './ui/Hud';
+import { DebugOverlay } from './ui/DebugOverlay';
+import { applyUrlTime } from './debug/inspect';
 import { clock } from './state/clock';
 import { useApp } from './state/store';
 
@@ -50,6 +52,7 @@ export default function App() {
     (async () => {
       try {
         const mods = loadLayerModules();
+        applyUrlTime();
         const root = await resolveDataRoot();
         if (cancelled || !host.current) return;
         engine = new Engine(host.current, root);
@@ -95,6 +98,7 @@ export default function App() {
     <div className="app">
       <div ref={host} className="viewport" />
       {ready && <Hud />}
+      {ready && <DebugOverlay />}
       {error && <div className="fatal">Renderer failed to start: {error}</div>}
     </div>
   );

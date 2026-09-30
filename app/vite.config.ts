@@ -1,5 +1,6 @@
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
+import { execSync } from 'node:child_process'
 import { cpSync, createReadStream, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -51,7 +52,17 @@ function publicWithoutData(): Plugin {
   }
 }
 
+// short git hash (+ '-dirty') shown in the debug overlay and bug reports
+const appVersion = (() => {
+  try {
+    const h = execSync('git rev-parse --short HEAD').toString().trim()
+    const dirty = execSync('git status --porcelain -- .').toString().trim() ? '-dirty' : ''
+    return h + dirty
+  } catch { return 'unknown' }
+})()
+
 export default defineConfig({
+  define: { __APP_VERSION__: JSON.stringify(appVersion) },
   plugins: [rawGz(), react(), publicWithoutData()],
   build: {
     copyPublicDir: false,

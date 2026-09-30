@@ -173,5 +173,19 @@ body.hud-hidden .hud > *:not(.stats) { opacity: 0; pointer-events: none; }
 /* ---------------------------------------------------------------- map labels */
 .labels-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
 .place-label { position: absolute; left: 0; top: 0; white-space: nowrap; font: 800 11px var(--ui); letter-spacing: 0.18em; text-transform: uppercase;
-  color: #2b2f36; text-shadow: 0 0 3px rgba(255,255,255,0.9), 0 0 8px rgba(255,255,255,0.6); transition: opacity 0.3s; will-change: transform; }
+  color: #2b2f36; text-shadow: 0 0 3px rgba(255,255,255,0.9), 0 0 8px rgba(255,255,255,0.6); opacity: 0; will-change: transform; }
 .hud.analytics ~ .labels-layer .place-label, .app:has(.hud.analytics) .place-label { color: #cfd6df; text-shadow: 0 0 4px #000, 0 0 10px #000; }
+
+/* debug overlay (` to toggle) */
+.debug-overlay { position: fixed; left: 12px; top: 64px; z-index: 50; width: 440px; max-height: 70vh; overflow: auto;
+  background: rgba(10, 13, 18, 0.88); color: #d7e0ea; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+  border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; padding: 8px 10px; pointer-events: auto; }
+.debug-overlay .dbg-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.debug-overlay .dbg-head b { color: #ffd23f; letter-spacing: 0.08em; }
+.debug-overlay .dbg-dim { opacity: 0.55; flex: 1; }
+.debug-overlay button { background: #ffd23f; color: #111; border: 0; border-radius: 5px; padding: 3px 8px; font: inherit; font-weight: 600; cursor: pointer; }
+.debug-overlay table { border-collapse: collapse; width: 100%; }
+.debug-overlay td { padding: 1px 0; vertical-align: top; }
+.debug-overlay td:first-child { color: #8fa3b8; width: 58px; }
+.debug-overlay .dbg-status { color: #7ee2a8; margin-top: 4px; }
+.debug-overlay .dbg-pick { margin: 6px 0 0; padding: 6px; background: rgba(255,255,255,0.05); border-radius: 5px; white-space: pre-wrap; word-break: break-all; }
