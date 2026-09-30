@@ -42,6 +42,8 @@ fn pcell(x: f64, y: f64, dx: i64, dy: i64) -> u64 {
 
 /// links shorter than this: the link after them is chosen in advance (see choose_next)
 const SHORT_LINK: f32 = 30.0;
+/// spawn weight swing of the rush-hour tide on arterials / expressways (+- share)
+const TIDE_SPAWN: f32 = 0.6;
 /// samples along a junction path
 pub const NS: usize = 13;
 /// two junction paths conflict where they come closer than this (m)
@@ -132,6 +134,8 @@ pub struct Player {
     /// effect events since the last `player_events`: curb jolt, collision impulse (m/s)
     pub ev_curb: f32,
     pub ev_hit: f32,
+    /// taken over but not yet driven: the AI keeps the car on its lane
+    pub autopilot: bool,
 }
 
 /// Quadratic junction path: stop line of the in-lane → start of the out-lane.
@@ -276,6 +280,8 @@ pub struct World {
     /// car body centres by 12 m cell (sorted (cell key, car)) for the physical look-ahead
     pgrid: Vec<(u64, u32)>,
     ov_young: u32,
+    /// rush-hour tide in spawns and destinations (tests switch it off to compare)
+    pub tide_on: bool,
     acc: Vec<f32>,
     lim: Vec<f32>,
     step_no: u32,
@@ -434,6 +440,7 @@ impl World {
             rbox: Vec::new(),
             pgrid: Vec::new(),
             ov_young: 0,
+            tide_on: true,
             acc: Vec::new(),
             lim: Vec::new(),
             step_no: 1,
@@ -497,6 +504,7 @@ impl World {
         self.cum_w.clear();
         let r2 = self.radius * self.radius;
         let mut acc = 0.0f32;
+        let tide = if self.tide_on { demand::tidal(self.tod, self.weekday) } else { 0.0 };
         for (i, l) in self.g.links.iter().enumerate() {
             if !l.alive {
                 continue;
@@ -509,8 +517,16 @@ impl World {
                 continue;
             }
             let e = &self.g.edges[l.edge as usize];
-            let d = demand::car_density(l.class, l.flags, e.bottleneck, self.tod, self.weekday)
+            let mut d = demand::car_density(l.class, l.flags, e.bottleneck, self.tod, self.weekday)
                 * if l.class >= 2 { demand::core_factor(mx + self.focus.0, my + self.focus.1) } else { 1.0 };
+            // tidal flow: inbound (towards downtown) heavy in the AM peak, outbound in the PM
+            if tide != 0.0 && l.class <= 3 {
+                let (dx, dy) = (b.x - a.x, b.y - a.y);
+                let (cx, cy) = (-(mx + self.focus.0), -(my + self.focus.1));
+                let n = (dx.hypot(dy) * cx.hypot(cy)).max(1e-6);
+                let inbound = ((dx * cx + dy * cy) / n) as f32;
+                d *= (1.0 + TIDE_SPAWN * tide * inbound).max(0.15);
+            }
             let w = d * l.len * 0.001 * l.lanes as f32;
             if w <= 0.0 {
                 continue;
@@ -1881,6 +1897,24 @@ impl World {
         (l1.flags ^ l2.flags) & (FLAG_BRIDGE | FLAG_TUNNEL) == 0 || c.link == o.link || c.next == o.link || o.next == c.link || c.prev == o.link || o.prev == c.link
     }
 
+    /// is a car on another link (last rendered poses) within `r` of (x, y)
+    fn body_near_other(&self, x: f64, y: f64, r: f64, link: u32) -> bool {
+        for dx in -1..=1 {
+            let (k0, k1) = (pcell(x, y, dx, -1), pcell(x, y, dx, 1));
+            let a = self.pgrid.partition_point(|e| e.0 < k0);
+            for &(k, j) in &self.pgrid[a..] {
+                if k > k1 {
+                    break;
+                }
+                let o = &self.cars[j as usize];
+                if o.link != link && o.flags & F_DEAD == 0 && (o.pose.x - x).hypot(o.pose.y - y) < r {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// is any car body centre (last rendered poses) within `r` (< 12 m) of (x, y)
     fn body_near(&self, x: f64, y: f64, r: f64) -> bool {
         for dx in -1..=1 {
@@ -2173,6 +2207,15 @@ impl World {
                 if self.ghost_near(link, nl, s - len - 2.0, s + 2.0, i) {
                     continue;
                 }
+                // a body of another road drawn over the target lane (diverging ramps, auxiliary
+                // lanes, clustered junctions)
+                {
+                    let lk = &self.g.links[link as usize];
+                    let (tx, ty, _) = self.g.link_xyz(link, (s - len * 0.5).max(0.0), self.g.lane_offset(lk, nl));
+                    if self.body_near_other(tx, ty, 2.2, link) {
+                        continue;
+                    }
+                }
                 // transit in the target lane (beside us, or closing in from behind)
                 if self.obst_block(link, nl, s - len - 3.0, s + 3.0) {
                     continue;
@@ -2297,10 +2340,10 @@ impl World {
             if (node.x - self.focus.0).hypot(node.y - self.focus.1) > self.radius * 0.6 || (surplus && unseen) {
                 return false;
             }
-            let ang = self.rng.f32() * 2.0 * PI;
-            let dist = self.rng.range(1500.0, 6000.0) as f64;
-            self.cars[i].dest = [node.x + dist * ang.cos() as f64, node.y + dist * ang.sin() as f64];
+            let (nx, ny) = (node.x, node.y);
+            self.cars[i].dest = self.pick_dest(nx, ny);
         }
+        let l = &self.g.links[link as usize];
         let nl = &self.g.links[next as usize];
         if !nl.alive || nl.gen != ngen {
             return false;
@@ -2551,12 +2594,37 @@ impl World {
         }
     }
 
-    pub fn spawn_car(&mut self, link: u32, lane: u8, s: f32, v: f32, kind: u8) -> usize {
-        let l = &self.g.links[link as usize];
+    /// A trip destination from (x, y): mostly anywhere 1.5 - 6 km away; in the rush hours a
+    /// share of drivers commute: towards downtown in the morning, out of it in the evening.
+    fn pick_dest(&mut self, x: f64, y: f64) -> [f64; 2] {
+        let tide = if self.tide_on { demand::tidal(self.tod, self.weekday) } else { 0.0 };
+        let r = self.rng.f32();
+        if r < 0.55 * tide.abs() {
+            let (cx, cy) = (-x, -y); // towards City Hall
+            let d0 = cx.hypot(cy).max(1.0);
+            if tide > 0.0 {
+                // into the core (within ~2 km of City Hall)
+                let a = self.rng.f32() * 2.0 * PI;
+                let rr = self.rng.range(0.0, 2000.0) as f64;
+                return [rr * a.cos() as f64, rr * a.sin() as f64];
+            }
+            // out of it: 3 - 8 km further along the radial through here (± 35°)
+            let base = (-cy).atan2(-cx) as f32 + self.rng.range(-0.6, 0.6);
+            let dist = self.rng.range(3000.0, 8000.0) as f64;
+            let _ = d0;
+            return [x + dist * base.cos() as f64, y + dist * base.sin() as f64];
+        }
         let ang = self.rng.f32() * 2.0 * PI;
         let dist = self.rng.range(1500.0, 6000.0) as f64;
+        [x + dist * ang.cos() as f64, y + dist * ang.sin() as f64]
+    }
+
+    pub fn spawn_car(&mut self, link: u32, lane: u8, s: f32, v: f32, kind: u8) -> usize {
+        let l = &self.g.links[link as usize];
         let node = &self.g.nodes[l.to as usize];
-        let dest = [node.x + dist * ang.cos() as f64, node.y + dist * ang.sin() as f64];
+        let (nx, ny) = (node.x, node.y);
+        let dest = self.pick_dest(nx, ny);
+        let l = &self.g.links[link as usize];
         let color = if kind == idm::TRUCK || kind == idm::VAN {
             if self.rng.f32() < 0.6 { 0 } else { self.rng.below(16) as u8 }
         } else {
@@ -3353,18 +3421,24 @@ impl World {
         let Some(i) = self.cars.iter().position(|c| c.id == id) else { return false };
         let pose = if self.cars[i].posed { self.cars[i].pose } else { self.car_pose(i).0 };
         let structure = self.structural(self.cars[i].link);
-        let c = &mut self.cars[i];
-        c.flags |= F_PLAYER;
-        c.flags &= !(F_COMMIT | F_HELD);
-        c.lc_from = NO_LANE;
+        let c = &self.cars[i];
         let edge = self.g.links[c.link as usize].edge;
         let v = c.v;
-        self.player = Some(Player::new(pose, v, edge, id, structure));
+        // the driver keeps driving (on its lane, at traffic speed) until the player
+        // touches the controls: see `player_step`
+        let mut p = Player::new(pose, v, edge, id, structure);
+        p.autopilot = true;
+        self.player = Some(p);
         true
     }
 
     /// Hand the player car back to the AI (if on a lane) or remove it.
     pub fn release_player(&mut self) {
+        if self.player.as_ref().is_some_and(|p| p.autopilot) {
+            // never grabbed: the AI still has it
+            self.player = None;
+            return;
+        }
         let Some(i) = self.player_index() else {
             self.player = None;
             return;

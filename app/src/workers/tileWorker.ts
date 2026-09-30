@@ -1,9 +1,9 @@
 // Tile worker: fetch + gunzip + decode TBN1 + build transferable geometry.
 import { decodeTbn } from '../data/tbn';
-import { setHeritage } from './buildings';
 
 import { buildBuildings, buildRail, buildRoads, buildTerrain, concatMeshes, extractHouses, frontSurfaces, promoteNonHouses, TerrainSampler, type MeshBuf, type TileMeshes } from './meshing';
 import { buildProps } from './props';
+import { setHeritage } from './buildings';
 import { buildUrban } from './urban';
 import { houseRoofQa } from './houseFront';
 import { buildStreet } from './street';
@@ -95,9 +95,9 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
   const msg = ev.data;
   if (msg.type === 'config') {
     suppress = new Set(msg.suppress);
+    setHeritage(msg.heritage ?? []);
     useVGround = msg.vground !== false;
     setStationZones(msg.zones);
-    setHeritage(msg.heritage ?? []);
     openCache(msg.build);
     return;
   }
@@ -127,7 +127,9 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     const G = (a.terrain_h ? Math.round(Math.sqrt(a.terrain_h.length)) : grid) || grid;
     const terr = buildTerrain(a.terrain_h as Int16Array, G, size, level);
     const sampler = new TerrainSampler(terr.heights, G, size);
-    const vground = level === 0 && useVGround ? buildGround(a, sampler, a.ground as Uint8Array | undefined) : null;
+    const embList: number[] = [];
+    const vground = level === 0 && useVGround ? buildGround(a, sampler, a.ground as Uint8Array | undefined, embList) : null;
+    const emb = embList.length ? Float32Array.from(embList) : null;
     const cuts = level === 0 ? cutData(a, size) : null;
     // houses first: footprints that aren't houses (long / narrow) join the extruded buildings
     let houses = level === 0 ? extractHouses(a, suppress, msg.tx * size, msg.ty * size, header.names) : null;
@@ -146,7 +148,7 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     const roadNear = street3d && level === 0 ? frontSurfaces(street3d, railStart, NEAR_SURFS) : 0;
     const collide = level === 0 ? extractFootprints(a, suppress) : null;
     const result: TileMeshes = {
-      terrain: terr.mesh, vground, cuts, heights: terr.heights, grid: G, ground, minH: terr.minH, maxH: Math.max(terr.maxH, 0),
+      terrain: terr.mesh, vground, cuts, emb, heights: terr.heights, grid: G, ground, minH: terr.minH, maxH: Math.max(terr.maxH, 0),
       buildings: bld.mesh, collide, roads: street3d, railStart, roadNear, terrainCoarse: terr.coarseStart, houses, street, canopy, props, urban,
       counts: { buildings: bld.count, houses: houses?.count ?? 0, roads: roads.count, rails: rail.count },
     };
@@ -155,6 +157,7 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     transfers(terr.mesh, tr); transfers(vground, tr);
     if (cuts) tr.push(cuts.off.buffer, cuts.xy.buffer, cuts.type.buffer, cuts.toff.buffer, cuts.txyz.buffer, cuts.tkind.buffer, cuts.box.buffer); transfers(bld.mesh, tr); transfers(street3d, tr);
     if (canopy) tr.push(canopy.buffer);
+    if (emb) tr.push(emb.buffer);
     if (urban) tr.push(urban.items.buffer);
     if (props) { tr.push(props.items.buffer, props.segs.buffer); transfers(props.ground, tr); }
     if (street) tr.push(street.veg.buffer, street.vegCells.buffer, street.lamps.buffer, street.signals.buffer, street.signalIds.buffer);

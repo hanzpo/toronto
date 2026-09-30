@@ -66,6 +66,7 @@ pub struct Peds {
     pub cross: Vec<(u32, [f32; 4])>,
     stop_want: Vec<u8>,
     stop_have: Vec<u8>,
+    stop_trips: Vec<f32>,
     stops_at: f64,
     pub out: Vec<f32>,
 }
@@ -97,6 +98,7 @@ impl Peds {
             cross: Vec::new(),
             stop_want: Vec::new(),
             stop_have: Vec::new(),
+            stop_trips: Vec::new(),
             stops_at: -1e9,
             out: Vec::new(),
         }
@@ -118,6 +120,11 @@ impl Peds {
                 p.dead = true;
             }
         }
+    }
+
+    /// trips per day calling at each stop (same order as set_stops; empty = unknown)
+    pub fn set_stop_trips(&mut self, trips: &[f32]) {
+        self.stop_trips = if trips.len() == self.stops.len() { trips.to_vec() } else { Vec::new() };
     }
 
     /// any transit stop within `r` of (x, y)
@@ -413,8 +420,12 @@ impl Peds {
             for (i, s) in self.stops.iter().enumerate() {
                 let inside = (s[0] - focus.0).powi(2) + (s[1] - focus.1).powi(2) <= r2;
                 self.stop_want[i] = if inside {
-                    let base = prof * downtown(s[0], s[1]).min(4.0) * 1.6 * (0.3 + 1.4 * hash01(i as u64 * 7919));
-                    (base.round() as u8).min(12)
+                    // busier stops (more service ~ more boardings) have bigger crowds: a stop
+                    // with 100 trips a day is the reference; King / Spadina streetcar stops
+                    // (~600) about 2.5x, a quiet suburban stop (~30) about half
+                    let service = self.stop_trips.get(i).map_or(1.0, |&t| (t / 100.0).sqrt().clamp(0.35, 3.0));
+                    let base = prof * downtown(s[0], s[1]).min(4.0) * 1.6 * service * (0.4 + 1.2 * hash01(i as u64 * 7919));
+                    (base.round() as u8).min(30)
                 } else {
                     0
                 };

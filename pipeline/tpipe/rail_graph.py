@@ -192,6 +192,25 @@ def _speed(t: dict) -> float | None:
         return None
 
 
+# Hand fixes of implausible maxspeed tags (km/h). OSM tags the whole Union Station Rail
+# Corridor 15 mph, from the Union throat out to Bathurst; 15 mph is the station throat and
+# platform tracks only. West of Spadina / east of the Don the corridor runs at 30 - 45 mph
+# (Metrolinx USRC track speeds; GO Lakeshore / Kitchener trains pass Bathurst at 60+ km/h).
+UNION_XY = (-120.0, -950.0)
+USRC_THROAT_M = 700.0
+USRC_MIN_KMH = 30.0 * 1.609344
+
+
+def _speed_fix(w: dict, a, b) -> float:
+    """Tagged speed (km/h, 0 = untagged) of a segment of way `w` from a to b."""
+    v = w["speed"] or 0.0
+    if v and w.get("name") == "Union Station Rail Corridor" and v < USRC_MIN_KMH:
+        mx, my = (a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5
+        if math.hypot(mx - UNION_XY[0], my - UNION_XY[1]) > USRC_THROAT_M:
+            v = USRC_MIN_KMH
+    return v
+
+
 # ----------------------------------------------------------------------------- graph
 class RailGraph:
     """Switch-level track graph (see module doc). Attributes are numpy arrays / lists."""
@@ -591,11 +610,13 @@ class RailGraph:
         strokes.sort(key=lambda s: -sum(self.e_len[e] for e, _ in s))
         node_z: dict[int, float] = {}
         self.e_xyz = [None] * nE
+        # tagged maxspeed (km/h, 0 = untagged) per segment, from the way each segment came from
+        self.e_vtag = [None] * nE
         cover_of = lambda e: COVER[int(self.e_kind[e])]  # noqa: E731
         W = self.ways
         for st in strokes:
             # raw stroke polyline, flag per segment, graph nodes (input vertex index)
-            V, SF, RV, NI = [], [], [], []
+            V, SF, SV, RV, NI = [], [], [], [], []
             for e, fw in st:
                 xy = self.e_xy0[e] if fw else self.e_xy0[e][::-1]
                 wis = self.e_wis[e] if fw else self.e_wis[e][::-1]
@@ -608,6 +629,7 @@ class RailGraph:
                     V.append(xy[i + 1])
                     RV.append(rad)
                     SF.append(W[wis[i]]["flags"])
+                    SV.append(_speed_fix(W[wis[i]], xy[i], xy[i + 1]))
                 NI.append((len(V) - 1, int(self.e_to[e] if fw else self.e_from[e])))
             V = np.array(V)
             # canonical smoothing (rail_geom.fillet, as the rendered track): graph nodes pinned
@@ -619,20 +641,23 @@ class RailGraph:
             seg_of = np.zeros(len(Q) - 1, dtype=np.int64)
             for k in range(len(V) - 1):
                 seg_of[vmap[k] : max(vmap[k + 1], vmap[k] + 1)] = k
-            pts, fl = [Q[0]], [SF[0] if SF else 0]
+            pts, fl, sv = [Q[0]], [SF[0] if SF else 0], [SV[0] if SV else 0.0]
             qidx = np.zeros(len(Q), dtype=np.int64)
             for q in range(len(Q) - 1):
                 a, b = Q[q], Q[q + 1]
                 L = float(np.hypot(*(b - a)))
                 k = max(1, int(math.ceil(L / DENSE)))
                 f = SF[int(seg_of[q])] if SF else 0
+                vv = SV[int(seg_of[q])] if SV else 0.0
                 for jj in range(1, k + 1):
                     pts.append(a + (b - a) * (jj / k))
                     fl.append(f)
+                    sv.append(vv)
                 qidx[q + 1] = len(pts) - 1
             node_pos = [(int(qidx[vmap[vi]]), n) for vi, n in NI]
             P = np.array(pts)
             F = np.array(fl)
+            SVd = np.array(sv, dtype=np.float64)
             g = ter.sample(P[:, 0], P[:, 1])
             # vertex flags: a point is bridge/tunnel if its segment is
             bri = (F & F_BRIDGE) > 0
@@ -660,10 +685,13 @@ class RailGraph:
                 a, b = node_pos[2 * k][0], node_pos[2 * k + 1][0]
                 seg = np.column_stack([P[a : b + 1], z[a : b + 1]])
                 flg = F[a + 1 : b + 1] if b > a else F[a : a + 1]
+                spd = SVd[a + 1 : b + 1] if b > a else SVd[a : a + 1]
                 if not fw:
                     seg = seg[::-1]
                     flg = flg[::-1]
+                    spd = spd[::-1]
                 self.e_xyz[e] = (seg, flg)
+                self.e_vtag[e] = spd
         self.node_z = np.array([node_z.get(n, 0.0) for n in range(len(self.nxy))])
         # enforce exact endpoints
         for e in range(nE):
@@ -687,11 +715,19 @@ class RailGraph:
             # base limit per original way along the edge (per dense segment via flags owner is
             # lost; take the edge's ways: min of tagged speeds of the ways on this edge, weighted
             # locally is overkill for mostly-uniform edges)
-            tagged = [W[wi]["speed"] for wi in self.e_wis[e] if W[wi]["speed"]]
-            base = min(tagged) if tagged else V_DEFAULT[kind]
-            if svc and not tagged:
-                base = min(base, (V_SERVICE_TRANSIT if kind else V_SERVICE)[svc])
-            vbase = base / 3.6
+            # base limit per segment from the way it came from (a long edge can join a 15 mph
+            # station track to a 60 mph main line: the limit belongs to each piece, not the edge)
+            dflt = V_DEFAULT[kind]
+            if svc:
+                dflt = min(dflt, (V_SERVICE_TRANSIT if kind else V_SERVICE)[svc])
+            vt = getattr(self, "e_vtag", None)
+            seg_tag = vt[e] if vt is not None and vt[e] is not None and len(vt[e]) == max(n - 1, 1) else None
+            if seg_tag is None:
+                tagged = [W[wi]["speed"] for wi in self.e_wis[e] if W[wi]["speed"]]
+                seg_tag = np.full(max(n - 1, 1), min(tagged) if tagged else 0.0)
+            seg_base = np.where(seg_tag > 0, seg_tag, dflt)
+            # per vertex: the segment starting there (the last vertex takes the last segment)
+            vbase = np.concatenate([seg_base, seg_base[-1:]])[:n] / 3.6
             # curvature over +-15 m
             R = np.full(n, np.inf)
             if cum[-1] > 5.0 and n >= 3:

@@ -75,14 +75,20 @@ departures ≥ 70 s, mixed arr/dep ≥ 110 s) by delaying later movements.
 - Arrival: appears 180 km out on the great-circle bearing of its origin, routes via
   a corner-post fix 65 km out (Pearson: NE/SE/SW/NW), turns (R ≈ 3.3 km, coordinated
   bank) onto a 16–23 km straight final, 3° glideslope aimed 330 m past the
-  threshold, flare, touchdown, decelerates (1.7–2.2 m/s²) to a high-speed/right-angle
-  exit, then taxis the OSM graph (Dijkstra; runway edges ×14 cost so runways are only
-  crossed) with filleted corners and curvature-limited speed to its stand.
+  threshold, flare, touchdown, then brakes from touchdown (≤ 1.7–2.2 m/s², planned so the
+  exit speed is reached ~80 m before the exit) on the centreline to ≈ 15 m/s for a rapid
+  exit (< 45° to the runway, chosen when reachable with ≥ 150 m of runway left) or ≈ 8 m/s
+  for a right-angle exit; vacates along the exit taxiway (fillet radius 140 / 45 m, lateral
+  accel 2.2 m/s²), then taxis the OSM graph (Dijkstra; runway edges ×14 cost so runways are
+  only crossed) at ≤ 11 m/s with filleted corners and curvature-limited speed to its stand.
+  The phase stays "Landing roll" until the exit point (dense rollout samples).
 - Departure: pushback along the lead-in line + pivot, engine start, taxi to the
   runway entry, line-up and hold, takeoff roll (1.75–2.3 m/s² to Vr), rotation
   (pitch smoothing), straight climb-out 4.5–8 km, turn towards the destination,
   climb to FL240–360 (turboprops FL240), disappears 180 km out.
 - Aircraft are parked at their stand between in-block and pushback (and overnight).
+- Follow camera (`AirLayer.follow`): smoothed chase from 3/4 behind, ≈ 2–2.3 aircraft lengths
+  away (+ up to 20 % with speed), low pitch; dragging the view changes the kept offset.
 - No taxi conflict resolution: aircraft can occasionally overlap on taxiways.
 
 ## Rendering

@@ -36,7 +36,7 @@ const DEG = Math.PI / 180;
 const G = 9.81;
 const EXIT_R = 180000; // tracks start / end this far from the airport (m)
 
-interface GP { x: number; y: number; h: number; vmax: number; dec: number; ph: number }
+interface GP { x: number; y: number; h: number; vmax: number; dec: number; ph: number; /** fillet radius / lateral accel override (exit taxiways) */ r?: number; al?: number }
 
 // ------------------------------------------------------------------ geometry helpers
 
@@ -53,7 +53,8 @@ function filletPath(pts: GP[], radius: number, alat: number): GP[] {
     const th = Math.atan2(cross, dot); // signed turn
     const ath = Math.abs(th);
     if (ath < 3 * DEG) { out.push(p); continue; }
-    let t = radius * Math.tan(ath / 2);
+    const rad = p.r ?? radius;
+    let t = rad * Math.tan(ath / 2);
     t = Math.min(t, l1 * 0.48, l2 * 0.48);
     const r = t / Math.tan(ath / 2);
     const sx = p.x - u1x * t, sy = p.y - u1y * t;
@@ -62,10 +63,10 @@ function filletPath(pts: GP[], radius: number, alat: number): GP[] {
     const cx = sx - u1y * r * s, cy = sy + u1x * r * s;
     const a0 = Math.atan2(sy - cy, sx - cx);
     const steps = Math.max(2, Math.ceil(ath / (7 * DEG)));
-    const vArc = Math.max(2.5, Math.sqrt(alat * r));
+    const vArc = Math.max(2.5, Math.sqrt((p.al ?? alat) * r));
     for (let k = 0; k <= steps; k++) {
       const ang = a0 + (th * k) / steps;
-      out.push({ x: cx + Math.cos(ang) * r, y: cy + Math.sin(ang) * r, h: p.h, vmax: Math.min(p.vmax, vArc), dec: p.dec, ph: p.ph });
+      out.push({ x: cx + Math.cos(ang) * r, y: cy + Math.sin(ang) * r, h: p.h, vmax: Math.min(p.vmax, vArc), dec: p.dec, ph: p.ph, r: p.r, al: p.al });
     }
   }
   out.push(pts[pts.length - 1]);
@@ -248,27 +249,46 @@ export function buildArrival(m: MovementCtx): Track {
   const dec = spec.cls === 'wide' ? 1.7 : spec.cls === 'turboprop' ? 2.2 : 1.95;
 
   // ---- ground: rollout -> exit -> taxi -> stand
-  const need = aim + (vref * vref - 16 * 16) / (2 * dec) + 80;
+  // Decelerate on the centreline to the exit speed (rapid exit ≈ 15 m/s, right-angle exit ≈ 8 m/s),
+  // vacate along the exit taxiway (wide fillets, higher lateral acceleration on rapid exits), then
+  // taxi at ≤ 11 m/s (≈ 21 kt), slowing for turns, to the stand.
   const exits = rwy.exits.filter((x) => Math.abs(x[2]) <= 100);
-  let ex = exits.find((x) => x[1] >= need && Math.abs(x[2]) < 60) ?? exits.find((x) => x[1] >= need) ?? exits[exits.length - 1];
+  const reach = (v: number) => aim + (vref * vref - v * v) / (2 * dec) + 60;
+  const rapid = (x: [number, number, number]) => Math.abs(x[2]) < 45;
+  let ex = exits.find((x) => rapid(x) && x[1] >= reach(15) && x[1] <= rwy.len - 150)
+    ?? exits.find((x) => x[1] >= reach(8))
+    ?? exits[exits.length - 1];
   if (!ex) ex = [rwy.entry ?? 0, rwy.len, 90];
-  const exitSpeed = Math.abs(ex[2]) < 50 ? 18 : 11;
+  const isRapid = rapid(ex);
+  const exitSpeed = isRapid ? 15 : 8;
   const exitNode = ex[0];
   const pts: GP[] = [];
   const A = ap;
-  pts.push({ x: tdx, y: tdy, h: tdh, vmax: vref, dec, ph: PH.ROLLOUT });
-  // rollout along the centreline to abeam the exit node
   const exAlong = ex[1];
-  pts.push({ x: rwy.thr[0] + ux * exAlong, y: rwy.thr[1] + uy * exAlong, h: rwyElev(rwy, exAlong), vmax: exitSpeed, dec: 1.0, ph: PH.TAXI_IN });
+  // braking level that reaches the exit speed ~80 m before the exit (not harder than `dec`, ≥ 1.1 m/s²)
+  const dRoll = Math.max(1.1, Math.min(dec, (vref * vref - exitSpeed * exitSpeed) / (2 * Math.max(200, exAlong - aim - 80))));
+  // rollout along the centreline (dense, so the sampled speed / phase stay consistent)
+  const nRoll = Math.max(2, Math.ceil((exAlong - aim) / 50));
+  for (let k = 0; k <= nRoll; k++) {
+    const al = aim + ((exAlong - aim) * k) / nRoll;
+    // brake from touchdown (not just-in-time), then hold the exit speed
+    const vb = Math.max(exitSpeed, Math.sqrt(Math.max(0, vref * vref - 2 * dRoll * (al - aim))));
+    const last = k === nRoll;
+    pts.push({ x: rwy.thr[0] + ux * al, y: rwy.thr[1] + uy * al, h: rwyElev(rwy, al), vmax: last ? exitSpeed : vb, dec, ph: PH.ROLLOUT, ...(last ? { r: isRapid ? 140 : 45, al: 2.2 } : {}) });
+  }
   const route = A.route(exitNode, stand.node);
+  let sExit = 0;
   for (let i = 1; i < route.length; i++) {
     const k = route[i];
-    pts.push({ x: A.E[k], y: A.N[k], h: A.H[k], vmax: 11, dec: 1.0, ph: PH.TAXI_IN });
+    sExit += Math.hypot(A.E[k] - A.E[route[i - 1]], A.N[k] - A.N[route[i - 1]]);
+    const onExit = sExit < (isRapid ? 350 : 120);
+    pts.push(onExit
+      ? { x: A.E[k], y: A.N[k], h: A.H[k], vmax: isRapid ? 15 : 9, dec: 1.2, ph: PH.TAXI_IN, r: isRapid ? 140 : 45, al: 2.2 }
+      : { x: A.E[k], y: A.N[k], h: A.H[k], vmax: 11, dec: 0.9, ph: PH.TAXI_IN });
   }
   const park = standPose(stand, m.noseX, A.H[stand.node]);
   pts.push({ x: park.e, y: park.n, h: park.h, vmax: 2.5, dec: 0.6, ph: PH.TAXI_IN });
   const gpts = filletPath(pts, 38, 1.0);
-  // the runway part keeps its decel; the rollout phase ends where the speed drops to taxi speed
   const gt = groundTimes(gpts, vref, 0, 0.7);
 
   // ---- air (built backwards from touchdown)
@@ -308,7 +328,7 @@ export function buildArrival(m: MovementCtx): Track {
   for (let i = 0; i < gpts.length; i++) {
     const p = gpts[i];
     const v = gt.v[i];
-    const ph = p.ph === PH.ROLLOUT || v > 20 ? PH.ROLLOUT : PH.TAXI_IN;
+    const ph = p.ph;
     const fl = FL_GEAR | (ph === PH.ROLLOUT ? FL_LANDING | FL_STROBE : FL_TAXI);
     acc.push(T + gt.t[i], p.x, p.y, p.h, v, ph, fl);
   }

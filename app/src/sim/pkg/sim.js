@@ -433,11 +433,19 @@ export class Sim {
     }
     /**
      * is the player driving a train?
+     * a player-driven or ridden train is in the rail sim (it must not be reset)
      * @returns {boolean}
      */
     rail_has_player() {
         const ret = wasm.sim_rail_has_player(this.__wbg_ptr);
         return ret !== 0;
+    }
+    /**
+     * rail train being ridden (-1 = none): never retired or handed back while ridden
+     * @param {number} id
+     */
+    rail_keep(id) {
+        wasm.sim_rail_keep(this.__wbg_ptr, id);
     }
     /**
      * @param {Float32Array} n_xyz
@@ -510,7 +518,6 @@ export class Sim {
         return ret !== 0;
     }
     /**
-     * cmd -1 (full brake) .. 1 (full power)
      * @param {number} cmd
      * @param {boolean} emergency
      */
@@ -539,6 +546,17 @@ export class Sim {
     }
     rail_reset() {
         wasm.sim_rail_reset(this.__wbg_ptr);
+    }
+    /**
+     * cmd -1 (full brake) .. 1 (full power)
+     * a rider attaches to a rail trip: placed now if needed and kept; its train id (-1: none)
+     * @param {number} feed
+     * @param {number} trip
+     * @returns {number}
+     */
+    rail_ride(feed, trip) {
+        const ret = wasm.sim_rail_ride(this.__wbg_ptr, feed, trip);
+        return ret;
     }
     /**
      * drop all agents (the timetable takes over), e.g. while sim time is being dropped
@@ -658,12 +676,16 @@ export class Sim {
     }
     /**
      * transit stop positions, flat [E, N, elev, …]
+     * transit stops for waiting crowds: xyz, and trips per day calling there (crowd size)
      * @param {Float64Array} xyz
+     * @param {Float32Array} trips
      */
-    set_stops(xyz) {
+    set_stops(xyz, trips) {
         const ptr0 = passArrayF64ToWasm0(xyz, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
-        wasm.sim_set_stops(this.__wbg_ptr, ptr0, len0);
+        const ptr1 = passArrayF32ToWasm0(trips, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.sim_set_stops(this.__wbg_ptr, ptr0, len0, ptr1, len1);
     }
     /**
      * Toronto seconds since local midnight + weekday (0 = Sunday)

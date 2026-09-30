@@ -255,7 +255,12 @@ const BANK: Record<number, { slope: number; cap: number; below: number }> = {
   4: { slope: 1.0, cap: 3.0, below: 0.8 }, // natural earth bank
 };
 
-export function buildGround(a: Record<string, TypedArray>, terr: TerrainSampler, raster?: Uint8Array): MeshBuf | null {
+/**
+ * `emb` (optional) collects the embankment fills for surface queries on the main
+ * thread (walker, cameras): per fill segment, tile-local
+ * [x0, y0, top0, x1, y1, top1, half width of the top, slope run per metre of drop] (EMB_STRIDE).
+ */
+export function buildGround(a: Record<string, TypedArray>, terr: TerrainSampler, raster?: Uint8Array, emb?: number[]): MeshBuf | null {
   const off = a.gp_off as Uint32Array | undefined;
   if (!off || off.length < 2) return null;
   const S = terr.S, G = terr.G, c = terr.cell, H = terr.h;
@@ -347,8 +352,8 @@ export function buildGround(a: Record<string, TypedArray>, terr: TerrainSampler,
   const cuts = cutData(a, S);
   if (cuts) portals(b, cuts, terr);
   if (raster) {
-    embankments(b, a.r_off as Uint32Array, a.r_xyz as Float32Array, a.r_flags as Uint8Array, a.r_class as Uint8Array, a.r_width as Float32Array, terr, raster, false);
-    embankments(b, a.l_off as Uint32Array, a.l_xyz as Float32Array, a.l_flags as Uint8Array, a.l_class as Uint8Array, null, terr, raster, true);
+    embankments(b, a.r_off as Uint32Array, a.r_xyz as Float32Array, a.r_flags as Uint8Array, a.r_class as Uint8Array, a.r_width as Float32Array, terr, raster, false, emb);
+    embankments(b, a.l_off as Uint32Array, a.l_xyz as Float32Array, a.l_flags as Uint8Array, a.l_class as Uint8Array, null, terr, raster, true, emb);
   }
   skirts(b, terr);
   return b.finish();
@@ -610,7 +615,7 @@ const EMB_TOP = 0.35; // fill top below the deck surface
  * fill ends at a concrete abutment where the span starts. Never over water.
  */
 function embankments(b: GB, off: Uint32Array | undefined, xyz: Float32Array | undefined, flags: Uint8Array | undefined,
-  cls: Uint8Array | undefined, width: Float32Array | null, terr: TerrainSampler, raster: Uint8Array, rail: boolean) {
+  cls: Uint8Array | undefined, width: Float32Array | null, terr: TerrainSampler, raster: Uint8Array, rail: boolean, emb?: number[]) {
   if (!off || !xyz || !flags || off.length < 2) return;
   const S = terr.S;
   const water = (x: number, y: number) => {
@@ -638,6 +643,7 @@ function embankments(b: GB, off: Uint32Array | undefined, xyz: Float32Array | un
     if (n < 2) continue;
     let prev: number[] | null = null;
     let prevOn = false;
+    let prevTop: [number, number, number] | null = null;
     for (let k = 0; k < n; k++) {
       const x = P[3 * k], y = P[3 * k + 1], z = P[3 * k + 2];
       const inside = x >= -1 && y >= -1 && x <= S + 1 && y <= S + 1;
@@ -652,7 +658,7 @@ function embankments(b: GB, off: Uint32Array | undefined, xyz: Float32Array | un
       if (!on) {
         // abutment where a fill meets the open span
         if (prevOn && prev && inside && clr >= EMB_MAX) abut(b, prev);
-        prev = null; prevOn = false;
+        prev = null; prevOn = false; prevTop = null;
         continue;
       }
       // cross-section: toeL, topL, topR, toeR (toe where the 1:slope face meets the ground, 2 iterations)
@@ -690,6 +696,8 @@ function embankments(b: GB, off: Uint32Array | undefined, xyz: Float32Array | un
         abut(b, ids, true);
       }
       prev = ids; prevOn = true;
+      if (emb && prevTop) emb.push(prevTop[0], prevTop[1], prevTop[2], x, y, top, hw, slope);
+      prevTop = [x, y, top];
     }
   }
 }

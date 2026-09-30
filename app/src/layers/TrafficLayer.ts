@@ -46,7 +46,7 @@ export interface TrafficStats { cars: number; peds: number; targetCars: number; 
 
 /** anything exposing transit stop positions (TransitLayer) */
 interface StopSource {
-  system: { stops(opts?: { modes?: string[] }): { x: Float64Array; y: Float64Array; z: Float32Array }; stopCount?: number };
+  system: { stops(opts?: { modes?: string[] }): { index: Int32Array; x: Float64Array; y: Float64Array; z: Float32Array }; stopTrips(): Float32Array; stopCount?: number };
   groundVehicles?(out: GroundVeh[]): number;
 }
 interface GroundVeh { e: number; n: number; heading: number; length: number; width: number; speed: number; trip: number; doorsOpen?: boolean; rail?: boolean }
@@ -374,6 +374,11 @@ export class TrafficLayer implements Layer {
         break;
       case 'railFeeds': this.railFeeds = m.agencies; this.railFeedsProfile = m.profile; break;
       case 'railPlayer': this.railWaiters.splice(0).forEach((f) => f(m.ok)); break;
+      case 'railRide': {
+        if (m.id >= 0) this.railKeep = m.id;
+        this.rideWaiters.splice(0).forEach((f) => f(m.id));
+        break;
+      }
       case 'crossings': {
         // drive the crossing lights / gates (CrossingsLayer: window.__street.setCrossing)
         const w = window as unknown as { __street?: { setCrossing?: (id: number, s: 0 | 1 | 2) => void }; __crossings?: { setCrossing?: (id: number, s: 0 | 1 | 2) => void } };
@@ -486,12 +491,30 @@ export class TrafficLayer implements Layer {
     });
   }
 
+  /** A rider attaches to a rail trip: the sim places its train now if needed and keeps it
+   *  (never retired while ridden). Resolves to the sim train id (-1: not running). */
+  railRide(agency: string, trip: number): Promise<number> {
+    const feed = this.railFeeds.indexOf(agency);
+    if (feed < 0 || !this.worker) return Promise.resolve(-1);
+    return new Promise((res) => {
+      this.rideWaiters.push(res);
+      this.post({ type: 'railRide', feed, trip });
+    });
+  }
+  private rideWaiters: ((id: number) => void)[] = [];
+
   railPlayerRelease() {
     this.railCmd = null;
     this.post({ type: 'railRelease' });
   }
 
   /** player train controller: cmd -1 (full service brake) .. 1 (full power) */
+  /** rail sim train being ridden: the sim never retires or hands it back (null = none) */
+  setRailKeep(id: number | null) {
+    this.railKeep = id ?? -1;
+  }
+  private railKeep = -1;
+
   setRailCommand(cmd: number, emergency = false) {
     this.railCmd = { cmd, emergency };
   }
@@ -499,10 +522,13 @@ export class TrafficLayer implements Layer {
   // ------------------------------------------------------------------------ public API
 
   /** Transit stop positions for waiting crowds (world E/N/elev). */
-  setStops(x: ArrayLike<number>, y: ArrayLike<number>, z: ArrayLike<number>) {
+  setStops(x: ArrayLike<number>, y: ArrayLike<number>, z: ArrayLike<number>, trips?: ArrayLike<number>) {
     const xyz = new Float64Array(x.length * 3);
     for (let i = 0; i < x.length; i++) { xyz[i * 3] = x[i]; xyz[i * 3 + 1] = y[i]; xyz[i * 3 + 2] = z[i]; }
-    this.post({ type: 'stops', xyz }, [xyz.buffer]);
+    // crowd size scales with the service at the stop (trips per day, ~ boardings)
+    const w = new Float32Array(x.length);
+    for (let i = 0; i < x.length; i++) w[i] = trips ? trips[i] : 100;
+    this.post({ type: 'stops', xyz, trips: w }, [xyz.buffer, w.buffer]);
   }
 
   /** Place the player car on the nearest drivable lane (resolves false if no road within ~400 m is loaded). */
@@ -902,6 +928,7 @@ export class TrafficLayer implements Layer {
     const obst = radius > 0 ? this.transitObstacles() : undefined;
     if (this.railProfile) { m.railProfile = this.railProfile; m.railRadius = this.railEnabled ? RAIL_RADIUS : 0; }
     if (this.railCmd) m.railCmd = this.railCmd;
+    m.railKeep = this.railKeep;
     if (this.walkerBody) m.walker = this.walkerBody;
     const qa = (window as unknown as { __qa?: Record<string, unknown> }).__qa;
     if (qa && this.hf) {
@@ -983,7 +1010,8 @@ export class TrafficLayer implements Layer {
       this.stopsAt = ctx.time;
       // street-level stops only (subway / rail stations have their own platforms)
       const s = this.stopSource.system.stops({ modes: ['bus', 'streetcar'] });
-      this.setStops(s.x, s.y, s.z);
+      const all = this.stopSource.system.stopTrips();
+      this.setStops(s.x, s.y, s.z, Array.from(s.index, (k) => all[k]));
     }
 
     const show = st.layers.roads && st.analytics.vehicles && (alt < HIDE_ALTITUDE || this.playerActive);
@@ -1040,6 +1068,7 @@ export class TrafficLayer implements Layer {
     nextZ.clear();
     const view = ctx.view;
     const carNear2 = (CAR_NEAR * view.scale) ** 2;
+    const playerId = this.playerActive && this.hf ? this.hf[HF.PLAYER + 11] : -1;
     for (let i = 0; i < count; i++) {
       const o = i * CAR_STRIDE;
       const meta = u[o + 6];
@@ -1049,7 +1078,8 @@ export class TrafficLayer implements Layer {
       const id = u[o + 7];
       const h = f[o + 3], v = f[o + 5];
       const ch = Math.cos(h), sh = Math.sin(h);
-      const player = (flags & CAR_FLAG.PLAYER) !== 0;
+      // (a car just taken over keeps driving itself until the player touches the controls)
+      const player = (flags & CAR_FLAG.PLAYER) !== 0 || (playerId >= 0 && id === playerId);
       const adv = player ? 0 : v * dtx;
       const e = f[o] + oe + ch * adv, n = f[o + 1] + on + sh * adv;
       const simZ = f[o + 2];
@@ -1087,7 +1117,9 @@ export class TrafficLayer implements Layer {
           const zf = G.at(e + ch * da, n + sh * da), zr = G.at(e - ch * da, n - sh * da);
           const zl = G.at(e - sh * dw, n + ch * dw), zR = G.at(e + sh * dw, n - ch * dw);
           pitch = Math.atan2(zf - zr, 2 * da);
-          roll = Math.atan2(zR - zl, 2 * dw);
+          // the terrain under a graded carriageway can slope a lot across it;
+          // real bodies sit on the road deck: keep the cross-fall to a couple of degrees
+          roll = THREE.MathUtils.clamp(Math.atan2(zR - zl, 2 * dw), -0.035, 0.035);
           target = (zf + zr + zl + zR) * 0.25 - gc + ROAD_LIFT;
         }
         const prev = prevZ.get(id);
@@ -1098,7 +1130,7 @@ export class TrafficLayer implements Layer {
         z = structure || !Number.isFinite(gc) ? simZ + (structure ? 0.1 : 0.04) : gc + ROAD_LIFT;
       }
       if (player) {
-        const fx = this.playerFx(ctx.dt, e, n, h, v, structure);
+        const fx = this.playerFx(ctx.dt, e, n, h, v, structure, kind);
         z += fx[0]; pitch += fx[1]; roll += fx[2];
         const dp = this.drawnPlayer;
         dp.e = e; dp.n = n; dp.z = z; dp.h = h;
@@ -1147,6 +1179,7 @@ export class TrafficLayer implements Layer {
     const dodge = Math.abs(pv) > 2.5;
     const dc = Math.cos(dp.h) * Math.sign(pv), ds = Math.sin(dp.h) * Math.sign(pv);
     const reach = 4 + Math.abs(pv) * 1.5, ramp = 2 + Math.abs(pv) * 0.45;
+    const wb = this.walkerBody;
     for (let i = 0; i < pedCount; i++) {
       const o = i * PED_STRIDE;
       let e = pf[o] + snap.oe, n = pf[o + 1] + snap.on;
@@ -1160,6 +1193,19 @@ export class TrafficLayer implements Layer {
           const off = side * (3.6 - Math.abs(b)) * w;
           e += -ds * off; n += dc * off;
           dodgeW = w; dodgeH = Math.atan2(dc * side, -ds * side);
+        }
+      }
+      // and step around the walking player instead of through them
+      if (wb) {
+        const ph = pf[o + 3], fc = Math.cos(ph), fs = Math.sin(ph);
+        const qx = wb[0] - e, qy = wb[1] - n;
+        const a = qx * fc + qy * fs, b = -qx * fs + qy * fc;
+        const R = 0.9;
+        if (a > -1.4 && a < 2.6 && Math.abs(b) < R) {
+          const w = THREE.MathUtils.clamp(1 - Math.abs(a - 0.4) / 2, 0, 1);
+          const side = b > 0.02 ? -1 : b < -0.02 ? 1 : (i & 1 ? 1 : -1);
+          const off = side * (R - Math.abs(b)) * w;
+          e += -fs * off; n += fc * off;
         }
       }
       const dp2 = view.dist2EN(e, n, pf[o + 2]);
@@ -1192,7 +1238,7 @@ export class TrafficLayer implements Layer {
   }
 
   /** Visual offsets of the player car (dz, pitch, roll): sidewalk lift, curb jolts, rough ground, body roll / squat. */
-  private playerFx(dt: number, e: number, n: number, h: number, v: number, structure: boolean): [number, number, number] {
+  private playerFx(dt: number, e: number, n: number, h: number, v: number, structure: boolean, kind = 0): [number, number, number] {
     const fx = this.fx;
     fx.curbT += dt; fx.hitT += dt;
     const surf = this.hf ? this.hf[HF.PLAYER + 7] : 1;
@@ -1228,7 +1274,10 @@ export class TrafficLayer implements Layer {
       }
       fx.lastH = h; fx.lastV = v;
     }
-    dr += -THREE.MathUtils.clamp(v * fx.yawRate * 0.0075, -0.07, 0.07);
+    // body roll out of turns: ~2.5° per 10 m/s² for cars, heavier vans / trucks roll more (≤ 5°)
+    const heavy = kind >= 3;
+    const rmax = heavy ? 0.085 : 0.045;
+    dr += -THREE.MathUtils.clamp(v * fx.yawRate * (heavy ? 0.0075 : 0.0045), -rmax, rmax);
     dp += THREE.MathUtils.clamp(fx.accel * 0.006, -0.06, 0.04);
     return [dz, dp, dr];
   }

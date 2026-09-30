@@ -130,12 +130,14 @@ export interface TickMsg {
   busRetrip?: { old: number; trip: number; pat: number; arr: Float64Array; dep: Float64Array }[];
   /** player train command (-1 brake .. 1 power) */
   railCmd?: { cmd: number; emergency: boolean };
+  /** rail sim train id being ridden (never retired while ridden), -1 none */
+  railKeep?: number;
 }
 
 export type ToWorker =
   | { type: 'init'; sab: SharedArrayBuffer; dataRoot: string; build: number; tiles: [number, number][] }
   | TickMsg
-  | { type: 'stops'; xyz: Float64Array }
+  | { type: 'stops'; xyz: Float64Array; trips?: Float32Array }
   | { type: 'spawnPlayer'; e: number; n: number; heading: number }
   | { type: 'takeOver'; id: number }
   | { type: 'releasePlayer' }
@@ -143,6 +145,7 @@ export type ToWorker =
   | { type: 'removePed'; e: number; n: number }
   | { type: 'majors' }
   | { type: 'railPlayer'; feed: number; trip: number }
+  | { type: 'railRide'; feed: number; trip: number }
   | { type: 'railRelease' }
   | { type: 'congestion'; tod: number; weekday: number };
 
@@ -159,6 +162,7 @@ export type FromWorker =
   | { type: 'railPlayer'; ok: boolean }
   /** level crossings whose state changed: [osmNodeId, state (0 idle, 1 warning, 2 gates down)]* */
   | { type: 'crossings'; data: Float64Array }
+  | { type: 'railRide'; id: number }
   /** QA: overlapping car bodies by cause (OVERLAP_CAUSES order), every ~2 s */
   | { type: 'overlaps'; counts: number[] }
   /** signal plans of the loaded graph: [osmId, e, n, offset, axis, greenA, greenB]* */

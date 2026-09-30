@@ -702,6 +702,8 @@ pub struct RailSim {
     pub overlaps: u32,
     pub overruns: u32,
     pub player: Option<u32>,
+    /// train being ridden (camera attached): never retired or handed back (NONE = none)
+    pub keep: u32,
     pub hash: String,
     /// service-day seconds (4 am rollover, like the renderer's clock.serviceDay())
     pub stime: f64,
@@ -759,6 +761,7 @@ impl Default for RailSim {
             overlaps: 0,
             overruns: 0,
             player: None,
+            keep: NONE,
             hash: String::new(),
             stime: 0.0,
             bidir: Vec::new(),
@@ -1449,8 +1452,9 @@ impl RailSim {
                     cons[nc] = (sf - front, 0.0);
                     nc += 1;
                     dwell_target = Some(sf);
-                    // timetable as a guideline: when early, cruise at the speed that arrives on
-                    // time (never below 55 % of the line speed); when late, run at line speed
+                    // timetable as a guideline: drivers run at line speed and let the padding
+                    // absorb the difference (timetables pad the run into terminals by minutes);
+                    // only when well ahead (> 1 min at line speed) ease off, to 85 % of it
                     let (arr, _) = feed.times(tr.trip as usize, tr.stop);
                     let left = (arr - t) as f32;
                     let dist = sf - front;
@@ -1458,8 +1462,11 @@ impl RailSim {
                         // empty stock: moderate speed
                         target = target.min(0.6 * vl + 3.0);
                     } else if left > 5.0 && dist > 200.0 {
-                        let need = dist / (left - vl / dy.b * 0.5).max(1.0);
-                        target = target.min(need.max(0.55 * vl).max(8.0));
+                        let at_line = dist / vl.max(1.0) + vl / dy.b * 0.5;
+                        if left - at_line > 60.0 {
+                            let need = dist / (left - vl / dy.b * 0.5).max(1.0);
+                            target = target.min(need.max(0.85 * vl).max(8.0));
+                        }
                     }
                 }
             }
@@ -1633,6 +1640,11 @@ impl RailSim {
             if tr.dead || tr.state != TState::Terminal || tr.player {
                 continue;
             }
+            // being ridden: it stays berthed at the end of its run (no next trip, no empty-stock
+            // move, never retired) until the rider leaves
+            if tr.id == self.keep && tr.legs.is_empty() {
+                continue;
+            }
             let fi = tr.feed as usize;
             if !tr.legs.is_empty() {
                 // turnback: change ends onto the next leg
@@ -1658,12 +1670,12 @@ impl RailSim {
                         }
                     } else {
                         self.trains[ti].legs.clear();
-                        self.remove(ti, true);
+                        self.remove_unless_kept(ti);
                         continue;
                     }
                     // could not change ends (the way back is occupied): give up after a while
                     if t > self.trains[ti].since + 120.0 {
-                        self.remove(ti, true);
+                        self.remove_unless_kept(ti);
                     }
                 }
                 continue;
@@ -1681,7 +1693,7 @@ impl RailSim {
                     let tr = &self.trains[ti];
                     let pos = self.plans[tr.plan as usize].point(&self.net, tr.front);
                     if !self.in_view(pos[0], pos[1]) || t > tr.since + 600.0 {
-                        self.remove(ti, true);
+                        self.remove_unless_kept(ti);
                     }
                 }
                 continue;
@@ -1696,7 +1708,7 @@ impl RailSim {
             // end of an empty-stock move: stabled
             if self.trains[ti].dh {
                 if t >= self.trains[ti].since + 10.0 {
-                    self.remove(ti, true);
+                    self.remove_unless_kept(ti);
                 }
                 continue;
             }
@@ -1710,7 +1722,7 @@ impl RailSim {
             let tr = &self.trains[ti];
             let pos = self.plans[tr.plan as usize].point(&self.net, tr.front);
             if (waited > 240.0 && !self.in_view(pos[0], pos[1])) || waited > 900.0 || (waited > 45.0 && self.blocking(ti)) {
-                self.remove(ti, true);
+                self.remove_unless_kept(ti);
             }
         }
     }
@@ -2790,6 +2802,13 @@ impl RailSim {
         Some(ids)
     }
 
+    /// end of the line for a train, unless it is being ridden: then it waits where it is
+    fn remove_unless_kept(&mut self, ti: usize) {
+        if self.trains[ti].id != self.keep {
+            self.remove(ti, true);
+        }
+    }
+
     fn remove(&mut self, ti: usize, done: bool) {
         self.release_all(ti);
         let tr = &mut self.trains[ti];
@@ -2809,7 +2828,7 @@ impl RailSim {
         let r2 = r * r;
         for ti in 0..self.trains.len() {
             let tr = &self.trains[ti];
-            if tr.dead || tr.player {
+            if tr.dead || tr.player || tr.id == self.keep {
                 continue;
             }
             let p = self.plans[tr.plan as usize].point(&self.net, tr.front - tr.len * 0.5);
@@ -3250,6 +3269,32 @@ impl RailSim {
         tr.cmd = 0.0;
         self.player = Some(tr.id);
         true
+    }
+
+    /// A rider attaches to trip `trip` of feed `feed`: its train is placed now if the sim has
+    /// not placed it yet (even in view: the camera is on it) and is kept (see `keep`).
+    /// Returns the train id, NONE if the trip is not running.
+    pub fn ride(&mut self, feed: u32, trip: u32) -> u32 {
+        let Some(fi) = self.feeds.iter().position(|f| f.id == feed) else { return NONE };
+        if self.dirty {
+            self.rebuild();
+        }
+        if trip as usize >= self.trip_state[fi].len() {
+            return NONE;
+        }
+        let id = match self.trip_state[fi][trip as usize] {
+            TripState::Agent(id) if self.trains.iter().any(|t| t.id == id && !t.dead) => id,
+            TripState::Done => return NONE,
+            _ => {
+                let t = self.stime;
+                if !self.spawn(fi, trip as usize, t) {
+                    return NONE;
+                }
+                self.trains[self.trains.len() - 1].id
+            }
+        };
+        self.keep = id;
+        id
     }
 
     pub fn player_release(&mut self) {

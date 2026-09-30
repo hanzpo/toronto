@@ -156,7 +156,8 @@ export class Engine {
     this.controls = new CameraController({
       camera: this.camera,
       dom: renderer.domElement,
-      heightAt: (e, n) => this.heightAt(e, n),
+      // cameras keep out of embankment fills too
+      heightAt: (e, n) => this.surfaceAt(e, n),
       pickGround: (x, y) => this.pickGround(x, y),
       buildingTop: (e, n, h) => this.buildings.topAt(e, n, h),
     }, start);
@@ -209,6 +210,11 @@ export class Engine {
   /** terrain elevation (datum m) at world E,N (finest loaded LOD, 0 if unknown) */
   heightAt(e: number, n: number): number {
     return this.tiles ? this.tiles.heightAt(e, n, 0) : 0;
+  }
+
+  /** Terrain or embankment fill top, whichever is higher (walker, third-person cameras). */
+  surfaceAt(e: number, n: number): number {
+    return this.tiles ? this.tiles.surfaceAt(e, n, 0) : 0;
   }
 
   /** ray-march the terrain height field under a screen point */

@@ -34,6 +34,8 @@ export interface TileMeshes {
   vground?: MeshBuf | null;
   /** open cuts / portal approaches (level 0): floor query for heightAt */
   cuts?: import('./ground').CutBuf | null;
+  /** embankment fills (level 0, ground.ts buildGround `emb`): surface queries */
+  emb?: Float32Array | null;
   heights: Float32Array; // G*G metres
   grid: number;
   ground: Uint8Array;

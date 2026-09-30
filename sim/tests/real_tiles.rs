@@ -367,3 +367,59 @@ fn graph_wrap(a: f32) -> f32 {
     while a < -std::f32::consts::PI { a += std::f32::consts::TAU; }
     a
 }
+
+/// Playtest: DVP at Bloor in the AM peak — southbound (inbound) must be the slow direction.
+#[test]
+fn dvp_am_peak_direction() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../app/public/data/graph");
+    if !dir.exists() {
+        return;
+    }
+    let (fx, fy): (f64, f64) = std::env::var("DVP_XY").ok().map(|v| { let p: Vec<f64> = v.split(',').map(|x| x.parse().unwrap()).collect(); (p[0], p[1]) }).unwrap_or((2150.0, 2100.0));
+    let mut w = World::new(5, 16000, 12000);
+    load_around(&mut w, &dir, fx, fy, 2600.0);
+    w.focus = (fx, fy);
+    w.radius = 1900.0;
+    w.peds.radius = 300.0;
+    w.tod = std::env::var("TOD").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(8.0) * 3600.0;
+    w.weekday = 3;
+    w.tide_on = std::env::var("NO_TIDE").is_err();
+    let (mut vs, mut ns, mut vn, mut nn) = (0.0f64, 0u32, 0.0f64, 0u32);
+    let mut causes = [0u32; 10];
+    let mut young = u32::MAX;
+    for k in 0..1500 {
+        w.step(0.2);
+        w.write_cars(0.0, 0.0);
+        if k > 300 && k % 25 == 0 {
+            let (c, ex) = w.overlap_causes(young, 3);
+            young = w.next_car_id();
+            for q in 0..10 { causes[q] += c[q]; }
+            if std::env::var("OV_EX").is_ok() { for e in ex { eprintln!("   {e}"); } }
+        }
+        if k > 600 && k % 10 == 0 {
+            for (i, c) in w.cars.iter().enumerate() {
+                let l = &w.g.links[c.link as usize];
+                if l.class != 0 || !l.alive {
+                    continue;
+                }
+                let (p, _) = w.car_pose(i);
+                if (p.x - fx).hypot(p.y - fy) > 900.0 {
+                    continue;
+                }
+                // "inbound" = heading towards City Hall along the road's main axis (N/S or E/W)
+                let (tx, ty) = (-p.x, -p.y);
+                let inb = if fx.abs() < fy.abs() * 1.5 { p.h.sin() as f64 * ty.signum() } else { p.h.cos() as f64 * tx.signum() };
+                if inb > 0.5 {
+                    vs += c.v as f64;
+                    ns += 1;
+                } else if inb < -0.5 {
+                    vn += c.v as f64;
+                    nn += 1;
+                }
+            }
+        }
+    }
+    eprintln!("  overlap causes (48 samples): {:?}", causes);
+    eprintln!("expressway 08:02-08:05 near ({fx},{fy}): inbound {:.1} m/s (n {ns}), outbound {:.1} m/s (n {nn})", vs / ns.max(1) as f64, vn / nn.max(1) as f64);
+    assert!(vs / ns.max(1) as f64 <= vn / nn.max(1) as f64 + 0.5, "AM peak: inbound should be the slow direction");
+}

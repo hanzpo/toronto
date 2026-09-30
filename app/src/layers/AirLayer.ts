@@ -8,6 +8,7 @@ import type { Engine } from '../engine/Engine';
 import type { FrameContext, Layer } from '../engine/types';
 import { AirSystem } from '../air/AirSystem';
 import { AircraftRenderer } from '../air/AircraftRenderer';
+import { aircraftModel } from '../models/aircraft';
 import { useApp } from '../state/store';
 
 const PICK_PX = 14;
@@ -101,17 +102,47 @@ export class AirLayer implements Layer {
     }
   };
 
-  /** keep the camera on a plane (null stops) */
+  /**
+   * Keep the camera on a plane (null stops): a smoothed chase from 3/4 behind,
+   * framed by the aircraft's size (≈ 2–2.3 lengths away — a 737 fills ~1/3 of the
+   * view) and a little further at speed; low pitch so it reads against the sky.
+   * Dragging the view changes the chase offset, which is then kept.
+   */
   follow(key: string | null) {
     const c = this.engine.controls;
     if (!key) { c.follow(null); return; }
     const p0 = this.system.find(key);
-    const air = p0 ? p0.pose.h - this.engine.heightAt(p0.pose.e, p0.pose.n) > 30 : false;
+    if (!p0) return;
+    const len = aircraftModel(p0.type).spec.length;
+    const air0 = p0.pose.h - this.engine.heightAt(p0.pose.e, p0.pose.n) > 30;
+    let rel = Math.PI - 0.55; // camera heading relative to the nose bearing (3/4 rear, left side)
+    let last = Math.PI / 2 - p0.pose.yaw + rel;
+    let dist = len * (air0 ? 2.3 : 2.0);
+    let t0 = performance.now();
+    c.jumpTo({ heading: last });
     c.follow(() => {
       const p = this.system.find(key);
-      return p ? { e: p.pose.e, n: p.pose.n, h: p.pose.h } : null;
-    }, { dist: air ? 600 : 260, pitch: 0.35 });
+      if (!p) return null;
+      const now = performance.now(), dt = Math.min(0.1, (now - t0) / 1000);
+      t0 = now;
+      const g = c.goal;
+      // user dragged the heading → keep the new offset
+      const du = Math.atan2(Math.sin(g.heading - last), Math.cos(g.heading - last));
+      if (Math.abs(du) > 1e-4) rel += du;
+      const brg = Math.PI / 2 - p.pose.yaw;
+      const want = brg + rel;
+      last += Math.atan2(Math.sin(want - last), Math.cos(want - last)) * (1 - Math.exp(-dt * 1.2));
+      g.heading = last;
+      // distance: size-based, +20 % at cruise speed; eased so zooming by hand still works briefly
+      const target = len * (p.pose.phase >= 5 && p.pose.phase <= 9 ? 2.3 : 2.0) * (1 + Math.min(0.2, p.pose.v / 1000));
+      dist += (target - dist) * (1 - Math.exp(-dt * 0.8));
+      if (Math.abs(g.dist - dist) < len * 0.02 || !this.followInit) { g.dist = dist; }
+      this.followInit = true;
+      return { e: p.pose.e, n: p.pose.n, h: p.pose.h + len * 0.08 };
+    }, { dist, pitch: air0 ? 0.1 : 0.2 });
+    this.followInit = false;
   }
+  private followInit = false;
 
   dispose() {
     this.engine.renderer.domElement.removeEventListener('pointerdown', this.onDown);

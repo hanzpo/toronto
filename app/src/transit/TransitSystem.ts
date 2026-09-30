@@ -650,6 +650,25 @@ export class TransitSystem {
    * filtered by the modes serving them. `mode` is the "highest" mode serving the
    * stop (lowest MODE_ID). Coordinates relative to `origin`.
    */
+  /** Trips per day calling at each stop (loaded feeds): a proxy for its boardings. */
+  stopTrips(): Float32Array {
+    const out = new Float32Array(this.stopCount);
+    for (const fr of this.feeds) {
+      const f = fr.f;
+      const nPat = f.patStopOff.length - 1;
+      const perPat = new Uint32Array(nPat);
+      for (let i = 0; i < f.tripPattern.length; i++) perPat[f.tripPattern[i]]++;
+      for (let p = 0; p < nPat; p++) {
+        if (!perPat[p]) continue;
+        for (let q = f.patStopOff[p]; q < f.patStopOff[p + 1]; q++) {
+          if (f.patStopFlag[q]) continue;
+          out[fr.stopBase + f.patStop[q]] += perPat[p];
+        }
+      }
+    }
+    return out;
+  }
+
   stops(opts: { modes?: Mode[]; origin?: [number, number] } = {}): {
     index: Int32Array; x: Float64Array; y: Float64Array; z: Float32Array; mode: Uint8Array;
   } {

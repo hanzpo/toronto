@@ -93,15 +93,17 @@ export class Sim {
     rail_crossings(data: Float64Array): void;
     /**
      * is the player driving a train?
+     * a player-driven or ridden train is in the rail sim (it must not be reset)
      */
     rail_has_player(): boolean;
+    /**
+     * rail train being ridden (-1 = none): never retired or handed back while ridden
+     */
+    rail_keep(id: number): void;
     rail_network(n_xyz: Float32Array, n_flags: Uint8Array, e_from: Uint32Array, e_to: Uint32Array, e_off: Uint32Array, e_xyz: Float32Array, e_vlim: Uint8Array, e_len: Float32Array, e_kind: Uint8Array, e_svc: Uint8Array, e_dir: Uint8Array, e_flags: Uint8Array, c_off: Uint32Array, c_to: Uint32Array): void;
     rail_path_len(): number;
     rail_path_ptr(): number;
     rail_player_attach(feed: number, trip: number): boolean;
-    /**
-     * cmd -1 (full brake) .. 1 (full power)
-     */
     rail_player_input(cmd: number, emergency: boolean): void;
     rail_player_release(): void;
     /**
@@ -110,6 +112,11 @@ export class Sim {
     rail_player_state(): Float64Array;
     rail_ptr(): number;
     rail_reset(): void;
+    /**
+     * cmd -1 (full brake) .. 1 (full power)
+     * a rider attaches to a rail trip: placed now if needed and kept; its train id (-1: none)
+     */
+    rail_ride(feed: number, trip: number): number;
     /**
      * drop all agents (the timetable takes over), e.g. while sim time is being dropped
      * camera position and horizontal forward vector (spawns / removals avoid the view)
@@ -148,8 +155,9 @@ export class Sim {
     set_obstacles(data: Float64Array): void;
     /**
      * transit stop positions, flat [E, N, elev, …]
+     * transit stops for waiting crowds: xyz, and trips per day calling there (crowd size)
      */
-    set_stops(xyz: Float64Array): void;
+    set_stops(xyz: Float64Array, trips: Float32Array): void;
     /**
      * Toronto seconds since local midnight + weekday (0 = Sunday)
      */
@@ -232,6 +240,7 @@ export interface InitOutput {
     readonly sim_rail_crossing_changes: (a: number) => [number, number];
     readonly sim_rail_crossings: (a: number, b: number, c: number) => void;
     readonly sim_rail_has_player: (a: number) => number;
+    readonly sim_rail_keep: (a: number, b: number) => void;
     readonly sim_rail_network: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number, a1: number, b1: number, c1: number) => void;
     readonly sim_rail_path_len: (a: number) => number;
     readonly sim_rail_path_ptr: (a: number) => number;
@@ -241,6 +250,7 @@ export interface InitOutput {
     readonly sim_rail_player_state: (a: number) => [number, number];
     readonly sim_rail_ptr: (a: number) => number;
     readonly sim_rail_reset: (a: number) => void;
+    readonly sim_rail_ride: (a: number, b: number, c: number) => number;
     readonly sim_rail_set_camera: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly sim_rail_set_depots: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
     readonly sim_rail_set_radius: (a: number, b: number) => void;
@@ -253,7 +263,7 @@ export interface InitOutput {
     readonly sim_set_fast: (a: number, b: number) => void;
     readonly sim_set_majors: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
     readonly sim_set_obstacles: (a: number, b: number, c: number) => void;
-    readonly sim_set_stops: (a: number, b: number, c: number) => void;
+    readonly sim_set_stops: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly sim_set_time: (a: number, b: number, c: number) => void;
     readonly sim_set_view: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly sim_set_walker: (a: number, b: number, c: number, d: number, e: number, f: number) => void;

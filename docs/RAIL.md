@@ -37,7 +37,10 @@ cd pipeline && uv run python -m tpipe.rail_validate [agency ...] [--compare DIR]
 - **Speed limits** per vertex (0.5 m/s units): OSM `maxspeed` (mph or km/h), else class
   default (rail 130, subway 80, LRT 70, tram 40 km/h; sidings 25, yards 15, crossovers
   40 / 25 km/h), capped by curvature `v = sqrt(a_lat · R)` (R from ±15 m, a_lat 1.1 rail,
-  1.0 subway, 0.9 LRT/tram).
+  1.0 subway, 0.9 LRT/tram). The tag belongs to the segment of the way it came from, not
+  to the whole edge (an edge can join a 15 mph station track to a 60 mph main line).
+  Hand fix: OSM tags the Union Station Rail Corridor 15 mph all the way out to Bathurst;
+  15 mph is kept within 700 m of Union (throat and platforms), the rest runs at 30 mph.
 - **Directions** (`e_dir` bit 1 forward, 2 backward): subway / LRT / tram double track
   runs on the right — a track whose parallel twin of the same class (2.5–16 m away,
   7.5 m for trams; not a track it meets itself, i.e. not loop / siding / platform pairs)
@@ -154,8 +157,13 @@ bbox-edge points unchanged). Bus files also carry `trip_next`.
   Flexity LRT / streetcar 1.2 m/s²; GO MP40 + 12 BiLevels 0.45 m/s², 4.2 W/kg, 150 km/h;
   UP DMU; VIA). Civil limits apply under the whole train, lower limits ahead are braked for.
 - **Timetable as a guideline**: at a stop a train dwells ≥ its minimum dwell and never
-  leaves before the scheduled departure; when early it cruises at the speed that arrives on
-  time (≥ 55 % of the line speed), when late at line speed.
+  leaves before the scheduled departure; between stops it runs at line speed and lets the
+  timetable padding absorb the difference (runs into terminals are padded by minutes); only
+  when more than a minute ahead at line speed does it ease off, to ≥ 85 % of the line speed.
+- **Riding** (cab / chase / seat views): the camera sits on the sim's own train (its published
+  track), late or early, and follows it by train id into its next trip. The train is placed
+  immediately if the sim had not placed it yet (`RailSim::ride`) and is kept (`keep`): never
+  handed back, retired or reset while ridden; at the end of its run it stays berthed.
 - **Lifecycle**: trips whose scheduled position is within the rail radius (9 km) of the focus
   become agents at that position (behind whatever occupies it, else pending = not drawn);
   a trip ending where the next trip of its vehicle block starts continues as it — same
@@ -210,4 +218,5 @@ Tests: `cd sim && cargo test --release -j 4` — scenarios (following trains, op
 on single track, never departs early, player behind an AI train, streetcar at a red,
 streetcar behind a car, bus stop + schedule) and real data (`tests/rail_real.rs`: Union
 morning peak, Union–Bloor–Weston corridor with GO Kitchener / UP / VIA, early-morning
-pull-outs; 0 overlaps / overruns asserted).
+pull-outs; 0 overlaps / overruns asserted; `lw_late_arrival_at_union`: the late LW trip
+into Union reaches its platform and a ridden train is never retired).

@@ -184,8 +184,9 @@ impl Sim {
     }
 
     /// is the player driving a train?
+    /// a player-driven or ridden train is in the rail sim (it must not be reset)
     pub fn rail_has_player(&self) -> bool {
-        self.rail.player.is_some()
+        self.rail.player.is_some() || (self.rail.keep != u32::MAX && self.rail.trains.iter().any(|t| t.id == self.rail.keep && !t.dead))
     }
 
     pub fn set_fast(&mut self, fast: bool) {
@@ -287,8 +288,10 @@ impl Sim {
     }
 
     /// transit stop positions, flat [E, N, elev, …]
-    pub fn set_stops(&mut self, xyz: &[f64]) {
+    /// transit stops for waiting crowds: xyz, and trips per day calling there (crowd size)
+    pub fn set_stops(&mut self, xyz: &[f64], trips: &[f32]) {
         self.w.peds.set_stops(xyz);
+        self.w.peds.set_stop_trips(trips);
     }
 
     /// [target cars, target peds, cars, peds, live links, tiles, cars stopped in a junction box]
@@ -509,6 +512,15 @@ impl Sim {
         self.rail.player_release();
     }
     /// cmd -1 (full brake) .. 1 (full power)
+    /// a rider attaches to a rail trip: placed now if needed and kept; its train id (-1: none)
+    pub fn rail_ride(&mut self, feed: u32, trip: u32) -> i32 {
+        let id = self.rail.ride(feed, trip);
+        if id == u32::MAX { -1 } else { id as i32 }
+    }
+    /// rail train being ridden (-1 = none): never retired or handed back while ridden
+    pub fn rail_keep(&mut self, id: i32) {
+        self.rail.keep = if id < 0 { gta_none() } else { id as u32 };
+    }
     pub fn rail_player_input(&mut self, cmd: f32, emergency: bool) {
         self.rail.player_input(cmd, emergency);
     }
@@ -774,4 +786,8 @@ mod tests {
 extern "C" {
     #[wasm_bindgen::prelude::wasm_bindgen(js_namespace = console, js_name = error)]
     fn console_error(s: &str);
+}
+
+fn gta_none() -> u32 {
+    u32::MAX
 }

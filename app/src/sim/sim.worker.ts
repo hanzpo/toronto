@@ -268,6 +268,7 @@ function tick(m: TickMsg) {
       if (m.railProfile && m.railProfile !== railProfile) void loadRail(m.railProfile);
       sim.rail_set_radius(m.railRadius ?? 0);
       if (m.railCmd) sim.rail_player_input(m.railCmd.cmd, m.railCmd.emergency);
+      if (m.railKeep !== undefined) sim.rail_keep(m.railKeep);
       if (m.camera) sim.rail_set_camera(m.camera[0], m.camera[1], m.camera[2], m.camera[3]);
       if (m.busPatterns) for (const p of m.busPatterns) sim.bus_pattern(p.id, p.xy, p.stopD, p.stopFlag);
       if (m.busRetrip) for (const b of m.busRetrip) sim.bus_retrip(b.old, b.trip, b.pat, b.arr, b.dep);
@@ -513,7 +514,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
         break;
       }
       case 'tick': tick(m); break;
-      case 'stops': sim?.set_stops(m.xyz); break;
+      case 'stops': sim?.set_stops(m.xyz, m.trips ?? new Float32Array(0)); break;
       case 'spawnPlayer': {
         const ok = sim?.spawn_player(m.e, m.n, m.heading) ?? false;
         lastRoad = undefined;
@@ -533,6 +534,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       case 'majors': await loadMajors(); break;
       case 'railPlayer': post({ type: 'railPlayer', ok: sim?.rail_player_attach(m.feed, m.trip) ?? false }); break;
       case 'railRelease': sim?.rail_player_release(); break;
+      case 'railRide': post({ type: 'railRide', id: sim?.rail_ride(m.feed, m.trip) ?? -1 }); break;
       case 'congestion': congestion(m.tod, m.weekday); break;
     }
   } catch (e) {

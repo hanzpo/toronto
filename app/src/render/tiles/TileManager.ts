@@ -1,7 +1,6 @@
 // Quadtree-ish (4×4 split) tile streaming: LOD selection, prioritized loading
 // through a worker pool, cancellation, LRU eviction and hole-free transitions.
 import * as THREE from 'three/webgpu';
-import { TILE_FACADE_LANDMARKS } from './heritage';
 import type { WorkerIn, WorkerOut } from '../../workers/tileWorker';
 import type { MeshBuf, TileMeshes } from '../../workers/meshing';
 import { GroundPage, GROUND_LAYERS } from './materials';
@@ -11,6 +10,7 @@ import { cutFloor, type CutBuf } from '../../workers/ground';
 import type { StreetBuf } from '../../workers/street';
 import { HousePools } from './houses';
 import { facadeMaterial } from './facadeMaterial';
+import { TILE_FACADE_LANDMARKS } from './heritage';
 import type { FrameContext } from '../../engine/types';
 import { useApp } from '../../state/store';
 import { Horizon, R_OCC } from '../../engine/horizon';
@@ -72,6 +72,8 @@ export interface Tile {
   canopy: Float32Array | null;
   /** open cuts / portal approaches (level 0), for heightAt */
   cuts?: CutBuf | null;
+  /** embankment fills (level 0): 8 floats per segment, see workers/ground.ts buildGround */
+  emb?: Float32Array | null;
   /** street props / parking lots (level 0), consumed by PropsLayer */
   props: import('../../workers/props').PropsBuf | null;
   /** rooftops / construction / laneways (level 0), consumed by UrbanLayer */
@@ -291,6 +293,36 @@ export class TileManager {
       }
     }
     return fallback;
+  }
+
+  /**
+   * Walkable surface (datum m): the terrain, or the top / slope of an
+   * embankment fill under a low bridge approach where there is one (those
+   * fills are meshes on top of the terrain grid). For the walker and cameras.
+   */
+  surfaceAt(e: number, n: number, fallback = 0): number {
+    const h = this.heightAt(e, n, fallback);
+    const S = this.manifest?.tileSize[0];
+    if (!S) return h;
+    const tx = Math.floor(e / S), ty = Math.floor(n / S);
+    const t = this.tiles.get(key(0, tx, ty));
+    const em = t?.emb;
+    if (!em) return h;
+    const x = e - tx * S, y = n - ty * S;
+    let best = h;
+    for (let i = 0; i + 8 <= em.length; i += 8) {
+      const x0 = em[i], y0 = em[i + 1], x1 = em[i + 3], y1 = em[i + 4], hw = em[i + 6];
+      const reach = hw + 12 * em[i + 7];
+      if (x < Math.min(x0, x1) - reach || x > Math.max(x0, x1) + reach || y < Math.min(y0, y1) - reach || y > Math.max(y0, y1) + reach) continue;
+      const dx = x1 - x0, dy = y1 - y0, l2 = dx * dx + dy * dy;
+      if (l2 < 1e-6) continue;
+      const u = ((x - x0) * dx + (y - y0) * dy) / l2;
+      if (u < 0 || u > 1) continue;
+      const d = Math.abs((x - x0) * dy - (y - y0) * dx) / Math.sqrt(l2);
+      const z = em[i + 2] + (em[i + 5] - em[i + 2]) * u - Math.max(0, d - hw) / em[i + 7];
+      if (z > best) best = z;
+    }
+    return best;
   }
 
   // ------------------------------------------------------------------------ per-frame
@@ -729,6 +761,7 @@ export class TileManager {
     t.street = r.street;
     t.canopy = r.canopy;
     t.cuts = r.cuts ?? null;
+    t.emb = r.emb ?? null;
     t.props = r.props;
     t.urban = r.urban ?? null;
     if (r.urban) bytes += r.urban.items.byteLength;
@@ -758,7 +791,7 @@ export class TileManager {
     if (t.page && t.layer >= 0) t.page.release(t.layer);
     this.bytes -= t.bytes;
     Object.assign(t, {
-      group: null, terrain: null, terrainFar: null, buildings: null, collide: null, roads: null, railStart: 0, streetMask: 7, roadNear: 0, heights: null, houses: null, street: null, canopy: null, cuts: null, props: null, urban: null,
+      group: null, terrain: null, terrainFar: null, buildings: null, collide: null, roads: null, railStart: 0, streetMask: 7, roadNear: 0, heights: null, houses: null, street: null, canopy: null, cuts: null, emb: null, props: null, urban: null,
       page: null, layer: -1, bytes: 0, state: 'none', counts: null,
     });
     this.readyCount--;

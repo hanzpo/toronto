@@ -69,7 +69,10 @@ fn idx(a: &Arr) -> Vec<u32> {
 }
 
 fn data() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../app/public/data")
+    match std::env::var("RAIL_DATA") {
+        Ok(d) => PathBuf::from(d),
+        Err(_) => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../app/public/data"),
+    }
 }
 
 fn load() -> Option<RailSim> {
@@ -346,4 +349,69 @@ fn debug_tram_pullout() {
     for trip in [8usize, 15, 22] {
         eprintln!("{}", sim.debug_pullout(0, trip));
     }
+}
+
+/// Playtest: LW trip due at Union 08:34, running late. Traces it from 08:20 (camera near
+/// Exhibition) until it berths; it must never be removed or change trip before Union.
+#[test]
+fn lw_late_arrival_at_union() {
+    let Some(mut sim) = load() else { return };
+    sim.focus = (-2500.0, -1200.0);
+    sim.step(0.2, 8.0 * 3600.0 + 19.0 * 60.0);
+    let fi = sim.feeds.iter().position(|f| f.id == 1).unwrap(); // go
+    let f = &sim.feeds[fi];
+    let cands: Vec<usize> = (0..f.trip_end.len())
+        .filter(|&t| (30700..30900).contains(&f.trip_end[t]))
+        .filter(|&t| {
+            let p = &sim.plans[(f.plan0 + f.trip_pattern[t]) as usize];
+            p.items.iter().any(|it| it.edge == 1324 || it.edge == 904 || it.edge == 907)
+        })
+        .collect();
+    eprintln!("candidates {:?}", cands.iter().map(|&t| (t, f.trip_start[t], f.trip_end[t])).collect::<Vec<_>>());
+    sim.focus = (-2500.0, -1200.0);
+    let mut t = 8.0 * 3600.0 + 20.0 * 60.0;
+    let dt = 0.2f32;
+    let mut last = String::new();
+    let (mut berthed, mut vanished) = (false, false);
+    let watch = *cands.last().unwrap();
+    while t < 8.0 * 3600.0 + 55.0 * 60.0 {
+        sim.step(dt, t);
+        t += dt as f64;
+        for &trip in &cands {
+            let st = format!("{:?}", sim.trip_state.get(fi).and_then(|v| v.get(trip)));
+            let tr = sim.trains.iter().position(|x| !x.dead && x.feed == fi as u32 && x.trip == trip as u32);
+            let line = match tr {
+                Some(k) => {
+                    let x = &sim.trains[k];
+                    let p = sim.plans[x.plan as usize].point(&sim.net, x.front);
+                    format!("trip {trip} {st} id {} state {:?} v {:.1} front {:.0} ({:.0},{:.0}) stop {} delay {:.0} ma {:.0} held {:.0} lim {:.1} why {}", x.id, x.state, x.v, x.front, p[0], p[1], x.stop, x.delay, x.ma - x.front, x.held_t, sim.plans[x.plan as usize].limit_over(x.front - x.len, x.front), sim.why(k).chars().take(140).collect::<String>())
+                }
+                None => format!("trip {trip} {st} no train"),
+            };
+            if trip == watch {
+                if let Some(k) = tr {
+                    sim.keep = sim.trains[k].id;
+                }
+                match tr {
+                    Some(k) if sim.trains[k].state == TState::Terminal => berthed = true,
+                    None if !berthed && matches!(sim.trip_state.get(fi).and_then(|v| v.get(trip)), Some(gta_sim::rail::TripState::Finished) | Some(gta_sim::rail::TripState::Done)) => vanished = true,
+                    _ => {}
+                }
+            }
+            let key: String = format!("{trip}:{}", (t as i64) / 20);
+            if key != last && trip == *cands.last().unwrap() {
+                last = key;
+                let hh = t as i64;
+                if std::env::var("LW_TRACE").is_ok() {
+                    eprintln!("{:02}:{:02}:{:02} {line}", hh / 3600, hh / 60 % 60, hh % 60);
+                }
+            }
+        }
+    }
+    // the ridden train is still there after its trip (next trip, empty-stock move or waiting)
+    let kept = sim.trains.iter().find(|x| x.id == sim.keep && !x.dead);
+    eprintln!("kept train after the run: {:?}", kept.map(|x| (x.trip, x.state, x.dh, x.front)));
+    assert!(kept.is_some(), "the ridden train was retired");
+    assert!(!vanished, "the LW trip ended before reaching Union");
+    assert!(berthed, "the LW trip never berthed at Union");
 }

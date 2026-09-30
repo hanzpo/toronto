@@ -583,6 +583,42 @@ export class TransitLayer implements Layer {
     return [...this.agents.keys()];
   }
 
+  /**
+   * The track under a rail agent as the sim publishes it (rear -> front, a few metres past
+   * both ends) and its front / centre along it: what the rider cameras sample, so they sit on
+   * the consist that is drawn whatever the timetable says. `trip` or, when that trip is no
+   * longer driven (the train went on to its next trip / into service as empty stock), the sim
+   * train `id`. Returns the trip it is running now (-1: not in service).
+   */
+  agentTrack(trip: number, id?: number): { shape: PatternShape; front: number; centre: number; speed: number; id: number; trip: number; length: number } | null {
+    const snap = this.railSnap;
+    if (!snap) return null;
+    let k = this.agents.get(trip);
+    let cur = trip;
+    if ((k === undefined || k < 0) && id !== undefined) {
+      k = undefined;
+      for (let j = 0; j < snap.count; j++) {
+        if (snap.u[j * RAIL_STRIDE + 9] !== id) continue;
+        k = j;
+        const agency = snap.feeds[snap.f[j * RAIL_STRIDE]];
+        const loc = snap.f[j * RAIL_STRIDE + 1];
+        cur = agency && loc >= 0 ? this.system.tripIndex(agency, 'rail', loc) : -1;
+        break;
+      }
+    }
+    if (k === undefined || k < 0) return null;
+    const o = k * RAIL_STRIDE, f = snap.f;
+    const p0 = f[o + 10], pn = f[o + 11];
+    if (pn < 2) return null;
+    const shape = pathShape(snap.path, p0, pn, snap.oe, snap.on);
+    const adv = Math.min(0.15, Math.max(0, (clock.simMs - snap.simMs) / 1000));
+    const front = shape.length - 3 + f[o + 3] * adv;
+    const pat = cur >= 0 ? this.system.tripPattern(cur) : this.system.patternIndex(snap.feeds[f[o]] ?? '', 'rail', f[o + 8]);
+    const mode = pat >= 0 ? this.system.patternMode(pat) : null;
+    const length = mode ? layoutFor(mode, this.system.routes[this.system.patternRoute(pat)]).length : shape.length - 6;
+    return { shape, front, centre: front - length / 2, speed: f[o + 3], id: snap.u[o + 9], trip: cur, length };
+  }
+
   /** State of a rail-agent trip from the sim (null if the timetable drives it). */
   agentInfo(trip: number): { dist: number; speed: number; delay: number; dwell: boolean; doors: boolean; deadhead: boolean } | null {
     const k = this.agents.get(trip);

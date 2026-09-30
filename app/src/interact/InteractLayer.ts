@@ -46,6 +46,9 @@ interface TrafficApi {
   railPlayerRelease?(): void;
   setRailCommand?(cmd: number, emergency?: boolean): void;
   railPlayerState?(): Float64Array | null;
+  /** rail sim train being ridden: never retired / handed back while ridden (null = none) */
+  setRailKeep?(id: number | null): void;
+  railRide?(agency: string, trip: number): Promise<number>;
 }
 
 export interface PickResult {
@@ -115,6 +118,9 @@ export class InteractLayer implements Layer {
   private visStops: number[] = []; // indices into stopsCache
   private visAcc = 1;
   private vsTmp: VehicleState | null = null;
+  /** rail sim train being ridden (followed across trip changes) and its track this frame */
+  private agentId: number | undefined;
+  private agentAt: ReturnType<TransitLayer['agentTrack']> = null;
   private pose: Pose = { e: 0, n: 0, z: 0, heading: 0, pitch: 0 };
   private walkNear: { trip: number; label: string } | null = null;
 
@@ -269,10 +275,27 @@ export class InteractLayer implements Layer {
     }
     this.collider ??= new WalkCollider(this.engine);
     this.walker.group.visible = true;
-    const h = this.engine.heightAt(e, n);
-    // face the way the camera looks
+    // never start inside a wall / car / pole
+    const h0 = this.engine.surfaceAt(e, n);
+    const tr0 = this.traffic();
+    // (a click on a roof / inside a block: the nearest free spot, spiralling out)
+    const movers = tr0?.solidsNear?.(e, n, 40) ?? [];
+    search: for (let r = 0; r <= 60; r += r < 6 ? 1 : 2.5) {
+      const k = r === 0 ? 1 : Math.max(8, Math.round(r * 2));
+      for (let i = 0; i < k; i++) {
+        const a = (i / k) * Math.PI * 2;
+        const pe = e + Math.cos(a) * r, pn = n + Math.sin(a) * r;
+        const hh = this.engine.surfaceAt(pe, pn);
+        if (this.collider.resolve(pe, pn, hh, WALKER_R + 0.15, movers).push < 1e-3) { e = pe; n = pn; break search; }
+      }
+    }
+    void h0;
+    const h = this.engine.surfaceAt(e, n);
+    // face the way the camera looks, or the nearest direction with open space
+    // ahead (and room for the camera behind)
     const cam = this.engine.controls.cur;
-    this.walker.place(e, n, h, as?.heading ?? Math.PI / 2 - cam.heading);
+    const heading = as?.heading ?? this.openHeading(e, n, h, Math.PI / 2 - cam.heading);
+    this.walker.place(e, n, h, heading);
     this.yaw = this.walker.heading;
     this.pitch = 0.22;
     this.dist = 5.5;
@@ -284,6 +307,26 @@ export class InteractLayer implements Layer {
     st.setSpeedIndex(1);
     if (!st.playing) st.togglePlay();
     useInteract.getState().set({ mode: 'walk', trip: null, placing: false, op: null, ride: null });
+  }
+
+  /** Heading (rad CCW from +E) nearest `want` with ≥ 10 m clear ahead and 4 m behind at eye height. */
+  private openHeading(e: number, n: number, h: number, want: number): number {
+    const B = this.engine.buildings;
+    const clear = (a: number, max: number) => {
+      const c = Math.cos(a), s = Math.sin(a);
+      for (let d = 0.5; d <= max; d += 0.75) if (B.topAt(e + c * d, n + s * d, h + 1.6) > h + 1.6) return d;
+      return max;
+    };
+    let best = want, bestScore = -Infinity;
+    for (let k = 0; k < 16; k++) {
+      const off = (k % 2 ? 1 : -1) * Math.ceil(k / 2) * (Math.PI / 8);
+      const a = want + off;
+      const ahead = clear(a, 12), behind = clear(a + Math.PI, 5);
+      if (ahead >= 10 && behind >= 4) return a;
+      const score = ahead + behind * 0.8 - Math.abs(off) * 2;
+      if (score > bestScore) { bestScore = score; best = a; }
+    }
+    return best;
   }
 
   /** Walker boards a dwelling vehicle. */
@@ -346,7 +389,7 @@ export class InteractLayer implements Layer {
     this.chaseYaw = NaN; this.chaseZ = NaN; this.boom = 1;
     this.enterRig();
     useInteract.getState().set({ mode: 'drive', trip: null, walk: null });
-    this.toast('Driving — W/S throttle / brake / reverse, A/D steer, Space handbrake, H horn, F get out, Esc exit');
+    this.toast('In the car — it keeps driving until you take the wheel: W/S throttle / brake / reverse, A/D steer, Space handbrake, H horn, F get out, Esc exit');
     return true;
   }
 
@@ -410,6 +453,7 @@ export class InteractLayer implements Layer {
 
   // ======================================================================= internals
 
+
   private traffic(): TrafficApi | null {
     return (this.engine.layers.find((l) => l.id === 'traffic') as unknown as TrafficApi) ?? null;
   }
@@ -430,6 +474,14 @@ export class InteractLayer implements Layer {
     this.tunnel.setPath(this.path, info.mode, DYN[info.mode].length);
     this.selectVehicle(trip);
     useInteract.getState().set({ mode, trip, op: null, walk: null });
+    // a rail trip: ride the sim's train (placed now if it is not yet) and keep it
+    const loc = this.system.tripLocal(trip);
+    const tr = this.traffic();
+    if (loc && loc.kind === 'rail' && tr?.railRide) {
+      void tr.railRide(loc.agency, loc.local).then((id) => {
+        if (id >= 0 && this.trip === trip && this.agentId === undefined) this.agentId = id;
+      });
+    }
   }
 
   private enterRig() {
@@ -451,6 +503,7 @@ export class InteractLayer implements Layer {
   /** Leave the current mode. restore = put the free camera back. */
   private leave(restore: boolean, keepWalker = false) {
     const prev = this.mode;
+    if (this.agentId !== undefined) { this.traffic()?.setRailKeep?.(null); this.agentId = undefined; this.agentAt = null; }
     if (prev === 'free') { if (!keepWalker) this.hideWalker(); return; }
     // what we were looking at, before the walker / car goes away
     const focus = restore ? this.focusPoint() : null;
@@ -511,6 +564,20 @@ export class InteractLayer implements Layer {
       return true;
     }
     if (this.trip === null) return false;
+    // a rail agent: sit on the consist the sim drives (late / early / off its timetable,
+    // and on into its next trip or empty-stock move), not on the timetable ghost
+    const at = this.transit.agentTrack(this.trip, this.agentId);
+    this.agentAt = at;
+    if (at) {
+      if (this.agentId !== at.id) this.traffic()?.setRailKeep?.(at.id);
+      this.agentId = at.id;
+      if (at.trip >= 0 && at.trip !== this.trip) this.switchTrip(at.trip);
+      const q = at.shape.point(Math.max(0, at.centre), _agentP);
+      const d = at.shape.direction(Math.max(0, at.centre), _agentD);
+      Object.assign(this.pose, { e: q[0], n: q[1], z: q[2], heading: Math.atan2(d[1], d[0]), pitch: 0 });
+      this.vsTmp = this.system.vehicleAt(this.trip, t);
+      return true;
+    }
     const vs = this.system.vehicleAt(this.trip, t);
     this.vsTmp = vs;
     if (!vs) {
@@ -527,8 +594,21 @@ export class InteractLayer implements Layer {
     return true;
   }
 
+  /** the ridden train went on to its next trip: follow it there */
+  private switchTrip(trip: number) {
+    const info = this.system.tripInfo(trip);
+    if (!info) return;
+    this.trip = trip;
+    this.tripInfo = info;
+    this.path = pathForTrip(this.system, info);
+    this.tunnel.setPath(this.path, info.mode, DYN[info.mode].length);
+    this.selectVehicle(trip);
+    useInteract.getState().set({ trip });
+  }
+
   private currentDist(): number {
     if (this.op) return this.op.s;
+    if (this.agentAt) return this.agentAt.centre;
     return this.vsTmp?.dist ?? 0;
   }
 
@@ -572,7 +652,7 @@ export class InteractLayer implements Layer {
       const props = this.engine.layers.find((l) => l.id === 'props') as unknown as { stopSolids?: Box[] } | undefined;
       col.extra = props?.stopSolids ?? [];
       w.step(dt, fwd, right, this.yaw, run, {
-        heightAt: (e, n) => this.engine.heightAt(e, n),
+        heightAt: (e, n) => this.engine.surfaceAt(e, n),
         collide: (e, n, h, r) => col.resolve(e, n, h, r, this.movers),
         surface: (e, n) => col.surface(e, n),
       });
@@ -591,6 +671,7 @@ export class InteractLayer implements Layer {
 
     if (this.mode === 'walk' && this.walker) {
       const w = this.walker;
+      const H = (e: number, n: number) => this.engine.surfaceAt(e, n);
       // third person: orbit behind the walker (yaw = look direction), over the right shoulder
       const run = THREE.MathUtils.clamp((w.speed - 2) / 3, 0, 1);
       const cp = Math.cos(this.pitch);
@@ -663,8 +744,17 @@ export class InteractLayer implements Layer {
     const dir = reverse ? -1 : 1;
     const path = this.path;
     const tmp = [0, 0, 0];
+    const at = this.op ? null : this.agentAt;
     const rail = (sAt: number, lift: number): [number, number, number] => {
-      if (path) {
+      if (at) {
+        // along the agent's own track; straight on past its ends
+        const L = at.shape.length;
+        const u = Math.min(Math.max(sAt, 0), L);
+        const q = at.shape.point(u, _agentP);
+        const d = at.shape.direction(u, _agentD);
+        const ex = sAt - u;
+        tmp[0] = q[0] + d[0] * ex; tmp[1] = q[1] + d[1] * ex; tmp[2] = q[2];
+      } else if (path) {
         // pose() extrapolates past the path ends (train front at a terminus)
         const q = path.pose(sAt, 6, _railPose);
         tmp[0] = q.e; tmp[1] = q.n; tmp[2] = q.z;
@@ -681,7 +771,7 @@ export class InteractLayer implements Layer {
     if (this.view === 'cab') {
       const front = s + dir * (L2 - 1.2);
       eye = rail(front, dyn.eye);
-      const ahead = rail(front + dir * Math.max(25, 12 + (this.op?.v ?? this.vsTmp?.speed ?? 0) * 1.2), dyn.eye - 0.4);
+      const ahead = rail(front + dir * Math.max(25, 12 + (this.op?.v ?? at?.speed ?? this.vsTmp?.speed ?? 0) * 1.2), dyn.eye - 0.4);
       const hd = Math.atan2(ahead[1] - eye[1], ahead[0] - eye[0]) + this.lookYaw;
       const dd = Math.hypot(ahead[0] - eye[0], ahead[1] - eye[1]);
       const pz = ahead[2] - eye[2] + Math.tan(this.lookPitch) * dd;
@@ -715,8 +805,8 @@ export class InteractLayer implements Layer {
       this.setCam(eye, look, dt, 8);
     }
     this.syncCtl(pose.e, pose.n, pose.z, this.dist);
-    // local track/tunnel geometry
-    this.tunnel.update(s);
+    // local track/tunnel geometry (in timetable-path coordinates)
+    this.tunnel.update(at ? this.transit.displayDist(this.trip!, this.vsTmp?.dist ?? 0) : s);
   }
 
   /**
@@ -744,6 +834,15 @@ export class InteractLayer implements Layer {
         // a pulled-in camera looks a little down at the subject
         cz = Math.max(cz, clip[2] + 0.3 * (1 - this.boom));
       }
+      // storefront awnings, canopies and signs stick out ~2 m from the walls at
+      // street level: keep a low eye that far off facades
+      const g = this.engine.surfaceAt(ce, cn);
+      if (cz - g < 5.5) {
+        const p = this.engine.buildings?.pushOut(ce, cn, cz, 2.2);
+        if (p) { ce += p[0]; cn += p[1]; }
+      }
+      // never under the ground / inside an embankment fill
+      cz = Math.max(cz, this.engine.surfaceAt(ce, cn) + 0.45);
     }
     cam.position.set(ce, cz, -cn);
     cam.up.set(0, 1, 0);
@@ -1420,3 +1519,5 @@ export { EB };
 
 const _tagV = new THREE.Vector3();
 const _railPose: Pose = { e: 0, n: 0, z: 0, heading: 0, pitch: 0 };
+
+const _agentP = [0, 0, 0], _agentD = [0, 0];

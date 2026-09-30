@@ -65,6 +65,9 @@ export class CameraController {
   private collFrac = 1;
   /** camera collision: extra pitch (rad) that lifts the view over an obstacle */
   private collLift = 0;
+  /** camera collision: heading offset (rad) that slides the view past an obstacle */
+  private collYaw = 0;
+  private slideTmp: CamState = { e: 0, n: 0, h: 0, dist: 1, heading: 0, pitch: 0 };
   /** collision on/off (e.g. cab views that place the camera themselves) */
   collide = true;
 
@@ -184,6 +187,7 @@ export class CameraController {
     const r = this.resolveCollision(this.cur);
     if (r.lift > this.collLift) this.collLift += (r.lift - this.collLift) * (1 - Math.exp(-dt * 12));
     else this.collLift += (r.lift - this.collLift) * (1 - Math.exp(-dt * 1.5));
+    this.collYaw += (r.yaw - this.collYaw) * (1 - Math.exp(-dt * (Math.abs(r.yaw) > Math.abs(this.collYaw) ? 6 : 1.2)));
     const fi = this.freeFraction(this.lifted(this.cur));
     if (fi < this.collFrac) this.collFrac = fi;
     else this.collFrac += (fi - this.collFrac) * (1 - Math.exp(-dt * 2.5));
@@ -210,34 +214,50 @@ export class CameraController {
   private liftTmp: CamState = { e: 0, n: 0, h: 0, dist: 1, heading: 0, pitch: 0 };
   /** `c` with the collision pitch lift applied (shared temp object) */
   private lifted(c: CamState): CamState {
-    if (this.collLift < 1e-3) return c;
+    if (this.collLift < 1e-3 && Math.abs(this.collYaw) < 1e-3) return c;
     const t = this.liftTmp;
-    t.e = c.e; t.n = c.n; t.h = c.h; t.dist = c.dist; t.heading = c.heading;
+    t.e = c.e; t.n = c.n; t.h = c.h; t.dist = c.dist; t.heading = c.heading + this.collYaw;
     t.pitch = Math.min(MAX_PITCH, c.pitch + this.collLift);
     return t;
   }
 
   /**
-   * Obstruction response for orbit state c: pull the eye in along the view ray
-   * when that still leaves a useful distance (close street-level views keep
-   * working), otherwise tilt the view up over the obstacle (courtyards,
-   * plazas, a tower right behind the camera). Chase cams only pull in.
+   * Obstruction response for orbit state c, least intrusive first:
+   * 1. slide: a nearby heading (≤ ±24°, same pitch and distance) with a clear view;
+   * 2. pull the eye in along the view ray while ≥ 8 m (or the whole orbit) remains;
+   * 3. last resort: tilt the view up over the obstacle (courtyards, a tower
+   *    right behind the camera). Chase cams only pull in.
    */
-  private resolveCollision(c: CamState): { lift: number } {
-    if (!this.collide || !this.host.buildingTop) return { lift: 0 };
+  private resolveCollision(c: CamState): { lift: number; yaw: number } {
+    if (!this.collide || !this.host.buildingTop) return { lift: 0, yaw: 0 };
     const f0 = this.freeFraction(c);
-    if (f0 >= 0.999 || this.followFn) return { lift: 0 };
-    if (f0 * c.dist >= Math.min(c.dist, Math.max(15, 0.35 * c.dist))) return { lift: 0 };
-    const t = this.liftTmp;
+    if (f0 >= 0.999 || this.followFn) return { lift: 0, yaw: 0 };
+    const t = this.slideTmp;
+    t.e = c.e; t.n = c.n; t.h = c.h; t.dist = c.dist; t.pitch = c.pitch;
+    // try the side we are already sliding to first (no flip-flopping)
+    const sg = this.collYaw < 0 ? -1 : 1;
+    let yaw = 0, fy = f0;
+    for (const d of [0.07, 0.14, 0.24, 0.34, 0.42]) {
+      for (const s of [sg, -sg]) {
+        t.heading = c.heading + s * d;
+        const f = this.freeFraction(t);
+        if (f > fy + 0.08) { fy = f; yaw = s * d; }
+      }
+      if (fy >= 0.9) break;
+    }
+    if (fy >= 0.8) return { lift: 0, yaw };
+    const keep = Math.min(c.dist, 8);
+    if (f0 * c.dist >= keep) return { lift: 0, yaw: 0 };
+    const lt = this.slideTmp;
     let best = 0, bestF = f0;
     for (const dp of [0.12, 0.25, 0.4, 0.6, 0.85, 1.15]) {
-      t.e = c.e; t.n = c.n; t.h = c.h; t.dist = c.dist; t.heading = c.heading;
-      t.pitch = Math.min(MAX_PITCH, c.pitch + dp);
-      const f = this.freeFraction(t);
-      if (f > bestF + 0.05) { best = t.pitch - c.pitch; bestF = f; }
-      if (f >= 0.9) break;
+      lt.e = c.e; lt.n = c.n; lt.h = c.h; lt.dist = c.dist; lt.heading = c.heading;
+      lt.pitch = Math.min(MAX_PITCH, c.pitch + dp);
+      const f = this.freeFraction(lt);
+      if (f > bestF + 0.05) { best = lt.pitch - c.pitch; bestF = f; }
+      if (f * c.dist >= keep) break;
     }
-    return { lift: best };
+    return { lift: best, yaw: 0 };
   }
 
   private occTmp: CamState = { e: 0, n: 0, h: 0, dist: 0, heading: 0, pitch: 0 };

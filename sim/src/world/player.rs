@@ -55,6 +55,7 @@ impl Player {
             curb_cool: 0.0,
             ev_curb: 0.0,
             ev_hit: 0.0,
+            autopilot: false,
         }
     }
 }
@@ -103,9 +104,40 @@ impl World {
             return;
         };
         let dt = dt.min(0.05);
-        let mut near = std::mem::take(&mut self.tmp);
         let throttle = throttle.clamp(0.0, 1.0);
         let brake = brake.clamp(0.0, 1.0);
+        if self.player.as_ref().unwrap().autopilot {
+            let input = throttle > 0.0 || brake > 0.0 || steer_in.abs() > 0.05 || handbrake;
+            let c = &mut self.cars[pi];
+            let pose = c.pose;
+            let (v, link) = (c.v, c.link);
+            if input && c.posed {
+                // the player takes the wheel
+                c.flags |= F_PLAYER;
+                c.flags &= !(F_COMMIT | F_HELD);
+                c.lc_from = NO_LANE;
+            }
+            let edge = if link != NONE { self.g.links[link as usize].edge } else { NONE };
+            let p = self.player.as_mut().unwrap();
+            p.x = pose.x;
+            p.y = pose.y;
+            p.z = pose.z;
+            p.h = pose.h;
+            p.p = pose.p;
+            p.v = v;
+            p.vy = 0.0;
+            p.r = 0.0;
+            p.on_road = link != NONE;
+            if edge != NONE {
+                p.edge = edge;
+            }
+            p.surface = SURF_ROAD;
+            if !input {
+                return;
+            }
+            p.autopilot = false;
+        }
+        let mut near = std::mem::take(&mut self.tmp);
         let (grip, drag) = surface_params(self.player.as_ref().unwrap().surface);
         let p = self.player.as_mut().unwrap();
         // steering: rate-limited, less lock at speed
@@ -518,7 +550,7 @@ impl World {
         if let Some((e, n, z, r)) = self.walker {
             self.add_body(e, n, z, r, (0.0, 0.0), true, near);
         }
-        if let (Some(p), Some(pi)) = (&self.player, self.player_index()) {
+        if let (Some(p), Some(pi)) = (self.player.as_ref().filter(|p| !p.autopilot), self.player_index()) {
             let (x, y, z, h, v, vy) = (p.x, p.y, p.z, p.h, p.v, p.vy);
             let (hs, hc) = h.sin_cos();
             let vel = (v * hc - vy * hs, v * hs + vy * hc);
@@ -571,6 +603,33 @@ mod tests {
         }
         let p = w.player.as_ref().unwrap();
         assert!(p.v < -2.0, "reverse v={}", p.v);
+    }
+
+    #[test]
+    fn taken_over_car_stays_on_its_lane_until_driven() {
+        let mut w = world_with_cross(0, [2, 2, 2, 2]);
+        for _ in 0..300 {
+            w.step(0.1);
+        }
+        w.write_cars(0.0, 0.0);
+        let id = w.cars.iter().find(|c| c.flags & F_DEAD == 0 && c.v > 3.0).expect("a moving car").id;
+        assert!(w.take_over(id));
+        for _ in 0..40 {
+            w.set_obstacles(&[]);
+            w.step(0.1);
+            w.write_cars(0.0, 0.0);
+            w.player_step(0.1, 0.0, 0.0, 0.0, false, 0.0);
+            let Some(c) = w.cars.iter().find(|c| c.id == id) else { break };
+            let p = w.player.as_ref().unwrap();
+            assert!(p.autopilot && c.flags & F_PLAYER == 0 && c.link != NONE);
+            assert!((p.x - c.pose.x).abs() < 1e-6 && (p.y - c.pose.y).abs() < 1e-6);
+        }
+        if w.cars.iter().any(|c| c.id == id) {
+            w.player_step(0.1, 1.0, 0.0, 0.0, false, 0.0);
+            let p = w.player.as_ref().unwrap();
+            assert!(!p.autopilot);
+            assert!(w.cars.iter().find(|c| c.id == id).unwrap().flags & F_PLAYER != 0);
+        }
     }
 
     #[test]

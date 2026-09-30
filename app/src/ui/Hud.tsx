@@ -128,8 +128,18 @@ function LayersPanel() {
   const mode = useApp((s) => s.analyticsMode);
   const shadows = useApp((s) => s.shadows);
   const quality = useApp((s) => s.quality);
-  // collapsed by default on smaller windows so it doesn't cover the view
-  const [open, setOpen] = useState(() => window.innerWidth >= 1280);
+  // remembered across loads / mode changes; collapsed by default on all but wide windows
+  const [open, setOpenRaw] = useState(() => {
+    try {
+      const v = localStorage.getItem('layersPanelOpen');
+      if (v === '1' || v === '0') return v === '1';
+    } catch { /* storage blocked */ }
+    return window.innerWidth >= 1600;
+  });
+  const setOpen = (o: boolean) => {
+    setOpenRaw(o);
+    try { localStorage.setItem('layersPanelOpen', o ? '1' : '0'); } catch { /* storage blocked */ }
+  };
   const st = useApp.getState();
   return (
     <aside className={`layers panel ${open ? '' : 'collapsed'}`}>
