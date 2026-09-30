@@ -123,6 +123,13 @@ NAMED_COLOURS = {
 
 
 def _ground_class(t) -> int:
+    # underground / structured parking is not a surface lot (e.g. the lawn over
+    # the King's College Circle garage at UofT got stalls and parked cars)
+    if t.get("amenity") == "parking" and (
+        t.get("parking") in ("underground", "multi-storey", "rooftop")
+        or t.get("location") in ("underground", "roof") or t.get("layer", "0").startswith("-")
+    ):
+        return 0
     for key, table in (("natural", NATURAL), ("leisure", LEISURE), ("landuse", LANDUSE), ("amenity", AMENITY)):
         v = t.get(key)
         if v and v in table:
