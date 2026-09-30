@@ -77,6 +77,15 @@ export function buildStreet(
   const signalIds: number[] = [];
   const inTile = (x: number, y: number) => x >= 0 && x < S && y >= 0 && y < S;
   const gAt = (x: number, y: number) => ground[Math.min(255, Math.max(0, Math.floor((y / S) * 256))) * 256 + Math.min(255, Math.max(0, Math.floor((x / S) * 256)))];
+  // no trees on airfields (aerodrome 14, runway/taxiway 20, airfield grass 23), checked with a
+  // margin so none stand beside a runway edge either
+  const airfield = (x: number, y: number) => {
+    for (const [dx, dy] of [[0, 0], [24, 0], [-24, 0], [0, 24], [0, -24]]) {
+      const g = gAt(x + dx, y + dy);
+      if (g === 14 || g === 20 || g === 23) return true;
+    }
+    return false;
+  };
 
   // ---- obstacles: road segments, buildings, houses
   const roads = new Grid<Seg>(24);
@@ -135,6 +144,7 @@ export function buildStreet(
     for (let i = 0; i < pk.length; i++) {
       const x = pxy[i * 2], y = pxy[i * 2 + 1];
       if (pk[i] === 3) {
+        if (airfield(x, y)) continue;
         const r = rnd(tx * 131 + i, ty, 7);
         trees.push(x, y, terr.at(x, y), 0.75 + r * 0.55, pv && pv[i] === 1 ? 1 : 0, rnd(i, tx, ty));
         osmTrees.add(x - 5, y - 5, x + 5, y + 5, i);
@@ -209,7 +219,7 @@ export function buildStreet(
           const x = p.x + sd * p.nx * off, y = p.y + sd * p.ny * off;
           if (!inTile(x, y) || nearOsmTree(x, y) || onRoad(x, y, pit ? 0.5 : 1.0) || inBuilding(x, y, 2.0)) continue;
           const g = gAt(x, y);
-          if (g === 1 || g === 10 || g === 20) continue;
+          if (g === 1 || g === 10 || g === 20 || airfield(x, y)) continue;
           const sc = pit ? 0.6 + rnd(ri, s, 11) * 0.3 : 0.75 + rnd(ri, s, 12) * 0.6;
           trees.push(x, y, terr.at(x, y), sc, rnd(ri, s, 13) < 0.08 ? 1 : 0, rnd(ri, s, 14));
         }
@@ -227,7 +237,7 @@ export function buildStreet(
       const d = DENS[g];
       if (!d || rnd(tx * 256 + i, ty * 256 + j, 21) > d) continue;
       const x = (i + rnd(i, j, 22)) * px, y = (j + rnd(i, j, 23)) * px;
-      if (nearOsmTree(x, y) || onRoad(x, y, 1.5) || inBuilding(x, y, 1.5)) continue;
+      if (nearOsmTree(x, y) || onRoad(x, y, 1.5) || inBuilding(x, y, 1.5) || airfield(x, y)) continue;
       const conifer = g === 3 ? rnd(i, j, 24) < 0.3 : rnd(i, j, 24) < 0.1;
       trees.push(x, y, terr.at(x, y), (g === 3 ? 0.85 : 0.75) + rnd(i, j, 25) * 0.6, conifer ? 1 : 0, rnd(i, j, 26));
       scatter++;
