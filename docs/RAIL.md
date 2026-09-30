@@ -29,7 +29,12 @@ cd pipeline && uv run python -m tpipe.rail_validate [agency ...] [--compare DIR]
   changes; edges = track between them with the OSM geometry, draped on terrain per
   *stroke* (straightest continuation through nodes) with the grade profile (tunnel cover
   subway 14 m, LRT 10, tram 8, rail 10; bridge clearance 6 m) and blended onto node
-  heights of longer strokes within 150 m, then 3-D RDP (0.2 m).
+  heights of longer strokes within 150 m, then 3-D RDP (0.2 m). A closed tunnel run shorter
+  than 250 m (`COVERED_WAY`: a road bridge, bus deck or station over a cut, e.g. Lawrence West
+  under Lawrence Ave) follows the line between its ends instead of diving to the cover
+  depth; streetcar station loops keep their dip. `tpipe.roadnet` pins the drawn subway / LRT
+  track to these elevations (`rail_graph_targets`, needs `work/rail_graph.pkl`), and a road
+  crossing a subway / LRT dips under it, so the rendered track is the path the trains run on.
 - **Movement rules** at a node: continuing from one edge end into another only when the
   path turns by less than 40° (rail) / 45° (subway) / 55° (LRT) / 75° (tram) there,
   measured over 8 m — the trunk of a switch reaches both legs, legs never reach each
@@ -189,6 +194,81 @@ bbox-edge points unchanged). Bus files also carry `trip_next`.
   (keep clear when the queue ahead reaches back over them).
 - **Checks**: `RailSim::check` counts body overlaps (must be 0), `overruns` counts authority
   overruns (must be 0), `audit` checks the reservation tables.
+
+## Interlocking design (route setting; replaces span groups — in progress)
+
+Goal: an interlocking that cannot deadlock by construction (apart from a timetable asking two
+trains to swap places), for every mode, with the same algorithm.
+
+**Safe stopping points (SSP).** Along a plan, a position of the train's front is an SSP when
+the whole body behind it, `[front − len − margin, front]`, lies on *plain* resources only:
+blocks of a track with no switch / diamond fouling zone and no two-way (direction-locked)
+stretch. On plain track every block boundary is an SSP (normal block following); inside an
+interlocking or a single-track run there are none. Platforms are SSPs when their stopping
+position is plain; a platform inside a fouling zone is moved to the nearest plain point.
+
+**Route setting.** A train waiting at an SSP asks for the *route* to the next SSP of its plan:
+every resource from its front to that SSP, *including the berth* (the blocks its whole body
+will stand on there). The request is granted atomically only if every resource is free (or
+already its own) and no direction lock opposes it (conflict check before granting); otherwise
+nothing is taken and the train waits where it is. Consequences:
+- a train only ever *waits* on plain blocks of its own track: it never stands in a junction,
+  on a crossover or on a single-track run another train must use;
+- a train that has a route always completes it (everything up to the berth is its own), so
+  it releases the junctions and single-track runs behind it;
+- therefore a waiting train can only be blocked by a train ahead on its own track, by a
+  moving train that will clear, or by a berth that is occupied — no circular wait through
+  junctions or single-track runs is possible. The only remaining cycle is two trains each
+  wanting the other's berth (a swap), which the timetable never asks for; a lock breaker
+  (back off, empty stock gives way) stays as a guard and is counted in QA.
+Resources are released behind the tail as before; the authority is the end of the granted
+route (braking curves + hard clamp unchanged).
+
+**Streetcars (on sight).** Junction nodes within 40 m of each other (a street intersection,
+a grand union, a loop entrance) form a *junction box*. A car may enter a box only when (1) it
+is first in the box's first-come-first-served queue of cars waiting at its entries, and
+(2) its exit beyond the box is clear for its whole body (the next plain stretch on its track
+has no vehicle body within its length). It holds the box until its tail has left it. Between
+boxes cars follow on sight. Single-track tram stretches (loops, short single-line pieces) are
+direction-locked as a whole, entered like a route (to the SSP beyond). With the road sim the
+queue also waits for road traffic and signals as now.
+
+**Terminal layover.** A train ending its trip whose next trip leaves later than its minimum
+turnaround:
+- if the next trip departs from another platform, it turns back to that platform at once
+  and lays over there (the arrival platform is freed);
+- if both use the same platform and a tail track / pocket / siding beyond or next to the
+  terminal is reachable, it lays over there and comes back like a pull-out (leaving just in
+  time for its departure and only when the platform is free);
+- otherwise it lays over on the platform, and following trains are held at the SSP before
+  the terminal's interlocking (never inside it).
+Pull-outs follow the same rule: they leave the yard only when their first platform is free
+and just in time (lead time from the empty-stock speed); they wait in the yard, not on a
+platform the line needs.
+
+**Passing loops.** A single-track run with passing loops (a second track between two
+switches, e.g. a siding) is split at each loop: each section between loops is a two-way
+resource entered as a route to the loop, and the loop's two tracks are berths. Opposing
+trains meet at a loop, one on each track; a train's plan takes the loop track that is free
+when its route is set (the plan carries both alternatives through each loop).
+
+**Status.** Done: (1) SSPs (`Plan::ssp`) and route setting (`try_route` / `route_spans`)
+for all modes; tracks an empty-stock turnback runs against the timetabled direction become
+two-way (every train on them takes the direction lock; `rebuild` plans each block's
+turnbacks up front); on-sight cars claim a junction only on arrival and only with a clear
+berth; the lock breaker follows on-sight waits (`wait_for`) and time stopped. Pull-outs leave
+just in time and only onto a free platform. Still to do: (2) FCFS queues at tram junction
+boxes; (3) layover on tail tracks; terminals whose turnback path is not found (the train is
+cleared off the platform after 45 s); (4) passing loops (long GO / VIA single track is one
+two-way route today). Measure: `no_stuck_trains` (full weekday, all agencies; run with
+`--ignored`): trains stopped > 3 min without a legitimate occupant ahead.
+
+**Implementation plan.** (1) SSPs and route setting for all modes in `build_plan` /
+`authority` (the span groups become routes); (2) junction boxes + FCFS queues for on-sight
+modes; (3) terminal layover and pull-out timing; (4) passing loops (route variants through
+loops). Acceptance: `all_depots_and_termini_full_day` — every agency over a full weekday, no
+train stopped > 3 min without a legitimate occupant ahead (a moving or dwelling train on its
+own track), 0 overlaps / overruns.
 
 ## Buses (`sim/src/bus.rs`)
 
