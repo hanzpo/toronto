@@ -103,6 +103,11 @@ CIBC Square flicker → fixed in 3eda5f1.
 - [ ] Street level at Kipling on High: 54 fps, 10.6 ms CPU, 4.8 M tris. → perf
   budget check after merges
 
+### User screenshot 12 (Q400 at Billy Bishop)
+- [ ] Q400 nose: blunt dome instead of a long tapered nose; sticker windscreen;
+  boxy nose gear with a single wheel; flat door outline; no Porter livery;
+  flat plastic shading. → aircraft (Codex allowed for modelling help)
+
 ## Resolved
 - [x] Trains colliding and wrong-track running (the user's Kitchener GO
   report): signalled rail agents with interlocking. Verified with ~220
