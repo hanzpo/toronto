@@ -130,8 +130,10 @@ CIBC Square flicker → fixed in 3eda5f1.
 - [ ] Near bare winter trees show 4 straight limbs (reads like a broom). → vegetation
 - [ ] A tree right at the camera fills the view; camera clearance should
   include crowns, or near crowns should fade. → vegetation / camera
-- [ ] Large black spike polygon near the camera at King W (?cam=-1180,-620,60,40,12,
-  13:00), probably a shadow caster or rooftop artifact. → investigate
+- [ ] Large black spike at King W (?cam=-1180,-620,60,40,12, 13:00): not a
+  shadow and not a building. A long, narrow house footprint gets a huge
+  near-black gable roof that pokes through its 5-storey neighbour. → rooftops
+  agent (cap ridge height, long footprints get flat roofs, QA count)
 
 ### Ground/water agent (done, waiting for the consolidated merge)
 - Vector ground, typed shores, water levels, 41 curated portals and open
