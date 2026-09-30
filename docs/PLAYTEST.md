@@ -14,7 +14,11 @@ owner; fixed items move to the bottom with the commit that fixed them.
   pedestrians. Use the jointed pedestrian model with walk and run
   animation. → player-experience
 - [ ] A turning minivan stopped diagonally across the crosswalk; queued cars
-  overlap crosswalks. → traffic sim (transit-agents owns sim now)
+  overlap crosswalks. Partly fixed in 04d38ac (divided junctions act as one
+  box); ~80 spillback cars still stop in boxes downtown at 08:15
+  (`__qa.carsStoppedInBox`). Needs corridor-aware entry. → transit/sim
+- [ ] 935 bus pattern stretches have no legal road path
+  (pipeline/work/bus_road_gaps.json). → roads
 - [ ] A red bar floats in the street in the distance (a vehicle
   representation drawn twice). → transit-agents (single representation)
 - [ ] Street-level walls are blank (no storefronts or windows at grade).
@@ -116,8 +120,8 @@ CIBC Square flicker → fixed in 3eda5f1.
   building wall clip into the complex; pulling in must be clean → stations
 - [ ] Clearance checks at all stations: platform edge 1.6–1.7 m from track,
   columns ≥ 2.2 m, no buildings/trees over tracks → stations (+ script)
-- [ ] Traffic doesn't drop at night: cars above demand target never retire
-  → transit/sim
+- [x] Traffic doesn't drop at night: surplus cars and pedestrians now retire
+  out of view (downtown cars 7036 at 17:30 → ~380 at 03:00). 04d38ac
 - [ ] Camera collision leaves the camera hugging building walls at stations
   (Bloor-Yonge) → stations/UX
 - [ ] Gardiner at Exhibition now elevated on piers (roads WIP): good
