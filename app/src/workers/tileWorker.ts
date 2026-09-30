@@ -1,7 +1,7 @@
 // Tile worker: fetch + gunzip + decode TBN1 + build transferable geometry.
 import { decodeTbn } from '../data/tbn';
 
-import { buildBuildings, buildRail, buildRoads, buildTerrain, concatMeshes, extractHouses, promoteNonHouses, TerrainSampler, type MeshBuf, type TileMeshes } from './meshing';
+import { buildBuildings, buildRail, buildRoads, buildTerrain, concatMeshes, extractHouses, frontSurfaces, promoteNonHouses, TerrainSampler, type MeshBuf, type TileMeshes } from './meshing';
 import { buildProps } from './props';
 import { buildUrban } from './urban';
 import { houseRoofQa } from './houseFront';
@@ -11,6 +11,10 @@ import { buildCanopy } from './vegetation';
 import { extractFootprints } from './collide';
 import { applyStationZones, setStationZones } from './stationZones';
 import { dropAirsideTile } from './airside';
+import { SURF_CURB, SURF_TACTILE } from './roads';
+
+/** road surfaces only drawn on tiles near the camera (TileManager ROAD_NEAR): vertical curb faces, tactile plates */
+const NEAR_SURFS = new Set([SURF_CURB, SURF_TACTILE]);
 
 export type WorkerIn =
   | { type: 'config'; suppress: number[]; build: number; zones?: number[][]; vground?: boolean }
@@ -136,14 +140,16 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     const urban = level === 0 ? buildUrban(a, header.names ?? [], bld.items, sampler, ground, houses, msg.tx, msg.ty) : null;
     const canopy = level === 1 ? buildCanopy(a, ground, sampler, msg.tx, msg.ty, size) : null;
     const street3d = concatMeshes(roads.mesh, rail.mesh);
+    const railStart = roads.mesh ? roads.mesh.index.length : 0;
+    const roadNear = street3d && level === 0 ? frontSurfaces(street3d, railStart, NEAR_SURFS) : 0;
     const collide = level === 0 ? extractFootprints(a, suppress) : null;
     const result: TileMeshes = {
       terrain: terr.mesh, vground, cuts, heights: terr.heights, grid: G, ground, minH: terr.minH, maxH: Math.max(terr.maxH, 0),
-      buildings: bld.mesh, collide, roads: street3d, railStart: roads.mesh ? roads.mesh.index.length : 0, houses, street, canopy, props, urban,
+      buildings: bld.mesh, collide, roads: street3d, railStart, roadNear, terrainCoarse: terr.coarseStart, houses, street, canopy, props, urban,
       counts: { buildings: bld.count, houses: houses?.count ?? 0, roads: roads.count, rails: rail.count },
     };
     const tr: Transferable[] = [terr.heights.buffer, ground.buffer];
-    if (collide) tr.push(collide.off.buffer, collide.xy.buffer, collide.bottom.buffer, collide.top.buffer);
+    if (collide) tr.push(collide.off.buffer, collide.xy.buffer, collide.bottom.buffer, collide.top.buffer, ...(collide.occ ? [collide.occ.buffer] : []));
     transfers(terr.mesh, tr); transfers(vground, tr);
     if (cuts) tr.push(cuts.off.buffer, cuts.xy.buffer, cuts.type.buffer, cuts.toff.buffer, cuts.txyz.buffer, cuts.tkind.buffer, cuts.box.buffer); transfers(bld.mesh, tr); transfers(street3d, tr);
     if (canopy) tr.push(canopy.buffer);

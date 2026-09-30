@@ -20,11 +20,14 @@ import { baseTone } from '../render/tiles/materials';
 import { useApp } from '../state/store';
 import { mastArm, mastHead, signalPole, streetLight } from './street/geometry';
 import { Vegetation } from './vegetation/Vegetation';
+import { CULL } from '../engine/view';
 
 const RADIUS = 1500; // furniture is loaded for L0 tiles this close (m)
 const LAMP_MAX = 900;
 /** lamps / signal hardware cast shadows through shadow-only proxies within this range */
 const NEAR_SHADOW = 320;
+/** tiles this close (tile-edge distance, m) keep their furniture whatever the view direction (shadow proxies) */
+const NEAR_ALWAYS = NEAR_SHADOW + 30;
 /** object layer rendered only by the sun's shadow camera (see Atmosphere) */
 export const SHADOW_ONLY_LAYER = 1;
 
@@ -162,6 +165,8 @@ function grow(a: Float32Array, n: number) { const b = new Float32Array(n); b.set
 interface TileRec {
   key: string; e0: number; n0: number; data: StreetBuf;
   owners: Map<Pool, Owner>;
+  /** lamps (and their light pools) allocated: tile within the lamps' draw range */
+  lamps: boolean;
 }
 
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _p = new THREE.Vector3(), _s = new THREE.Vector3();
@@ -280,31 +285,42 @@ export class StreetLayer implements Layer {
       this.nearDirty = true;
     }
     // wanted tiles: drawn level-0 tiles within RADIUS (+hysteresis for ones we have)
-    const want = new Set<string>();
+    // (instanced pools draw every instance: tiles outside the widened view
+    // frustum are left out, except near ones, which feed the shadow proxies;
+    // lamps only for tiles that can have one inside the lamps' draw range)
+    const want = new Map<string, boolean>();
     const hi = ctx.altitude > 2500;
     if (!hi) {
       for (const t of eng.tiles.drawn) {
         if (t.L !== 0 || !t.street) continue;
         const dx = Math.max(0, Math.abs(E - (t.tx + 0.5) * t.S) - t.S / 2), dy = Math.max(0, Math.abs(Nn - (t.ty + 0.5) * t.S) - t.S / 2);
         const d = Math.hypot(dx, dy, Math.max(0, ctx.altitude - 50));
-        if (d < RADIUS + (this.tiles.has(t.key) ? 200 : 0)) want.add(t.key);
+        const rec = this.tiles.get(t.key);
+        if (d >= RADIUS + (rec ? 200 : 0)) continue;
+        if (d >= NEAR_ALWAYS && !ctx.view.wideBoxEN(t.tx * t.S, t.ty * t.S, t.minH - 5, (t.tx + 1) * t.S, (t.ty + 1) * t.S, t.maxH + 15)) continue;
+        want.set(t.key, !CULL || d < LAMP_MAX + (rec?.lamps ? 150 : 0));
       }
     }
-    for (const [k, rec] of this.tiles) if (!want.has(k)) this.remove(rec);
+    for (const [k, rec] of this.tiles) if (want.get(k) !== rec.lamps) this.remove(rec);
     for (const t of eng.tiles.drawn) {
-      if (want.has(t.key) && !this.tiles.has(t.key) && t.street) this.add(t.key, t.tx * t.S, t.ty * t.S, t.street);
+      const lamps = want.get(t.key);
+      if (lamps !== undefined && !this.tiles.has(t.key) && t.street) this.add(t.key, t.tx * t.S, t.ty * t.S, t.street, lamps);
     }
+    // light pools only draw at night
+    this.pools.glows.mesh.visible = !CULL || ctx.daylight < 0.98;
     // near shadow proxies
     if (this.nearDirty || Math.hypot(cam.x - this.nearAt.x, cam.z - this.nearAt.z) > 25 || Math.abs(cam.y - this.nearAt.y) > 40) this.rebuildNear(cam);
     this.signals(ctx);
     for (const p of this.allPools()) p.flush();
   }
 
-  private add(key: string, e0: number, n0: number, data: StreetBuf) {
-    const rec: TileRec = { key, e0, n0, data, owners: new Map() };
+  private add(key: string, e0: number, n0: number, data: StreetBuf, lamps: boolean) {
+    const rec: TileRec = { key, e0, n0, data, owners: new Map(), lamps };
     const own = (p: Pool, n: number) => { if (!n) return; const o: Owner = { key, slots: new Int32Array(0) }; o.slots = p.alloc(o, n); rec.owners.set(p, o); };
-    own(this.pools.lamps, data.lamps.length / 5);
-    own(this.pools.glows, data.lamps.length / 5);
+    if (lamps) {
+      own(this.pools.lamps, data.lamps.length / 5);
+      own(this.pools.glows, data.lamps.length / 5);
+    }
     const nS = data.signals.length / 7;
     own(this.pools.poles, nS); own(this.pools.masts, nS); own(this.pools.heads, nS);
     this.tiles.set(key, rec);

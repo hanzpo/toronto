@@ -5,6 +5,8 @@
 #     base-url   default http://localhost:5173  (e.g. https://toronto.hanznathanpo.workers.dev)
 #     scenarios  comma list: street,streetcar,dvp,region,city,zoom,pan (default: all),
 #                or "startup" (cold + warm load timing) or "diag" (scene breakdown, extra "cam=E,N,dist,hdg,pitch")
+#                or "views" (fixed-view budget census per layer + screenshots; extra "t=…&out=/abs/dir&tag=x[&cull=0]")
+#                or "flythrough" (3-minute memory / leak check) or "spin" (fast-rotation CPU check)
 #     extra      extra query string (default "quality=high": pins the governor for comparable runs)
 #
 # Uses ONE headless Chrome session (named "perf") and closes it when done.
@@ -18,7 +20,7 @@ trap '$PW close >/dev/null 2>&1 || true' EXIT
 $PW open --browser=chrome about:blank >/dev/null
 $PW resize 1600 1000 >/dev/null
 case "$SCEN" in
-  startup|diag|draws|shots) FILE="$HERE/$SCEN.js" ;;
+  startup|diag|draws|shots|views|flythrough|spin) FILE="$HERE/$SCEN.js" ;;
   *) FILE="$HERE/bench.js" ;;
 esac
 $PW goto "$BASE/?bench=$SCEN${EXTRA:+&$EXTRA}" >/dev/null

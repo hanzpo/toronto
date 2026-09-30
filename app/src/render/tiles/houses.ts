@@ -599,7 +599,17 @@ export class HousePools {
       pool.mesh.count = pool.count;
     }
     this.tiles.set(key, t);
-    this.writeTile(t);
+    // copy the tile's cached records into the freshly allocated (contiguous) slots
+    const recs = this.records(key, t);
+    for (let k = 0; k < HOUSE_TYPES; k++) {
+      const pool = pools[k], slots = t.slots[k], n = slots.length;
+      if (!n) continue;
+      const s0 = slots[0], r = recs[k];
+      (pool.mesh.instanceMatrix.array as Float32Array).set(r.m, s0 * 16);
+      (pool.info.array as Float32Array).set(r.info, s0 * 4);
+      (pool.col.array as Float32Array).set(r.col, s0 * 3);
+      pool.mark(s0); pool.mark(s0 + n - 1);
+    }
     if (!lo) this.nearDirty = true;
     this.dirty = true;
   }
@@ -638,23 +648,31 @@ export class HousePools {
 
   /** instance record for house i of a tile into slot s of pool p */
   private put(p: Pool, s: number, d: HouseBuf, i: number, ox: number, on: number) {
-    _p.set(ox + d.xy[i * 2], d.base[i], -(on + d.xy[i * 2 + 1]));
-    _q.setFromAxisAngle(_up, d.angle[i]);
-    const sx = Math.max(d.len[i], 2), sy = Math.max(d.height[i], 2), sz = Math.max(d.wid[i], 2);
-    _s.set(sx, sy, sz);
-    _m.compose(_p, _q, _s);
-    _m.toArray(p.mesh.instanceMatrix.array as Float32Array, s * 16);
-    const v = d.variant[i];
-    const t = d.type[i];
-    // brick for the old-city archetypes (mostly) and some suburban fronts; siding / stucco otherwise
-    const brick = t === 0 || t === 1 || t === 6 ? (v & 7) !== 7 : t === 2 ? (v & 3) !== 3 : t === 5 ? false : (v & 3) === 0;
-    _c.setHex(brick ? BRICK[(v >> 2) % BRICK.length] : OTHER[(v >> 2) % OTHER.length]);
-    const f = 0.93 + ((v >> 5) / 7) * 0.1;
-    const ia = p.info.array as Float32Array, ca = p.col.array as Float32Array;
-    ia[s * 4] = sx; ia[s * 4 + 1] = sy; ia[s * 4 + 2] = sz; ia[s * 4 + 3] = v + (brick ? 256 : 0);
-    ca[s * 3] = _c.r * f; ca[s * 3 + 1] = _c.g * f; ca[s * 3 + 2] = _c.b * f;
+    record(d, i, ox, on, p.mesh.instanceMatrix.array as Float32Array, p.info.array as Float32Array, p.col.array as Float32Array, s);
     p.mark(s);
   }
+
+  /**
+   * Instance records of a tile per archetype (anchor-relative), kept while the
+   * tile is loaded: a tile re-entering the view (pool membership follows the
+   * view frustum, TileManager) is a copy, not a recompute.
+   */
+  private records(key: string, t: TileHouses): { m: Float32Array; info: Float32Array; col: Float32Array }[] {
+    const c = this.recCache.get(key);
+    if (c && c.ae === this.anchorE && c.an === this.anchorN && c.data === t.data) return c.recs;
+    const ox = t.originE - this.anchorE, on = t.originN - this.anchorN;
+    const recs = t.items.map((items) => {
+      const r = { m: new Float32Array(items.length * 16), info: new Float32Array(items.length * 4), col: new Float32Array(items.length * 3) };
+      for (let j = 0; j < items.length; j++) record(t.data, items[j], ox, on, r.m, r.info, r.col, j);
+      return r;
+    });
+    this.recCache.set(key, { ae: this.anchorE, an: this.anchorN, data: t.data, recs });
+    return recs;
+  }
+  private recCache = new Map<string, { ae: number; an: number; data: HouseBuf; recs: { m: Float32Array; info: Float32Array; col: Float32Array }[] }>();
+
+  /** the tile was unloaded: drop its cached instance records */
+  forget(key: string) { this.recCache.delete(key); }
 
   private writeTile(t: TileHouses) {
     const d = t.data;
@@ -713,4 +731,22 @@ export class HousePools {
       p.geometry.dispose();
     }
   }
+}
+
+/** instance record (matrix, hinfo, hcol) of house i into slot s of the given arrays */
+function record(d: HouseBuf, i: number, ox: number, on: number, M: Float32Array, IA: Float32Array, CA: Float32Array, s: number) {
+  _p.set(ox + d.xy[i * 2], d.base[i], -(on + d.xy[i * 2 + 1]));
+  _q.setFromAxisAngle(_up, d.angle[i]);
+  const sx = Math.max(d.len[i], 2), sy = Math.max(d.height[i], 2), sz = Math.max(d.wid[i], 2);
+  _s.set(sx, sy, sz);
+  _m.compose(_p, _q, _s);
+  _m.toArray(M, s * 16);
+  const v = d.variant[i];
+  const t = d.type[i];
+  // brick for the old-city archetypes (mostly) and some suburban fronts; siding / stucco otherwise
+  const brick = t === 0 || t === 1 || t === 6 ? (v & 7) !== 7 : t === 2 ? (v & 3) !== 3 : t === 5 ? false : (v & 3) === 0;
+  _c.setHex(brick ? BRICK[(v >> 2) % BRICK.length] : OTHER[(v >> 2) % OTHER.length]);
+  const f = 0.93 + ((v >> 5) / 7) * 0.1;
+  IA[s * 4] = sx; IA[s * 4 + 1] = sy; IA[s * 4 + 2] = sz; IA[s * 4 + 3] = v + (brick ? 256 : 0);
+  CA[s * 3] = _c.r * f; CA[s * 3 + 1] = _c.g * f; CA[s * 3 + 2] = _c.b * f;
 }

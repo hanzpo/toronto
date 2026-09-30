@@ -16,6 +16,7 @@ import { torontoParts } from '../state/clock';
 import { useApp } from '../state/store';
 import { boatModel, type BoatKey } from '../models/boats';
 import { BoatPools, F_NAV, F_WIN } from './water/pools';
+import { R_OCC } from '../engine/horizon';
 import { Path, hash01, trapezoid } from './water/path';
 import {
   AIRPORT, ROUTE_NAME, VESSELS, afloatFraction, boatingFactor, planDay, seawayOpen, weatherOf,
@@ -146,7 +147,8 @@ export class WaterLifeLayer implements Layer {
     this.marinas(ctx, p.month, p.weekday, key);
 
     this.drawn.length = this.nDrawn;
-    this.pools.commit(ctx.altitude < 2500);
+    // shadow frustum half-size as render/atmosphere.ts sizes it (its corners: × √2, + a step of its sizing)
+    this.pools.commit(ctx.altitude < 2500, Math.min(1800, Math.max(200, ctx.altitude * 1.2 + 150)) * 1.25 * 1.42 + 30);
   }
 
   /**
@@ -165,6 +167,9 @@ export class WaterLifeLayer implements Layer {
     if (dist > (o.range ?? 9000)) return;
     if (L * ctx.pixelScale / Math.max(dist, 1) < 1.2) return;
     if (!ctx.view.sphereEN(e, n, this.level + L * 0.15, L * 0.6 + 6)) return;
+    // street level: boats behind the nearby buildings (masts ≤ ~1.6 × length)
+    const hz = this.engine.tiles.horizon;
+    if (hz.valid && dist > R_OCC + L && hz.hides(cx, -cz, cy, e - L, n - L, e + L, n + L, this.level - 1, this.level + L * 1.7 + 3)) return;
     // swell: smaller boats move more
     const small = Math.max(0, Math.min(1, (40 - L) / 32));
     const t = ctx.time + o.seed * 7.3;
@@ -177,7 +182,12 @@ export class WaterLifeLayer implements Layer {
     _c.setHex(o.tint ?? 0xffffff, THREE.SRGBColorSpace);
     const night = 1 - ctx.daylight;
     const flags = o.flags ?? 0;
-    const model = this.pools.add(key, x, y, z, yaw, pitch, roll, s, _c, flags);
+    // shadow reach: distance from the axis of the sun's (orthographic) shadow frustum,
+    // which runs along the sun direction through the camera focus
+    const vx = e - ctx.focus.x, vy = this.level - ctx.focus.y, vz = -n - ctx.focus.z, sd = ctx.sunDir;
+    const along = vx * sd.x + vy * sd.y + vz * sd.z;
+    const fd = Math.hypot(vx - along * sd.x, vy - along * sd.y, vz - along * sd.z) - L * 1.7;
+    const model = this.pools.add(key, x, y, z, yaw, pitch, roll, s, _c, flags, fd);
     if (night > 0.15 && dist < 12000 && o.lights !== 'none') {
       const gain = 0.35 + night * 1.1;
       if (o.lights === 'anchor') this.pools.lightsFor(model, dist, ctx.pixelScale, gain, 'anchor');

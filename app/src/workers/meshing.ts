@@ -45,6 +45,10 @@ export interface TileMeshes {
   /** roads, sidewalks and (appended) rail: one draw; rail indices start at `railStart` */
   roads: MeshBuf | null;
   railStart: number;
+  /** index count of the near-only prefix of `roads` (curb faces, tactile plates: sub-pixel beyond a few hundred m) */
+  roadNear?: number;
+  /** levels 1–2: start of the half-resolution index range appended to `terrain` (0 = none) */
+  terrainCoarse?: number;
   houses: HouseBuf | null;
   street: import('./street').StreetBuf | null;
   /** far-field canopy clumps (level 1; VEG_STRIDE records, tile-local) */
@@ -79,6 +83,26 @@ export function concatMeshes(a: MeshBuf | null, b: MeshBuf | null): MeshBuf | nu
     for (const k in a.attrs) if (b.attrs[k]) out.attrs[k] = { array: cat(a.attrs[k].array, b.attrs[k].array), size: a.attrs[k].size };
   }
   return out;
+}
+
+/**
+ * Move the triangles of the given road surfaces (rm.y = cls + 16·oneway + 32·surf)
+ * to the front of the index range [0, end), keeping the order within each part.
+ * Returns the index count of that prefix: far tiles draw from there on.
+ */
+export function frontSurfaces(m: MeshBuf, end: number, surfs: ReadonlySet<number>): number {
+  const rm = m.attrs?.rm;
+  if (!rm) return 0;
+  const idx = m.index, a = rm.array, st = rm.size;
+  const near: number[] = [], rest: number[] = [];
+  for (let i = 0; i < end; i += 3) {
+    const surf = Math.floor(a[idx[i] * st + 1] / 32);
+    (surfs.has(surf) ? near : rest).push(idx[i], idx[i + 1], idx[i + 2]);
+  }
+  if (!near.length) return 0;
+  idx.set(near, 0);
+  idx.set(rest, near.length);
+  return near.length;
 }
 
 // --------------------------------------------------------------------------- growable builder
@@ -194,8 +218,10 @@ export function buildTerrain(hdm: Int16Array, G: number, S: number, level: numbe
     edges[2].push(k * G); // west
     edges[3].push(k * G + G - 1); // east
   }
+  const skirtBase: number[] = [];
   for (const e of edges) {
     const base = b.nv;
+    skirtBase.push(base);
     for (const vi of e) {
       b.v(b.pos[vi * 3], b.pos[vi * 3 + 1] - skirt, b.pos[vi * 3 + 2], b.nrm[vi * 4] / 127, b.nrm[vi * 4 + 1] / 127, b.nrm[vi * 4 + 2] / 127);
     }
@@ -205,7 +231,29 @@ export function buildTerrain(hdm: Int16Array, G: number, S: number, level: numbe
       b.t(t0, s1, s0); b.t(t0, t1, s1);
     }
   }
-  return { mesh: b.finish()!, heights: h, minH, maxH };
+  // far LOD (levels 1–2): the same vertices at every 2nd grid line, appended after
+  // the full index range (TileManager draws from `coarseStart` for far tiles; the
+  // skirts hide the T-junctions against full-detail neighbours)
+  let coarseStart = 0;
+  if (level >= 1 && (G - 1) % 2 === 0) {
+    coarseStart = b.ni;
+    for (let j = 0; j < G - 1; j += 2) {
+      for (let i = 0; i < G - 1; i += 2) {
+        const a = j * G + i, bb = a + 2, cc = a + 2 * G + 2, d = a + 2 * G;
+        b.t(a, bb, cc);
+        b.t(a, cc, d);
+      }
+    }
+    edges.forEach((e, q) => {
+      const base = skirtBase[q];
+      for (let k = 0; k < G - 1; k += 2) {
+        const t0 = e[k], t1 = e[k + 2], s0 = base + k, s1 = base + k + 2;
+        b.t(t0, s0, s1); b.t(t0, s1, t1);
+        b.t(t0, s1, s0); b.t(t0, t1, s1);
+      }
+    });
+  }
+  return { mesh: b.finish()!, heights: h, minH, maxH, coarseStart };
 }
 
 // --------------------------------------------------------------------------- buildings

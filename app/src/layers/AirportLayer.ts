@@ -15,6 +15,8 @@ import { lightMaterial, markingMaterial, pavementMaterial, runwayMaterial, termi
 import { labelGeometry } from '../air/apron/labels';
 import { ApronFurniture } from '../air/apron/ApronFurniture';
 import type { AirSystem } from '../air/AirSystem';
+import { CULL } from '../engine/view';
+import { releaseObject } from '../engine/dispose';
 
 interface AirportMeta {
   key: string;
@@ -39,6 +41,8 @@ interface AirportMeta {
 
 const DETAIL = 15000; // markings + lights within this distance of the airport bbox
 const DETAIL_DROP = 18000;
+/** apron ground equipment (tugs, carts, loaders: 2–4 m) within this distance of the airport bbox */
+const GSE_FAR = CULL ? 2200 : Infinity;
 const FAR_MAJOR = 90000; // airports with a ≥ 1500 m paved runway
 const FAR_MINOR = 25000;
 
@@ -167,6 +171,8 @@ export class AirportLayer implements Layer {
     if (sr && so && sx) for (let i = sr[0]; i < sr[0] + sr[1]; i++) paths.push(sx.subarray(so[i] * 3, so[i + 1] * 3));
     if (jb.length || gse.length || mast.length || paths.length) {
       e.apron = new ApronFurniture({ icao: e.meta.icao, jb, gse, mast, paths, origin: e.meta.origin });
+      const [x0, y0, x1, y1] = e.meta.bbox, [ox, on] = e.meta.origin;
+      if (CULL) e.apron.setBounds(new THREE.Sphere(new THREE.Vector3((x0 + x1) / 2 - ox, 40, -((y0 + y1) / 2 - on)), Math.hypot(x1 - x0, y1 - y0) / 2 + 150));
       e.root.add(e.apron.root);
     }
   }
@@ -176,7 +182,7 @@ export class AirportLayer implements Layer {
       e.root.remove(o);
       // sprites share one module-level geometry in three.js: never dispose it
       if ((o as THREE.Sprite).isSprite) ((o as THREE.Sprite).material as THREE.Material).dispose();
-      else (o as THREE.Mesh).geometry.dispose();
+      releaseObject(o);
     }
     e.detail = null;
     if (e.apron) { e.root.remove(e.apron.root); e.apron.dispose(); e.apron = null; }
@@ -196,6 +202,15 @@ export class AirportLayer implements Layer {
       if (d < DETAIL && !e.detail && this.detailOn) this.buildDetail(e);
       else if (d > DETAIL_DROP && e.detail) this.dropDetail(e);
       if (e.detail) for (const o of e.detail) if ((o as THREE.Sprite).isSprite) o.visible = night > 0.05;
+      if (e.apron) {
+        e.apron.setGseVisible(d < (e.apron.gseVisible ? GSE_FAR + 200 : GSE_FAR));
+        // inside the sun's orthographic shadow frustum: distance of the apron from its axis
+        // (the sun direction through the camera focus) against its half-size (render/atmosphere.ts)
+        const vx = (x0 + x1) / 2 - ctx.focus.x, vy = this.engine.heightAt((x0 + x1) / 2, (y0 + y1) / 2) - ctx.focus.y, vz = -(y0 + y1) / 2 - ctx.focus.z, sd = ctx.sunDir;
+        const al = vx * sd.x + vy * sd.y + vz * sd.z;
+        const axis = Math.hypot(vx - al * sd.x, vy - al * sd.y, vz - al * sd.z) - Math.hypot(x1 - x0, y1 - y0) / 2;
+        e.apron.setShadows(!CULL || axis < Math.min(1800, Math.max(200, ctx.altitude * 1.2 + 150)) * 1.25 * 1.42 + 60);
+      }
       if (e.apron) e.apron.update(ctx, (window as unknown as { __air?: { system: AirSystem } }).__air?.system ?? null);
     }
   }

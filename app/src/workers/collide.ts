@@ -12,7 +12,19 @@ export interface FootprintBuf {
   /** per footprint: bottom and top elevation (datum m) */
   bottom: Float32Array;
   top: Float32Array;
+  /**
+   * per footprint, for view occlusion (engine/horizon.ts): OCC_SOLID = drawn as
+   * a closed flat-roofed prism from bottom to top; OCC_HOUSE = house archetype
+   * (walls reach at least half the ridge height); 0 = don't occlude with it
+   * (pitched / domed roofs, stations, stadiums, parking decks, construction,
+   * landmark replacements)
+   */
+  occ?: Uint8Array;
 }
+
+export const OCC_SOLID = 1, OCC_HOUSE = 2;
+/** building kinds that may be open or see-through (b_kind): station sheds, stadiums, parking decks, canopies, construction */
+const OPEN_KINDS = new Set([9, 12, 14, 15, 16]);
 
 /** buildings lower than this are ignored (sheds, canopies you can see under) */
 const MIN_HEIGHT = 3;
@@ -22,6 +34,7 @@ export function extractFootprints(a: Record<string, TypedArray>, suppress: Set<n
   const xy: number[] = [];
   const bottom: number[] = [];
   const top: number[] = [];
+  const occ: number[] = [];
   const ringOff = a.b_ring_off as Uint32Array | undefined;
   if (ringOff && ringOff.length > 1) {
     const vertOff = a.b_vert_off as Uint32Array, bxy = a.b_xy as Float32Array;
@@ -47,6 +60,8 @@ export function extractFootprints(a: Record<string, TypedArray>, suppress: Set<n
       const minH = MIN ? Math.min(MIN[i], h - 0.5) : 0;
       bottom.push(minH > 2 ? BASE[i] + minH : BASE[i] - 3);
       top.push(BASE[i] + h);
+      const ROOF = a.b_roof as Uint8Array | undefined;
+      occ.push(ROOF && ROOF[i] === 0 && !(KIND && OPEN_KINDS.has(KIND[i])) && !(suppress.size && OSM && suppress.has(OSM[i])) ? OCC_SOLID : 0);
     }
   }
   const hxy = a.h_xy as Float32Array | undefined;
@@ -64,6 +79,7 @@ export function extractFootprints(a: Record<string, TypedArray>, suppress: Set<n
       off.push(xy.length / 2);
       bottom.push(base[i] - 3);
       top.push(base[i] + (hh ? hh[i] : 8));
+      occ.push(OCC_HOUSE);
     }
   }
   if (off.length < 2) return null;
@@ -73,6 +89,7 @@ export function extractFootprints(a: Record<string, TypedArray>, suppress: Set<n
     xy: Float32Array.from(xy),
     bottom: Float32Array.from(bottom),
     top: Float32Array.from(top),
+    occ: Uint8Array.from(occ),
   };
 }
 

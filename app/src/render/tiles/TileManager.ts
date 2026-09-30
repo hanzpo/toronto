@@ -12,6 +12,9 @@ import { HousePools } from './houses';
 import { facadeMaterial } from './facadeMaterial';
 import type { FrameContext } from '../../engine/types';
 import { useApp } from '../../state/store';
+import { Horizon, R_OCC } from '../../engine/horizon';
+import { releaseObject } from '../../engine/dispose';
+import { CULL, SHADOW_ONLY_LAYER } from '../../engine/view';
 
 export interface Manifest {
   version: number;
@@ -47,12 +50,19 @@ export interface Tile {
   /** roads + sidewalks + rail in one mesh; rail = indices from `railStart` */
   roads: THREE.Mesh | null;
   railStart: number;
-  /** draw range state last applied (roads on, rail on) */
+  /** draw range state last applied (1 roads on, 2 rail on, 4 near-only road surfaces on) */
   streetMask: number;
+  /** index count of the near-only prefix of the roads mesh */
+  roadNear: number;
+  /** levels 1–2: start of the terrain's half-resolution index range (0 = none), and whether it is drawn */
+  terrainCoarse?: number;
+  terrainFarLod?: boolean;
   heights: Float32Array | null;
   grid: number;
   minH: number;
   maxH: number;
+  /** highest point of the tile's content (terrain, buildings, roads, houses) */
+  topH: number;
   houses: TileMeshes['houses'];
   housesShown: boolean;
   /** street furniture placements (level 0), consumed by StreetLayer */
@@ -87,6 +97,14 @@ function attrBytes(m: MeshBuf): number {
   return b;
 }
 
+function maxY(m: MeshBuf | null): number {
+  if (!m) return -Infinity;
+  const p = m.position;
+  let y = -Infinity;
+  for (let i = 1; i < p.length; i += 3) if (p[i] > y) y = p[i];
+  return y;
+}
+
 function meshBytes(r: TileMeshes): number {
   let b = 0;
   for (const m of [r.terrain, r.vground ?? null, r.buildings, r.roads]) {
@@ -111,6 +129,16 @@ function refineL1(altitude: number) {
 const HYSTERESIS = 1.25;
 /** max geometry bytes turned into GPU objects per frame (uploads happen at render) */
 const UPLOAD_BUDGET = 12 * 1024 * 1024;
+
+/** house tiles this close (tile-edge distance, m) stay in the pools whatever the view direction (shadow casters) */
+const HOUSE_ALWAYS = 450;
+/** level-0 tiles closer than this (m, tile distance) draw curb faces and tactile plates; beyond, they are < 0.5 px */
+const ROAD_NEAR = CULL ? 400 : Infinity;
+/** level-2 / level-1 terrain beyond these tile distances (m) draws its half-resolution grid (512 / 128 m) */
+const TERRAIN_COARSE_L2 = 25000, TERRAIN_COARSE_L1 = 8000;
+/** occlusion horizon below this altitude (m); `?horizon=0` switches it off (A/B checks) */
+const HORIZON_ALT = 250;
+const HORIZON_ON = CULL && !/[?&]horizon=0\b/.test(location.search);
 
 const MAX_BYTES = 900 * 1024 * 1024;
 const MAX_TILES = 1400;
@@ -157,6 +185,10 @@ export class TileManager {
   lodScale = 1;
   /** altitude-dependent L1 refinement factor (street-level detail rings) */
   private l1K = 1;
+  /** street-level occlusion by nearby buildings (engine/horizon.ts) */
+  readonly horizon = new Horizon();
+  /** tiles hidden by the horizon this frame (diagnostics) */
+  occluded = 0;
 
   dataRoot: string;
   constructor(dataRoot: string) {
@@ -179,7 +211,7 @@ export class TileManager {
         const S = this.manifest.tileSize[L];
         const t: Tile = {
           key: key(l, tx, ty), L: l, tx, ty, S, state: 'none', jobId: 0, group: null, terrain: null, terrainFar: null,
-          buildings: null, roads: null, railStart: 0, streetMask: 3, heights: null, grid: 0, minH: 0, maxH: 120,
+          buildings: null, roads: null, railStart: 0, streetMask: 7, roadNear: 0, heights: null, grid: 0, minH: 0, maxH: 120, topH: 470,
           houses: null, housesShown: false, street: null, canopy: null, props: null, page: null, layer: -1, bytes: 0, lastUsed: 0, drawn: false,
           requestedAt: 0, priority: 0, kids: null, counts: null, retryAt: 0, refined: false,
         };
@@ -279,9 +311,14 @@ export class TileManager {
     // visibility transitions
     for (const t of prevDrawn) t.drawn = false;
     const layers = useApp.getState().layers;
+    this.updateHorizon(ctx, E, N, H, layers.buildings);
+    const hz = this.horizon.valid ? this.horizon : null;
     for (const t of this.drawnList) {
       t.drawn = true;
       t.lastUsed = this.now;
+      // street level: far tiles entirely behind the nearby buildings (engine/horizon.ts)
+      const hidden = hz !== null && t.group !== null && hz.hides(E, N, H, t.tx * t.S, t.ty * t.S, (t.tx + 1) * t.S, (t.ty + 1) * t.S, t.minH, t.topH);
+      if (hidden) this.occluded++;
       if (t.group) {
         t.group.visible = true;
         const d = this.tileDist(t, E, N, H);
@@ -297,23 +334,43 @@ export class TileManager {
         if (t.terrainFar) {
           // vector ground near, raster beyond ring 1 (same surface, cheaper)
           const far = d > ctx.view.r1;
-          t.terrain!.visible = layers.terrain && !sliver && !far;
-          t.terrainFar.visible = layers.terrain && !sliver && far;
-        } else if (t.terrain) t.terrain.visible = layers.terrain && !sliver;
-        if (t.buildings) t.buildings.visible = layers.buildings;
+          t.terrain!.visible = layers.terrain && !sliver && !far && !hidden;
+          t.terrainFar.visible = layers.terrain && !sliver && far && !hidden;
+        } else if (t.terrain) {
+          t.terrain.visible = layers.terrain && !sliver && !hidden;
+          if (t.terrainCoarse) {
+            // far level-1 / level-2 terrain: half-resolution index range
+            const R = (t.L === 2 ? TERRAIN_COARSE_L2 : TERRAIN_COARSE_L1) * (t.terrainFarLod ? 0.9 : 1);
+            const farLod = d > R;
+            if (farLod !== t.terrainFarLod) {
+              t.terrainFarLod = farLod;
+              const g = t.terrain.geometry, n = g.index!.count, c = t.terrainCoarse;
+              if (farLod) g.setDrawRange(c, n - c); else g.setDrawRange(0, c);
+            }
+          }
+        }
+        if (t.buildings) {
+          t.buildings.visible = layers.buildings;
+          // hidden from the eye, but its shadow may still reach the view: shadow pass only
+          t.buildings.layers.set(hidden ? SHADOW_ONLY_LAYER : 0);
+        }
         if (t.roads) {
-          const mask = (layers.roads ? 1 : 0) | (layers.rail ? 2 : 0);
+          // bit 4: near tile, draws the near-only prefix (curb faces, tactile plates) too
+          const near = d < (t.streetMask & 4 ? ROAD_NEAR * 1.15 : ROAD_NEAR);
+          const mask = (layers.roads ? 1 : 0) | (layers.rail ? 2 : 0) | (near ? 4 : 0);
           if (mask !== t.streetMask) {
             t.streetMask = mask;
             const g = t.roads.geometry, n = g.index!.count, rs = t.railStart;
-            if (mask === 3) g.setDrawRange(0, Infinity);
-            else if (mask === 1) g.setDrawRange(0, rs);
-            else if (mask === 2) g.setDrawRange(rs, n - rs);
+            const a = near ? 0 : Math.min(t.roadNear, rs);
+            if ((mask & 3) === 3) g.setDrawRange(a, n - a);
+            else if ((mask & 3) === 1) g.setDrawRange(a, rs - a);
+            else if ((mask & 3) === 2) g.setDrawRange(rs, n - rs);
           }
           // ring 2+: street surfaces of far tiles seen at a grazing angle
           // (< ~1.2°) cover no pixels worth a draw call
           const grazing = sliver || (d > ctx.view.r1 && (H - t.maxH) < d * 0.02);
-          t.roads.visible = !grazing && mask !== 0 && !(mask === 1 && t.railStart === 0) && !(mask === 2 && t.railStart === t.roads.geometry.index!.count);
+          const m3 = mask & 3;
+          t.roads.visible = !grazing && !hidden && m3 !== 0 && !(m3 === 1 && t.railStart === 0) && !(m3 === 2 && t.railStart === t.roads.geometry.index!.count);
         }
       }
       if (t.houses) {
@@ -323,7 +380,12 @@ export class TileManager {
         const r1 = ctx.view.r1;
         const lo = cur === 'lo' ? d > r1 * 0.85 : d > r1;
         if (cur && (cur === 'lo') !== lo) { this.houses.remove(t.key); t.housesShown = false; }
-        if (!t.housesShown) {
+        // instanced pools draw every instance: only tiles inside the widened
+        // view frustum (plus the shadow casters around the camera) are in them
+        const want = d < HOUSE_ALWAYS || !hidden && ctx.view.wideBoxEN(t.tx * t.S, t.ty * t.S, t.minH - 5, (t.tx + 1) * t.S, (t.ty + 1) * t.S, t.maxH + 30);
+        if (!want) {
+          if (t.housesShown) { this.houses.remove(t.key); t.housesShown = false; }
+        } else if (!t.housesShown) {
           this.houses.add(t.key, t.tx * t.S, t.ty * t.S, t.houses, lo);
           t.housesShown = true;
         }
@@ -345,6 +407,33 @@ export class TileManager {
     this.houses.flush();
     this.houses.group.updateMatrixWorld();
   }
+
+  /**
+   * Rebuild the occlusion horizon from the drawn level-0 tiles' footprints when
+   * the eye moved out of the last table's slack. Street level only (from higher
+   * up the nearby roofs hide little), and only while buildings are drawn.
+   */
+  private updateHorizon(ctx: FrameContext, E: number, N: number, H: number, buildings: boolean) {
+    this.occluded = 0;
+    const hz = this.horizon;
+    if (!buildings || !HORIZON_ON || ctx.altitude > HORIZON_ALT) { hz.valid = false; return; }
+    const houses = useApp.getState().layers.houses;
+    // occluder tiles: drawn level-0 tiles near the eye (the table is rebuilt when that set changes)
+    const occ = this.occTiles;
+    occ.length = 0;
+    let sig = houses ? 1 : 0;
+    for (const t of this.drawnList) {
+      if (t.L !== 0 || !t.collide || !t.group || this.tileDist(t, E, N, H) > R_OCC + 50) continue;
+      occ.push(t);
+      sig = (sig * 31 + ((t.tx * 73856093) ^ (t.ty * 19349663))) | 0;
+    }
+    if (hz.holds(E, N, H) && sig === this.occSig) return;
+    this.occSig = sig;
+    hz.begin(E, N, H);
+    for (const t of occ) hz.add(t.collide!, t.tx * t.S, t.ty * t.S, houses);
+  }
+  private occTiles: Tile[] = [];
+  private occSig = 0;
 
   private tileDist(t: Tile, E: number, N: number, H: number) {
     const cx = (t.tx + 0.5) * t.S, cy = (t.ty + 0.5) * t.S;
@@ -572,6 +661,7 @@ export class TileManager {
     g.updateMatrix();
     t.minH = r.minH;
     t.maxH = r.maxH;
+    t.topH = Math.max(r.maxH + (r.houses?.count ? 15 : 0), maxY(r.buildings), maxY(r.roads), maxY(r.vground ?? null));
     const top = r.maxH + (t.L === 0 ? 350 : 500);
     const sphere = new THREE.Sphere(new THREE.Vector3(S / 2, (r.minH + top) / 2, -S / 2), Math.hypot(S / 2, S / 2, (top - r.minH) / 2));
     let bytes = 0;
@@ -601,6 +691,9 @@ export class TileManager {
       t.terrainFar = raster;
       raster.visible = false;
     }
+    t.terrainCoarse = CULL ? r.terrainCoarse ?? 0 : 0;
+    t.terrainFarLod = false;
+    if (r.terrainCoarse) raster.geometry.setDrawRange(0, r.terrainCoarse);
     for (const m of new Set([raster, terrain])) {
       m.receiveShadow = true;
       m.name = 'terrain';
@@ -623,7 +716,8 @@ export class TileManager {
     t.buildings = add(r.buildings, this.buildingMat, 'buildings', true);
     t.roads = add(r.roads, this.roadMat, 'roads', false);
     t.railStart = r.railStart;
-    t.streetMask = 3;
+    t.roadNear = r.roadNear ?? 0;
+    t.streetMask = 7;
     if (t.roads) t.roads.renderOrder = 1;
     t.heights = r.heights;
     t.grid = r.grid;
@@ -654,14 +748,15 @@ export class TileManager {
 
   private unload(t: Tile) {
     if (t.housesShown) { this.houses.remove(t.key); t.housesShown = false; }
+    this.houses.forget(t.key);
     if (t.group) {
-      for (const c of t.group.children) (c as THREE.Mesh).geometry?.dispose();
       this.root.remove(t.group);
+      releaseObject(t.group);
     }
     if (t.page && t.layer >= 0) t.page.release(t.layer);
     this.bytes -= t.bytes;
     Object.assign(t, {
-      group: null, terrain: null, terrainFar: null, buildings: null, collide: null, roads: null, railStart: 0, streetMask: 3, heights: null, houses: null, street: null, canopy: null, cuts: null, props: null, urban: null,
+      group: null, terrain: null, terrainFar: null, buildings: null, collide: null, roads: null, railStart: 0, streetMask: 7, roadNear: 0, heights: null, houses: null, street: null, canopy: null, cuts: null, props: null, urban: null,
       page: null, layer: -1, bytes: 0, state: 'none', counts: null,
     });
     this.readyCount--;

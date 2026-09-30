@@ -9,6 +9,7 @@ import {
 } from 'three/tsl';
 import { U } from '../../render/uniforms';
 import { boatModel, type BoatKey, type BoatModel } from '../../models/boats';
+import { CULL } from '../../engine/view';
 
 /** instance flag bits */
 export const F_NAV = 16; // navigation lights on
@@ -62,6 +63,8 @@ class Pool {
   mesh: THREE.InstancedMesh;
   col: THREE.InstancedBufferAttribute;
   count = 0;
+  /** distance (m) from the shadow frustum centre of the nearest boat added this frame */
+  nearest = Infinity;
   capacity: number;
   readonly model: BoatModel;
   readonly geom: THREE.BufferGeometry;
@@ -97,10 +100,12 @@ class Pool {
     this.mesh = mesh;
     this.capacity = cap;
   }
-  commit(shadows: boolean) {
+  commit(shadows: boolean, reach: number) {
     this.mesh.count = this.count;
     this.mesh.visible = this.count > 0;
-    this.mesh.castShadow = shadows;
+    // the instanced pool draws every boat into the shadow map: only while one is
+    // inside the sun's shadow frustum (the camera focus ± its half-size)
+    this.mesh.castShadow = shadows && (!CULL || this.nearest < reach);
     if (!this.count) return;
     const im = this.mesh.instanceMatrix;
     im.clearUpdateRanges(); im.addUpdateRange(0, this.count * 16); im.needsUpdate = true;
@@ -188,7 +193,7 @@ export class BoatPools {
   }
 
   begin() {
-    for (const p of this.pools.values()) p.count = 0;
+    for (const p of this.pools.values()) { p.count = 0; p.nearest = Infinity; }
     this.lCount = 0;
     this.wCount = 0;
   }
@@ -198,8 +203,9 @@ export class BoatPools {
    * yaw = heading (rad, math angle from +E towards +N); pitch (bow up +), roll
    * (starboard down +); s uniform scale. Returns the model (for lights).
    */
-  add(key: BoatKey, x: number, y: number, z: number, yaw: number, pitch: number, roll: number, s: number, tint: THREE.Color, flags: number): BoatModel {
+  add(key: BoatKey, x: number, y: number, z: number, yaw: number, pitch: number, roll: number, s: number, tint: THREE.Color, flags: number, dist = 0): BoatModel {
     const p = this.pool(key);
+    if (dist < p.nearest) p.nearest = dist;
     if (p.count >= p.capacity) p.grow();
     const k = p.count++;
     const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch), cr = Math.cos(roll), sr = Math.sin(roll);
@@ -257,8 +263,8 @@ export class BoatPools {
     });
   }
 
-  commit(shadowsNear: boolean) {
-    for (const p of this.pools.values()) p.commit(shadowsNear);
+  commit(shadowsNear: boolean, reach = Infinity) {
+    for (const p of this.pools.values()) p.commit(shadowsNear, reach);
     this.lights.count = this.lCount;
     this.lights.visible = this.lCount > 0;
     if (this.lCount) {

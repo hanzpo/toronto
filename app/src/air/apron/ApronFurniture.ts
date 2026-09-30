@@ -63,8 +63,9 @@ function inst(geo: THREE.BufferGeometry, mat: THREE.Material, n: number, name: s
   m.name = name;
   m.castShadow = shadow;
   m.receiveShadow = true;
+  // culled against a sphere around the whole apron (setBounds); static usage + update ranges
+  // (DynamicDrawUsage re-uploads the whole buffer every render pass in three's WebGPU backend)
   m.frustumCulled = false;
-  m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   return m;
 }
 
@@ -213,6 +214,38 @@ export class ApronFurniture {
     return this.siblings;
   }
 
+  /** frustum-cull every pool against one sphere (origin-relative three coords) around the apron */
+  setBounds(sphere: THREE.Sphere) {
+    this.root.traverse((o) => {
+      const m = o as THREE.InstancedMesh;
+      if (!m.isInstancedMesh) return;
+      m.boundingSphere = sphere.clone();
+      m.frustumCulled = true;
+    });
+  }
+
+  /** cast shadows only while the apron is inside the sun's shadow frustum (casters keep their own flag) */
+  setShadows(on: boolean) {
+    if (on === this.shadowsOn) return;
+    this.shadowsOn = on;
+    this.root.traverse((o) => {
+      if (!(o as THREE.Mesh).isMesh) return;
+      if (o.userData.cast === undefined) o.userData.cast = o.castShadow;
+      o.castShadow = on && o.userData.cast;
+    });
+  }
+  private shadowsOn = true;
+
+  /** ground equipment is a few pixels beyond ~2 km: hide it (and skip placing it) */
+  setGseVisible(v: boolean) {
+    if (v === this.gseOn) return;
+    this.gseOn = v;
+    for (const m of Object.values(this.gm)) m.visible = v;
+    if (v) for (const k of GSE_KINDS) this.dynN[k] = -1; // re-upload on return
+  }
+  private gseOn = true;
+  get gseVisible() { return this.gseOn; }
+
   update(ctx: FrameContext, sys: AirSystem | null) {
     const night = 1 - ctx.daylight;
     for (const g of this.glow) g.visible = night > 0.05;
@@ -270,6 +303,7 @@ export class ApronFurniture {
       if (b.k !== k0 || b.dirty) { b.dirty = false; any = true; }
     });
     if (any) this.layoutBridges();
+    if (!this.gseOn) return;
     // ---- turnaround GSE (rebuilt when the set of parked aircraft changes)
     const key = [...parked.entries()].map(([s, p]) => `${s}:${p.key}:${p.phase}`).join(',');
     if (key !== this.svcKey || [...parked.values()].some((p) => p.phase === PH.PUSHBACK)) {

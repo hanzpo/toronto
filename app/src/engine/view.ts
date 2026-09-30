@@ -25,6 +25,18 @@ const PRESET: Record<Exclude<QualityMode, 'auto'>, number> = { high: 0, medium: 
 export const RING0 = 300;
 export const RING1 = 1500;
 export const RING2 = 4000;
+/**
+ * `?cull=0` switches off this pass's draw culling (widened-frustum pool membership,
+ * occlusion horizon, far road detail, landmark material merge, apron equipment
+ * range, lamp range): paired A/B checks in one session.
+ */
+export const CULL = !/[?&]cull=0\b/.test(location.search);
+/** object layer rendered only by the sun's shadow camera (render/atmosphere.ts enables it there) */
+export const SHADOW_ONLY_LAYER = 1;
+/** widened frustum (pool membership): margin per side, re-snapshot after this turn (cos) or move (m) */
+const WIDE_MARGIN = THREE.MathUtils.degToRad(18);
+const WIDE_TURN_COS = Math.cos(THREE.MathUtils.degToRad(5));
+const WIDE_MOVE = 40;
 
 export class ViewCull {
   /** frustum planes (world): nx, ny, nz, d — inside when n·p + d ≥ −r */
@@ -35,6 +47,23 @@ export class ViewCull {
   scale = 1;
   private frustum = new THREE.Frustum();
   private pv = new THREE.Matrix4();
+  /**
+   * Widened view frustum for instance-pool membership (houses, street
+   * furniture, far trees): the camera frustum opened by WIDE_MARGIN on every
+   * side, re-snapshotted only when the view turned by more than WIDE_TURN or
+   * moved more than WIDE_MOVE (then `wideVersion` increments). Pools that
+   * rebuild membership on a version change never show a missing tile or cell
+   * at the screen edge: the real frustum stays inside the snapshot until the
+   * next one, which is taken in the same frame, before rendering.
+   */
+  readonly wide = new THREE.Frustum();
+  wideVersion = 0;
+  private wideDir = new THREE.Vector3(0, 0, 0);
+  private widePos = new THREE.Vector3(Infinity, 0, 0);
+  private wideFov = 0;
+  private tmpDir = new THREE.Vector3();
+  private tmpBox = new THREE.Box3();
+  private wideP = new THREE.Matrix4();
 
   update(cam: THREE.PerspectiveCamera, scale: number) {
     this.scale = scale;
@@ -44,6 +73,39 @@ export class ViewCull {
     const p = this.planes;
     this.frustum.planes.forEach((pl, i) => { p[i * 4] = pl.normal.x; p[i * 4 + 1] = pl.normal.y; p[i * 4 + 2] = pl.normal.z; p[i * 4 + 3] = pl.constant; });
     this.x = cam.position.x; this.y = cam.position.y; this.z = cam.position.z;
+    const dir = cam.getWorldDirection(this.tmpDir);
+    if (dir.dot(this.wideDir) < WIDE_TURN_COS || cam.position.distanceTo(this.widePos) > WIDE_MOVE || cam.fov !== this.wideFov) {
+      this.wideDir.copy(dir);
+      this.widePos.copy(cam.position);
+      this.wideFov = cam.fov;
+      // same projection with the x / y extents opened by WIDE_MARGIN (near / far unchanged)
+      const e = this.wideP.copy(cam.projectionMatrix).elements;
+      const tv = Math.tan(THREE.MathUtils.degToRad(cam.fov / 2)), th = tv * cam.aspect;
+      e[0] *= th / Math.tan(Math.min(1.5, Math.atan(th) + WIDE_MARGIN));
+      e[5] *= tv / Math.tan(Math.min(1.5, Math.atan(tv) + WIDE_MARGIN));
+      this.wideP.multiply(cam.matrixWorldInverse);
+      this.wide.setFromProjectionMatrix(this.wideP, cam.coordinateSystem, cam.reversedDepth);
+      this.wideVersion++;
+    }
+  }
+
+  /** axis-aligned box given in E, N, elevation intersects the widened frustum snapshot */
+  wideBoxEN(e0: number, n0: number, h0: number, e1: number, n1: number, h1: number): boolean {
+    if (!CULL) return true;
+    this.tmpBox.min.set(e0, h0, -n1);
+    this.tmpBox.max.set(e1, h1, -n0);
+    return this.wide.intersectsBox(this.tmpBox);
+  }
+
+  /** sphere given in E, N, elevation intersects the widened frustum snapshot */
+  wideSphereEN(e: number, n: number, h: number, r: number): boolean {
+    if (!CULL) return true;
+    const pl = this.wide.planes;
+    for (let i = 0; i < 6; i++) {
+      const q = pl[i];
+      if (q.normal.x * e + q.normal.y * h - q.normal.z * n + q.constant < -r) return false;
+    }
+    return true;
   }
 
   /** sphere (world coords) intersects the view frustum */

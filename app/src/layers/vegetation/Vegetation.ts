@@ -15,6 +15,8 @@
 import * as THREE from 'three/webgpu';
 import type { Engine } from '../../engine/Engine';
 import type { FrameContext } from '../../engine/types';
+import type { ViewCull } from '../../engine/view';
+import { releaseObject } from '../../engine/dispose';
 import { VEG_CELLS } from '../../workers/vegetation';
 import { VEG_STRIDE } from './species';
 import { impostorQuad, lobedHigh, lobedMid, tieredHigh, tieredMid } from './geometry';
@@ -88,7 +90,7 @@ class VegPool {
       m.position.copy(this.mesh.position);
       m.visible = this.mesh.visible;
       this.parent.remove(this.mesh);
-      this.geo.dispose();
+      releaseObject(this.mesh);
     }
     m.updateMatrix();
     this.parent.add(m);
@@ -208,7 +210,7 @@ class VegPool {
     this.ia.needsUpdate = true; this.ib.needsUpdate = true; this.ic.needsUpdate = true;
     d.length = 0;
   }
-  dispose() { this.parent.remove(this.mesh); this.geo.dispose(); }
+  dispose() { this.parent.remove(this.mesh); releaseObject(this.mesh); }
 }
 
 // pool membership bits
@@ -242,6 +244,9 @@ export class Vegetation {
   private dirty = true;
   private pending = false;
   private tileOrder: VegTile[] = [];
+  /** widened view frustum (engine/view.ts): the non-shadow pools (mid far, impostors) only take cells inside it */
+  private view: ViewCull | null = null;
+  private viewVer = -1;
 
   private engine: Engine;
   constructor(engine: Engine) {
@@ -320,6 +325,7 @@ export class Vegetation {
           rec.dist = d;
         } else if (t.L === 1 && t.canopy && t.canopy.length) {
           if (d > far + (this.canopies.has(t.key) ? 400 : 0)) continue;
+          if (!ctx.view.wideBoxEN(t.tx * t.S, t.ty * t.S, t.minH - 5, (t.tx + 1) * t.S, (t.ty + 1) * t.S, t.maxH + 40)) continue;
           want1.add(t.key);
         }
       }
@@ -344,7 +350,10 @@ export class Vegetation {
     // ---- cells → pools (only when the camera / LOD distances moved or tiles changed)
     const lodKey = `${lodH.toFixed(1)}|${lodM.toFixed(1)}|${far.toFixed(0)}`;
     const moved = Math.hypot(E - this.at.x, Nn - this.at.y, Hc - this.at.z) > 2;
-    if (changed || moved || lodKey !== this.lodKey || this.pending || this.dirty) {
+    const turned = ctx.view.wideVersion !== this.viewVer;
+    this.viewVer = ctx.view.wideVersion;
+    this.view = ctx.view;
+    if (changed || moved || turned || lodKey !== this.lodKey || this.pending || this.dirty) {
       if (changed) this.tileOrder = [...this.tiles.values()];
       this.tileOrder.sort((a, b) => a.dist - b.dist);
       this.at.set(E, Nn, Hc);
@@ -370,6 +379,8 @@ export class Vegetation {
         if (dmax > H0 - hm && dmin < M1 + hm) want |= dmin < SHADOW_MID + (has & MIDN ? HYST : 0) ? MIDN : MIDF;
         const hi = has & IMP ? HYST : 0;
         if (dmax > M0 - hi && dmin < far + hi) want |= IMP;
+        // mid-far / impostor trees outside the widened view frustum draw nothing (they cast no shadow)
+        if (want & (MIDF | IMP) && dmin > SHADOW_MID && this.view && !this.view.wideSphereEN(c.cx, c.cy, c.cz, c.r + 2)) want &= ~(MIDF | IMP);
         if (want === has) continue;
         if (budget <= 0) return true;
         budget -= this.apply(t, c, want, ox, oz);
