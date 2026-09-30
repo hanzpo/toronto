@@ -137,7 +137,8 @@ function LayersPanel() {
   const mode = useApp((s) => s.analyticsMode);
   const shadows = useApp((s) => s.shadows);
   const quality = useApp((s) => s.quality);
-  const [open, setOpen] = useState(true);
+  // collapsed by default on smaller windows so it doesn't cover the view
+  const [open, setOpen] = useState(() => window.innerWidth >= 1280);
   const st = useApp.getState();
   return (
     <aside className={`layers panel ${open ? '' : 'collapsed'}`}>

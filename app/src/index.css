@@ -165,9 +165,13 @@ body.hud-hidden .hud > *:not(.stats) { opacity: 0; pointer-events: none; }
 .hint { position: absolute; left: 50%; top: 14px; transform: translateX(-50%); font-size: 10.5px; color: rgba(255, 255, 255, 0.72); text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9); letter-spacing: 0.03em; white-space: nowrap; pointer-events: none; }
 
 @media (max-width: 1150px) {
-  .topbar { grid-template-columns: auto auto auto; bottom: 196px; }
+  /* compact bottom bar: stays at the bottom, scrubber wraps to its own row */
+  .topbar { grid-template-columns: auto auto; gap: 14px; bottom: 10px; padding: 6px 12px; }
+  .brand { display: none; }
+  .clock-time { font-size: 24px; }
   .scrub { grid-column: 1 / -1; }
   .hint { display: none; }
+  .stats { bottom: 124px !important; }
 }
 
 /* ---------------------------------------------------------------- map labels */
