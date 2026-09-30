@@ -6,6 +6,7 @@ import { Fn, attribute, uniform, vec3, vec4, float, max, length, cos, sin, posit
 import type { Engine } from '../../engine/Engine';
 import type { FrameContext } from '../../engine/types';
 import type { DepthMode } from './LineOverlay';
+import { vehicleShade } from '../../models/material';
 
 export type MarkerShape = 'box' | 'train' | 'bus' | 'disc' | 'diamond';
 
@@ -77,6 +78,7 @@ export class MarkerOverlay {
     const hasVC = !!base.attributes.color, hasLiv = !!base.attributes.livery;
     if (hasVC) g.setAttribute('color', base.attributes.color);
     if (hasLiv) g.setAttribute('livery', base.attributes.livery);
+    for (const k of ['lamp', 'sign', 'glass']) if (base.attributes[k]) g.setAttribute(k, base.attributes[k]);
     this.world = new Float64Array(this.capacity * 3);
     this.iPos = new THREE.InstancedBufferAttribute(new Float32Array(this.capacity * 4), 4);
     this.iCol = new THREE.InstancedBufferAttribute(new Float32Array(this.capacity * 3), 3);
@@ -108,7 +110,14 @@ export class MarkerOverlay {
     // cheap fake lighting so boxes read as 3D
     const vc = hasVC ? attribute('color', 'vec3') : vec3(1, 1, 1);
     const tint = hasLiv ? mix(vec3(1, 1, 1), iCol, attribute('livery', 'float')) : iCol;
-    m.colorNode = vec4(vc.mul(tint).mul(mix(float(0.62), float(1.08), normalLocal.y.mul(0.5).add(0.5))), 1);
+    if (hasLiv) {
+      // vehicle models: proper sun/sky shading, glass, lamps (models/material.ts)
+      const n = normalLocal, c = cos(iPos.w), s = sin(iPos.w);
+      const nW = vec3(n.x.mul(c).add(n.z.mul(s)), n.y, n.x.mul(s).negate().add(n.z.mul(c)));
+      m.colorNode = vehicleShade(nW, { tint: iCol, tagged: !!base.attributes.lamp });
+    } else {
+      m.colorNode = vec4(vc.mul(tint).mul(mix(float(0.62), float(1.08), normalLocal.y.mul(0.5).add(0.5))), 1);
+    }
     this.mesh = new THREE.Mesh(g, m);
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = 120;
