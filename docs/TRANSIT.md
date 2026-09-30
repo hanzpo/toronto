@@ -13,6 +13,27 @@ cd pipeline && uv run python -m tpipe.transit [--download] [agency ...]
   mode/colour overrides). Zips live in `pipeline/raw/gtfs/{key}.zip`; `--download`
   fetches missing ones. With agency keys given, only those are rebuilt, and
   `index.json` is merged.
+- **Supplementary feeds** (`pipeline/tpipe/transit_extra.py`): a source may list
+  `extra` feeds that are merged into its zip before the build
+  (`uv run python -m tpipe.transit_extra [--download] [agency]`; the original is kept
+  as `raw/gtfs/{key}.base.zip`, extras as `raw/gtfs/{key}+{prefix}.zip`). Extra-feed ids
+  are prefixed `{prefix}:`; optional fixes: `platform_suffix` (direction-specific
+  platforms get a synthesised parent station) and `trim_shape_spurs` (drop the short
+  sharp kink where a shape starts at the stop pole instead of on the track).
+  Used for **GRT ION LRT (route 301)**: GRT's main feed (`staticfeeds/1`) is bus-only;
+  ION is published by the Region of Waterloo as its own feed `staticfeeds/2`
+  (real schedule, not synthetic: 16 stops per direction / 19 stations
+  Conestoga – Fairway, release 41, valid 2026-07-05 – 2028-07-03).
+  ION shares the `railway=rail` "Ion;CN Waterloo Spur" track (OSM `operator=Grand River
+  Transit`, `electrified=contact_line`) in Uptown Waterloo; the rail graph must treat
+  those ways as light rail or the LRT router breaks there.
+- **Coverage** (checked 2026-09-30): TTC, GO (rail + bus), UP, VIA, YRT/Viva (blue,
+  blue B, purple, purple A, orange, yellow), MiWay, DRT (Pulse 900/901), GRT (+ ION),
+  HSR (incl. 10 B-Line, 20 A-Line), Brampton (Züm 501/502/505/511/561), Burlington,
+  Oakville, Milton, Niagara Region Transit (St. Catharines, Welland, Niagara Falls /
+  WEGO 602–604) and Barrie feeds all cover today. **Guelph**: every published copy
+  (city URL, MDB mdb-3140/tld-408) ends 2026-05-02, so the last valid dates are used.
+  **Bradford (BWG)** is on-demand with no static GTFS (GO buses serve Bradford).
 - Rail network: OSM ways with `railway ∈ {rail, subway, light_rail, tram, narrow_gauge}`
   (no yards), read from `pipeline/raw/bbox.osm.pbf` and cached in `pipeline/work/transit_rail.npz`.
 - **Service profiles** `weekday | saturday | sunday`. Per agency, the representative

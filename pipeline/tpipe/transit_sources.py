@@ -9,6 +9,8 @@ Each entry:
   route_colors {route_short_name: "RRGGBB"} per-route colour overrides
   mode_colors {mode: "RRGGBB"} colour for every route of a mode
   bus         False to drop route_type 3 routes of this feed
+  extra       supplementary feeds merged into {key}.zip by tpipe.transit_extra
+              ([{url, prefix, platform_suffix?}]; see that module)
 
 Run `python -m tpipe.transit --download` to (re)fetch missing zips.
 """
@@ -46,7 +48,17 @@ SOURCES: dict[str, dict] = {
     "drt": {"name": "Durham Region Transit", "url": "https://maps.durham.ca/OpenDataGTFS/GTFS_Durham_TXT.zip"},
     "grt": {
         "name": "Grand River Transit",
+        # staticfeeds/1 = buses only; ION LRT (route 301) is published separately as
+        # staticfeeds/2 and merged in by tpipe.transit_extra (ids prefixed "ion:").
         "url": "https://webapps.regionofwaterloo.ca/api/grt-routes/api/staticfeeds/1",
+        "extra": [
+            {
+                "url": "https://webapps.regionofwaterloo.ca/api/grt-routes/api/staticfeeds/2",
+                "prefix": "ion",
+                "platform_suffix": r"\s*-\s*(North|South)bound$",
+                "trim_shape_spurs": True,
+            },
+        ],
         "route_modes": {"301": "lrt"},
         "route_colors": {"301": "0096D6"},
     },
@@ -77,6 +89,8 @@ SOURCES: dict[str, dict] = {
         "name": "Guelph Transit",
         "url": "https://gismaps.guelph.ca/Pages/GTFS/google_transit.zip",
         "mirror": MDB.format("mdb-3140"),
+        # As of 2026-09-30 both URLs (and MDB tld-408) still serve the Jan-2026
+        # feed ending 2026-05-02; pick_dates falls back to the latest dates in it.
     },
     "barrie": {
         "name": "Barrie Transit",
