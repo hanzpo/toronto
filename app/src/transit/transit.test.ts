@@ -186,6 +186,23 @@ async function main() {
   console.log(`  sunday 14:00`, JSON.stringify(countByMode(tsSun, 14 * 3600)));
   check(TransitSystem.profileForDate(new Date(2026, 9, 4)) === 'sunday', 'profileForDate(Sun)');
 
+  // --- public shape API matches evaluate()
+  {
+    const v = ts.evaluate(8 * 3600);
+    let worst = 0, n = 0;
+    const pt = [0, 0, 0];
+    for (let i = 0; i < v.count; i += 7) {
+      const sh = ts.patternShape(v.pattern[i]);
+      if (!sh) { worst = Infinity; break; }
+      sh.point(v.dist[i], pt);
+      worst = Math.max(worst, Math.hypot(pt[0] - v.x[i], pt[1] - v.y[i]));
+      n++;
+    }
+    check(n > 100 && worst < 0.05, `patternShape().point(dist) == vehicle position (${n} checked, max err ${worst.toFixed(3)} m)`);
+    check(ts.patternShape(v.pattern[0]) === ts.patternShape(v.pattern[0]), 'patternShape() is cached');
+    check(ts.tripPattern(v.trip[0]) === v.pattern[0], 'tripPattern()');
+  }
+
   // --- mode filter
   ts.setModes(['subway'] as Mode[]);
   const onlySub = countByMode(ts, 8 * 3600);

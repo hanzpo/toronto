@@ -30,14 +30,29 @@ cd pipeline && uv run python -m tpipe.transit [--download] [agency ...]
   inside the bbox. Where it is cut, a *virtual* stop (flag 1) is added at the point
   where the shape crosses the bbox, timed by distance interpolation. Vehicles pass
   through virtual stops at constant speed without dwelling (VIA to Montréal/Windsor/Sarnia/NY).
-- **Rail geometry**: the GTFS shape is densified to 10 m and snapped to compatible
-  OSM track within 40 m, staying on the current way unless another way is more than 8 m closer
-  (this stops it zig-zagging between parallel tracks). The line is then rebuilt along the
-  OSM geometry. Gaps are bridged by a shortest path on the track graph, capped at
-  1.6 × the GTFS length + 150 m; where no path fits, the GTFS points are kept. OSM
-  `tunnel`/`bridge`/`layer<0`/`location=underground` carry into
-  `grade.profile` (cover: subway 14 m, LRT 10 m, streetcar 8 m; bridge clearance 6 m).
-  Result simplified (3-D RDP, 0.3 m). 96–100 % of rail shape length lies on OSM track.
+- **Rail geometry** (`transit_rail.py`, HMM map matching): the GTFS shape is densified
+  (10 m; 20 m for main-line rail) and matched with Viterbi onto **one continuous path
+  through the OSM track graph**. Candidates per point: compatible track within 50 m (all
+  parallel tracks within +15 m of the nearest compete; steep-angle tracks are candidates
+  too). Emission = distance (relative + absolute) + angle + siding penalty + right-hand
+  running (tracks left of the rightmost parallel track cost more; tram ways drawn against
+  the travel direction cost more — Toronto's tram tracks are mapped one way per
+  direction, drawn in the direction of travel). Transitions only along the track graph:
+  no reversing and no turn sharper than ~78° at a node (no leg-to-leg at a switch), cost
+  = |track length − shape length|. A parallel track is therefore only reachable through
+  a real crossover — no sideways jumps. Where OSM topology is disconnected (duplicated
+  nodes, zig-zag ways, e.g. a few spots at Union) the gap is bridged by a gentle
+  Hermite S-curve over ±50 m; long gaps by a bounded shortest path, else GTFS points.
+  OSM `tunnel`/`bridge`/`layer<0`/`location=underground` carry into `grade.profile`
+  (cover: subway 14 m, LRT 10 m, streetcar 8 m; bridge clearance 6 m). Result
+  simplified (3-D RDP, 0.3 m).
+  Check with `uv run python -m tpipe.transit_validate [agency…] [-v] [--strict]`: samples
+  every shape every 2 m against the OSM track and reports per route the off-track share,
+  *jumps* (steep off-track runs = sideways hops), *blends* (S-curves over topology gaps)
+  and, for streetcars, the share run against the tram way direction. Current data: all
+  streetcar/LRT/subway lines 0 jumps and ≈0 % wrong-direction (before: 30–70 %), GO
+  0–7 flagged runs per line (all at OSM topology gaps), VIA off-track only outside the
+  OSM extract.
 - **Bus geometry**: GTFS shape simplified (1.5 m), densified to 60 m and draped on
   terrain (3-D RDP, 1 m).
 - **Stop distances**: monotone projection of stops onto the pattern shape (Viterbi
@@ -132,8 +147,13 @@ for (let i = 0; i < v.count; i++) { v.x[i]; v.y[i]; v.z[i]; v.heading[i]; v.mode
   Saturday the weekday file's late trips are shown).
 - Motion: dwell between arrival and departure. Between stops, a trapezoidal velocity
   profile (per-mode acceleration, see `MODE_ACCEL`) exactly fills the scheduled
-  time; if the schedule is too tight, or an end is a virtual point, the segment runs
-  at constant speed. Heading and pitch come from points ±6 m along the shape.
+  time; if the schedule is too tight the acceleration is raised (≤ 2.5×) so vehicles
+  still ease in and out of stops; beyond that, or if an end is a virtual point, the
+  segment runs at constant speed. Heading and pitch come from points ±6 m along the shape.
+- Shape sampling (public): `ts.patternShape(pattern)` → `PatternShape` (cached; `xyz`,
+  `dist`, `length`, `point(s, out)` — extrapolates straight past the ends —,
+  `direction(s)`, `pose(s, half)`, `toFloat64()`), plus `ts.patternMode(pattern)` and
+  `ts.tripPattern(trip)`. `vehicles.dist` is the distance of the **consist centre**.
 - Only in-service trips are vehicles. Layovers between trips at terminals are
   not shown yet (blocks are not modelled).
 
@@ -142,3 +162,27 @@ See `TransitSystem.ts` for the query API: `routes`, `routeIndex(id)`, `setModes(
 `arrivalsAt()`, `tripInfo()`, `vehicleAt()`, `feedsInfo()`.
 
 Test: `node app/src/transit/transit.test.ts` (needs the generated data).
+
+## Rendering (`app/src/layers/TransitLayer.ts`, `app/src/layers/transit/`)
+
+- Within 2.6 km of the camera every car / module is drawn individually
+  (`transit/consist.ts`): consists come from `models/consists.ts` (`consistFor`), car i
+  is placed by distance from the consist front, oriented by the chord between its two
+  pivots (bogies, or the module ends for suspended / single-truck articulated modules),
+  so trains snake through curves and streetcar / artic-bus sections bend at the joints.
+  One `InstancedMesh` per car geometry and detail level (`transit/pools.ts`; hi < 450 m,
+  low beyond). Farther away: one min-pixel-size marker per vehicle (`MarkerOverlay`).
+- Heights: pivot points within 2.5 m of the rendered terrain (`engine.heightAt`) sit on
+  it (blended out to 3.5 m); bridges / tunnels keep the shape z. Pitch from the pivots.
+- Buses are offset 1.8 m right of the (centreline) GTFS shape (`LANE_OFFSET`).
+- Hold (`transit/hold.ts`): surface vehicles (bus, streetcar, LRT) within 1.4 km of the
+  focus look ahead (stopping distance + 25 m) for traffic-sim cars in their corridor
+  (`TrafficLayer.queryAhead` if present, else its car snapshot), red signals
+  (`signalAhead`, if present) and the transit vehicle ahead in the same lane. If blocked
+  the rendered distance is capped behind the obstacle with IDM-like braking; the delay
+  is recovered at ≤ +20 % of the scheduled speed; never ahead of the schedule, never a
+  jump. Off at high clock rates (> ~0.75 sim-s per frame) and far from the focus.
+- `transit.groundVehicles(out)` → surface transit vehicles near the focus
+  `{ e, n, heading, length, width, speed, trip }` (front-centre, rad CCW from +E) for
+  the traffic sim; `displayDist(trip, schedDist)` (held position), `vehicleLength(trip)`.
+- Player trips: `overrides` entries with `pattern` + `dist` are drawn car by car too.

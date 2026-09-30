@@ -1,14 +1,7 @@
 // Pattern geometry for one trip: the shape polyline (absolute world E/N/z),
 // cumulative distance, stop distances and a pre-computed curve speed limit.
-// Reads the TransitSystem's decoded feeds (they are private there; this is the
-// one place that reaches in, through a narrow structural type).
-import type { TransitFeed, TransitSystem, TripInfo } from '../transit';
-
-interface FeedRtLike { f: TransitFeed; tripBase: number; patBase: number; stopBase: number }
-
-function feedsOf(sys: TransitSystem): FeedRtLike[] {
-  return (sys as unknown as { feeds: FeedRtLike[] }).feeds ?? [];
-}
+// Geometry comes from the public TransitSystem.patternShape() API.
+import type { TransitSystem, TripInfo } from '../transit';
 
 export interface PathStop {
   stop: number;
@@ -170,19 +163,12 @@ let cacheTrips = -1;
 /** Path of a trip's pattern with the trip's stop times. */
 export function pathForTrip(sys: TransitSystem, info: TripInfo): PatternPath | null {
   if (cacheSys !== sys || cacheTrips !== sys.tripCount) { cache.clear(); cacheSys = sys; cacheTrips = sys.tripCount; }
-  const feeds = feedsOf(sys);
-  let fr: FeedRtLike | null = null;
-  for (let i = feeds.length - 1; i >= 0; i--) if (info.pattern >= feeds[i].patBase) { fr = feeds[i]; break; }
-  if (!fr) return null;
+  const shape = sys.patternShape(info.pattern);
+  if (!shape) return null;
   const stops: PathStop[] = info.stops.map((s) => ({ stop: s.stop, name: s.name, dist: s.dist, arr: s.arr, dep: s.dep, virtual: s.virtual }));
   let base = cache.get(info.pattern);
   if (!base) {
-    const f = fr.f;
-    const p = info.pattern - fr.patBase;
-    const g = f.patShape[p];
-    const a = f.shapeOff[g], b = f.shapeOff[g + 1];
-    const xyz = Float64Array.from(f.shapeXYZ.subarray(3 * a, 3 * b));
-    base = new PatternPath(info.pattern, xyz, []);
+    base = new PatternPath(info.pattern, shape.toFloat64(), []);
     cache.set(info.pattern, base);
   }
   // share geometry, own the stops (times differ per trip)

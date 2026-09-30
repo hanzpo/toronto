@@ -423,6 +423,8 @@ export class InteractLayer implements Layer {
     const vs = this.system.vehicleAt(this.trip, t);
     this.vsTmp = vs;
     if (!vs) return false;
+    // held behind traffic? follow what is drawn, not the timetable ghost
+    vs.dist = this.transit.displayDist(this.trip, vs.dist);
     if (this.path) this.path.pose(vs.dist, 6, this.pose);
     else Object.assign(this.pose, { e: vs.x, n: vs.y, z: vs.z, heading: vs.heading, pitch: vs.pitch });
     return true;
@@ -450,7 +452,7 @@ export class InteractLayer implements Layer {
       }
       const p = op.path.pose(op.s, 6, this.pose);
       if (this.view !== 'chase') this.transit.overrides.set(op.info.trip, null);
-      else this.transit.overrides.set(op.info.trip, { x: p.e, y: p.n, z: p.z, heading: p.heading, mode: op.mode, route: op.route });
+      else this.transit.overrides.set(op.info.trip, { x: p.e, y: p.n, z: p.z, heading: p.heading, mode: op.mode, route: op.route, pattern: op.path.pattern, dist: op.s });
     }
     if (this.mode === 'walk' && this.walker) {
       const k = this.keys;
@@ -512,7 +514,8 @@ export class InteractLayer implements Layer {
     const pose = this.pose;
     const mode = this.tripInfo!.mode;
     const dyn = DYN[mode];
-    const L2 = dyn.length / 2;
+    // the consist actually drawn (car by car) sets where the cab is
+    const L2 = (this.trip !== null ? this.transit.vehicleLength(this.trip) : 0) / 2 || dyn.length / 2;
     const s = this.currentDist();
     const reverse = this.op?.reverse ?? false;
     const dir = reverse ? -1 : 1;

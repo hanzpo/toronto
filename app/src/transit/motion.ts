@@ -6,8 +6,9 @@ export const MODE_ACCEL = new Float32Array([1.0, 1.0, 1.1, 0.6, 0.8, 0.5, 1.2]);
 /**
  * Position along a segment of length L (m) traversed in T seconds, starting and
  * ending at rest, at time tau ∈ [0, T]. Uses constant acceleration `a` up to a
- * cruise speed chosen so the segment takes exactly T; if even a triangular
- * profile at `a` cannot cover L in T the segment is run at constant speed.
+ * cruise speed chosen so the segment takes exactly T; if the schedule is too
+ * tight for `a` the acceleration is raised (up to 2.5·a) so the vehicle still
+ * eases in and out of the stop, beyond that it runs at constant speed.
  * With `linear` the speed is constant (used for pass-through points).
  * Writes [distance, speed] into `out`.
  */
@@ -24,19 +25,22 @@ export function segmentMotion(L: number, T: number, tau: number, a: number, line
     out[1] = L / T;
     return;
   }
-  let v: number;
-  let ta: number;
-  const disc = a * a * T * T - 4 * a * L;
-  if (disc >= 0) {
-    v = (a * T - Math.sqrt(disc)) / 2;
-    ta = v / a;
-  } else {
-    // schedule too tight to start and stop at `a`: run through at constant speed
-    // (a triangular profile would peak at twice the average speed)
-    out[0] = (L * tau) / T;
-    out[1] = L / T;
-    return;
+  // Too tight to start and stop at `a`: use the (higher) acceleration that just
+  // fits a trapezoid with a short cruise, so vehicles still ease in and out of
+  // stops instead of stopping dead from cruise speed. Beyond 2.5·a it is not a
+  // plausible stop any more — run through at constant speed.
+  const need = (4.5 * L) / (T * T);
+  if (need > a) {
+    if (need > 2.5 * a) {
+      out[0] = (L * tau) / T;
+      out[1] = L / T;
+      return;
+    }
+    a = need;
   }
+  const disc = a * a * T * T - 4 * a * L;
+  const v = (a * T - Math.sqrt(Math.max(0, disc))) / 2;
+  const ta = v / a;
   if (tau < ta) {
     out[0] = 0.5 * a * tau * tau;
     out[1] = a * tau;

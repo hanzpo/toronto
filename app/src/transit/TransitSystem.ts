@@ -7,6 +7,7 @@ import {
   type Mode, type Profile, type RouteMeta, type TransitFeed, type TransitIndex,
 } from './format.ts';
 import { MODE_ACCEL, segmentMotion } from './motion.ts';
+import { PatternShape } from './shape.ts';
 
 export const DAY = 86400;
 
@@ -149,6 +150,7 @@ export class TransitSystem {
   /** Output of evaluate(). The object is reused; its arrays are replaced if capacity grows, so read them each frame. */
   readonly vehicles: VehicleBuffers;
   private tmp = new Float64Array(2);
+  private shapeCache = new Map<number, PatternShape>();
   private sx = 0; private sy = 0; private sz = 0;
 
   constructor(loader: TransitLoader = fetchLoader()) {
@@ -216,6 +218,7 @@ export class TransitSystem {
 
   clear(): void {
     this.feeds = [];
+    this.shapeCache.clear();
     this.tripCount = this.patternCount = this.stopCount = 0;
     this.vehicles.count = 0;
   }
@@ -368,6 +371,38 @@ export class TransitSystem {
     this.sy = P[i + 1] + (P[i + 4] - P[i + 1]) * t;
     this.sz = P[i + 2] + (P[i + 5] - P[i + 2]) * t;
     return a;
+  }
+
+  // ------------------------------------------------------------ shape access
+  /**
+   * The shape polyline of a (global) pattern, for sampling positions by
+   * distance (`vehicles.dist`). Cached; the arrays are views into the feed.
+   */
+  patternShape(pattern: number): PatternShape | null {
+    let ps = this.shapeCache.get(pattern);
+    if (ps) return ps;
+    const fr = this.findFeed(pattern, 'patBase');
+    if (!fr) return null;
+    const f = fr.f;
+    const p = pattern - fr.patBase;
+    if (p < 0 || p >= f.patStopOff.length - 1) return null;
+    const g = f.patShape[p];
+    const a = f.shapeOff[g], b = f.shapeOff[g + 1];
+    ps = new PatternShape(pattern, f.shapeXYZ.subarray(3 * a, 3 * b), f.shapeDist.subarray(a, b));
+    this.shapeCache.set(pattern, ps);
+    return ps;
+  }
+
+  /** Mode of a (global) pattern (vehicles use the pattern mode, see docs/TRANSIT.md). */
+  patternMode(pattern: number): Mode | null {
+    const fr = this.findFeed(pattern, 'patBase');
+    return fr ? MODES[fr.f.patMode[pattern - fr.patBase]] : null;
+  }
+
+  /** Global pattern index of a trip (-1 if unknown). */
+  tripPattern(trip: number): number {
+    const fr = this.feedOfTrip(trip);
+    return fr ? fr.patBase + fr.f.tripPattern[trip - fr.tripBase] : -1;
   }
 
   // ------------------------------------------------------------------ queries
