@@ -80,6 +80,9 @@ BUILDING_KIND = {
     "stadium": 12, "sports_hall": 12, "sports_centre": 12, "grandstand": 12,
     "hotel": 13, "parking": 14, "roof": 15, "canopy": 15,
     "farm": 1, "farm_auxiliary": 11, "barn": 5, "greenhouse": 5, "cabin": 1,
+    # urban detail (docs/SPEC.md b_kind 16): towers going up — the client draws a concrete frame
+    # part-way to the tagged height with a tower crane instead of the finished extrusion
+    "construction": 16,
 }
 ROOF = {"flat": 0, "gabled": 1, "hipped": 2, "dome": 3, "pyramidal": 4, "skillion": 5,
         "half-hipped": 2, "gambrel": 1, "mansard": 2, "onion": 3, "round": 3}

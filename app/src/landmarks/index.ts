@@ -36,6 +36,7 @@ import {
   buildHamiltonCityHall, buildKitchenerCityHall,
 } from './culture'
 import { buildEatonCentre, buildYongeDundasSquare, buildMasseyHall, buildElginWinterGarden } from './eaton'
+import { buildOntarioPlace, buildBmoField, buildPrincesGates, buildColiseum } from './waterfront'
 
 export { setNight, setCnTowerColor, MATS } from './materials'
 export type { LandmarkEntry, LandmarkDef, BuildCtx } from './types'
@@ -91,6 +92,11 @@ export const LANDMARKS: Record<string, LandmarkDef> = {
   roy_thomson_hall: { name: 'Roy Thomson Hall', height: 28, build: buildRoyThomsonHall, lodDistance: 1400 },
   hamilton_city_hall: { name: 'Hamilton City Hall', height: 43, build: buildHamiltonCityHall },
   kitchener_city_hall: { name: 'Kitchener City Hall', height: 48, build: buildKitchenerCityHall },
+  // pass 3: waterfront & the Ex
+  ontario_place: { name: 'Ontario Place', height: 32, build: buildOntarioPlace, lodDistance: 1500 },
+  bmo_field: { name: 'BMO Field', height: 45, build: buildBmoField, lodDistance: 1500 },
+  princes_gates: { name: "Princes' Gates", height: 26, build: buildPrincesGates, lodDistance: 1000 },
+  coliseum: { name: 'Coca-Cola Coliseum', height: 30, build: buildColiseum, lodDistance: 1400 },
 }
 
 export function makeCtx(entry: LandmarkEntry | null, detail: Detail): BuildCtx {

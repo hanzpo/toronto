@@ -32,12 +32,12 @@ export const SURF_ROAD = 0, SURF_SIDEWALK = 1, SURF_CURB = 2, SURF_BARRIER = 3, 
 export const FEAT_NONE = 0, FEAT_JUNCTION = 1, FEAT_SIGNAL = 2, FEAT_ZEBRA = 3, FEAT_LINES = 4, FEAT_STOP = 5,
   FEAT_PXO = 6, FEAT_RAIL = 7;
 // rm.w extra bits
-export const FX_LINK = 1, FX_RUMBLE = 2, FX_SHARROW = 4, FX_STAIRS = 8, FX_CYCLE = 16;
+export const FX_LINK = 1, FX_RUMBLE = 2, FX_SHARROW = 4, FX_STAIRS = 8, FX_CYCLE = 16, FX_DIVIDED = 32;
 // per-vertex flags (tpipe.roadnet V_*)
 const V_BRIDGE = 1, V_TUNNEL = 2, V_GRADED = 4, V_EMBED = 8;
 const ST_GIRDER = 1, ST_PORTAL = 2, ST_HAMMER = 3, ST_TRUSS = 4, ST_ARCH = 5, ST_FOOT = 6, ST_RAIL = 7, ST_GRASS = 10;
 // sidewalk bits (tpipe.roadnet SW_*)
-const SW_L = 1, SW_R = 2, BLVD_L = 4, BLVD_R = 8, PAVERS = 16;
+const SW_L = 1, SW_R = 2, BLVD_L = 4, BLVD_R = 8, PAVERS = 16, MEDIAN_L = 32;
 // road flags
 const F_ONEWAY = 1, F_BRIDGE = 2, F_LINK = 8, F_LOT = 32, F_DUP = 64;
 const FAR = 1e4;
@@ -450,7 +450,7 @@ export function buildRoads(a: Record<string, TypedArray>, terr: Terrain, level: 
       }
       const cuts: number[] = [];
       for (const ft of feats) { cuts.push(ft.s); if (ft.cutBefore) cuts.push(ft.s - ft.cutBefore); if (ft.cutAfter) cuts.push(ft.s + ft.cutAfter); }
-      const run = refine(run0, terr.cell, cuts, level === 0 ? 12 : Math.max(25, terr.cell));
+      const run = refine(run0, terr.cell, cuts, level === 0 ? (c >= 8 ? 30 : 20) : Math.max(25, terr.cell));
       const nv = run.x.length;
       const { ox, oy, tx, ty } = offsets(run);
       const zc: number[] = new Array(nv), zl: number[] = new Array(nv), zr: number[] = new Array(nv), structZ: number[] = new Array(nv);
@@ -521,7 +521,8 @@ export function buildRoads(a: Record<string, TypedArray>, terr: Terrain, level: 
     const spanOf = (sv: number) => { let k = 0; while (k < fs.length && fs[k] <= sv + 1e-4) k++; return k; };
     b.n = [0, 1, 0];
     // ---- road surface: columns L(pavement) [C] R(pavement)
-    const wideRoad = level === 0;
+    // centre column (the surface follows the terrain across) only for wide, draped carriageways
+    const wideRoad = level === 0 && c <= 7 && run.pl[0] + run.pr[0] >= 10 && !(run.vf[0] & (V_BRIDGE | V_GRADED));
     let prevIdx: number[] | null = null;
     let prevSpan = -1;
     for (let k = 0; k < nv; k++) {
@@ -530,7 +531,7 @@ export function buildRoads(a: Record<string, TypedArray>, terr: Terrain, level: 
       if (tun) { prevIdx = null; continue; }
       const sv = run.s[k];
       const br = (vf & V_BRIDGE) !== 0;
-      b.eL = run.el[k]; b.eR = run.er[k]; b.mk = run.mk[k]; b.lw = run.lw[k]; b.fx = fx;
+      b.eL = run.el[k]; b.eR = run.er[k]; b.mk = run.mk[k]; b.lw = run.lw[k]; b.fx = fx | (run.sw[k] & MEDIAN_L ? FX_DIVIDED : 0);
       b.code = code0 + 32 * surf;
       b.c = [tint[0], tint[1], tint[2], Math.round((br ? Math.max(prio, 6) : prio) * 25)];
       const onFeat = fs.findIndex((q) => Math.abs(q - sv) < 1e-3);
@@ -623,7 +624,6 @@ export function buildRoads(a: Record<string, TypedArray>, terr: Terrain, level: 
   if (level === 0) {
     junctionSurfaces(b, a, terr);
     medians(b, a, terr);
-    crossingProps(b, a, terr, preps);
   }
   return { mesh: b.finish(), count, streets, junctions };
 }
@@ -953,13 +953,23 @@ function embankment(b: RoadBuilder, P: Prep, swAll: number, ws: number, terr: Te
 // ---------------------------------------------------------------------------- junction surfaces etc.
 
 /** subdivide a triangle until edges are <= maxE (drapes flat triangles on terrain) */
-function subTris(ax: number, ay: number, bx: number, by: number, cx: number, cy: number, maxE: number, out: number[], depth = 0) {
+function subTris(ax: number, ay: number, bx: number, by: number, cx: number, cy: number, maxE: number, out: number[], depth = 0, terr?: Terrain) {
   const ab = Math.hypot(bx - ax, by - ay), bc = Math.hypot(cx - bx, cy - by), ca = Math.hypot(ax - cx, ay - cy);
   const m = Math.max(ab, bc, ca);
-  if (m <= maxE || depth > 4) { out.push(ax, ay, bx, by, cx, cy); return; }
-  if (m === ab) { const mx = (ax + bx) / 2, my = (ay + by) / 2; subTris(ax, ay, mx, my, cx, cy, maxE, out, depth + 1); subTris(mx, my, bx, by, cx, cy, maxE, out, depth + 1); }
-  else if (m === bc) { const mx = (bx + cx) / 2, my = (by + cy) / 2; subTris(ax, ay, bx, by, mx, my, maxE, out, depth + 1); subTris(ax, ay, mx, my, cx, cy, maxE, out, depth + 1); }
-  else { const mx = (cx + ax) / 2, my = (cy + ay) / 2; subTris(ax, ay, bx, by, mx, my, maxE, out, depth + 1); subTris(mx, my, bx, by, cx, cy, maxE, out, depth + 1); }
+  // split only where the terrain under the triangle is not planar (flat junctions stay 1 triangle)
+  let flat = false;
+  if (terr && m > maxE) {
+    const ha = terr.at(ax, ay), hb = terr.at(bx, by), hcc = terr.at(cx, cy);
+    const dev = (x: number, y: number, h: number) => Math.abs(terr.at(x, y) - h);
+    flat = dev((ax + bx + cx) / 3, (ay + by + cy) / 3, (ha + hb + hcc) / 3) < 0.05
+      && dev((ax + bx) / 2, (ay + by) / 2, (ha + hb) / 2) < 0.05
+      && dev((bx + cx) / 2, (by + cy) / 2, (hb + hcc) / 2) < 0.05
+      && dev((cx + ax) / 2, (cy + ay) / 2, (hcc + ha) / 2) < 0.05;
+  }
+  if (m <= maxE || depth > 4 || flat) { out.push(ax, ay, bx, by, cx, cy); return; }
+  if (m === ab) { const mx = (ax + bx) / 2, my = (ay + by) / 2; subTris(ax, ay, mx, my, cx, cy, maxE, out, depth + 1, terr); subTris(mx, my, bx, by, cx, cy, maxE, out, depth + 1, terr); }
+  else if (m === bc) { const mx = (bx + cx) / 2, my = (by + cy) / 2; subTris(ax, ay, bx, by, mx, my, maxE, out, depth + 1, terr); subTris(ax, ay, mx, my, cx, cy, maxE, out, depth + 1, terr); }
+  else { const mx = (cx + ax) / 2, my = (cy + ay) / 2; subTris(ax, ay, bx, by, mx, my, maxE, out, depth + 1, terr); subTris(mx, my, bx, by, cx, cy, maxE, out, depth + 1, terr); }
 }
 
 function polyMesh(b: RoadBuilder, xy: Float32Array, tri: Uint32Array, terr: Terrain, yOff: number) {
@@ -968,7 +978,7 @@ function polyMesh(b: RoadBuilder, xy: Float32Array, tri: Uint32Array, terr: Terr
   for (let t = 0; t < tri.length; t += 3) {
     const i0 = tri[t], i1 = tri[t + 1], i2 = tri[t + 2];
     tmp.length = 0;
-    subTris(xy[i0 * 2], xy[i0 * 2 + 1], xy[i1 * 2], xy[i1 * 2 + 1], xy[i2 * 2], xy[i2 * 2 + 1], 8, tmp);
+    subTris(xy[i0 * 2], xy[i0 * 2 + 1], xy[i1 * 2], xy[i1 * 2 + 1], xy[i2 * 2], xy[i2 * 2 + 1], 10, tmp, 0, terr);
     for (let k = 0; k < tmp.length; k += 6) {
       const V = (x: number, y: number) => b.v(x, terr.at(x, y) + yOff, -y, 0, 0);
       // earcut output is CCW in (E, N); three.js z = -N flips it -> reverse
@@ -1001,8 +1011,12 @@ function junctionSurfaces(b: RoadBuilder, a: Record<string, TypedArray>, terr: T
         if (k > jco[i]) s += Math.hypot(x - jcxy[k * 2 - 2], y - jcxy[k * 2 - 1]);
         const g = terr.at(x, y);
         b.n = [0, 1, 0];
+        // lines run with the road surface on their left (tpipe.roadnet orients them): face left
+        const k2 = Math.min(k + 1, jco[i + 1] - 1), k1 = Math.max(k - 1, jco[i]);
+        const dx = jcxy[k2 * 2] - jcxy[k1 * 2], dy = jcxy[k2 * 2 + 1] - jcxy[k1 * 2 + 1], dl = Math.hypot(dx, dy) || 1;
+        b.n = [-dy / dl, 0, -dx / dl];
         const cur = [b.v(x, g, -y, 0, s), b.v(x, g + 0.05 + CURB_H, -y, 0, s)];
-        if (prev) { b.q(prev[0], cur[0], cur[1], prev[1]); b.q(prev[0], prev[1], cur[1], cur[0]); }
+        if (prev) b.q(prev[0], prev[1], cur[1], cur[0]);
         prev = cur;
       }
     }
@@ -1039,10 +1053,15 @@ function medians(b: RoadBuilder, a: Record<string, TypedArray>, terr: Terrain) {
     const topSurf = kind === 0 ? SURF_SIDEWALK : SURF_GRASS;
     const H = kind === 2 ? 0.12 : CURB_H + 0.02;
     const L: number[] = [], R: number[] = [], cL: number[] = [], cR: number[] = [];
+    const cum: number[] = [0];
+    for (let k = 1; k < r.x.length; k++) cum.push(cum[k - 1] + Math.hypot(r.x[k] - r.x[k - 1], r.y[k] - r.y[k - 1]));
+    const tot = cum[cum.length - 1];
     let s = 0;
     for (let k = 0; k < r.x.length; k++) {
-      const w = mw[mo[i] + k] / 2 - 0.02;
-      if (k) s += Math.hypot(r.x[k] - r.x[k - 1], r.y[k] - r.y[k - 1]);
+      // rounded / pointed noses at the ends (crosswalk refuges): taper over the last ~4 m
+      const nose = Math.min(1, Math.max(0.12, Math.min(cum[k], tot - cum[k]) / 4));
+      const w = (mw[mo[i] + k] / 2 - 0.02) * Math.sqrt(nose);
+      s = cum[k];
       const l = Math.hypot(ox[k], oy[k]) || 1;
       const lx = r.x[k] + ox[k] / l * w, ly = r.y[k] + oy[k] / l * w, rx = r.x[k] - ox[k] / l * w, ry = r.y[k] - oy[k] / l * w;
       const gl = terr.at(lx, ly) + 0.05, gr = terr.at(rx, ry) + 0.05;
@@ -1059,59 +1078,6 @@ function medians(b: RoadBuilder, a: Record<string, TypedArray>, terr: Terrain) {
       b.q(R[k], R[k + 1], L[k + 1], L[k]);
       b.q(cL[2 * k], cL[2 * k + 2], cL[2 * k + 3], cL[2 * k + 1]);
       b.q(cR[2 * k + 2], cR[2 * k], cR[2 * k + 1], cR[2 * k + 3]);
-    }
-  }
-}
-
-/** railway level crossings: crossbuck posts with flashers, and gate arms where gated */
-function crossingProps(b: RoadBuilder, a: Record<string, TypedArray>, terr: Terrain, preps: Prep[]) {
-  const pk = a.p_kind as Uint8Array | undefined, pxy = a.p_xy as Float32Array | undefined, pv = a.p_var as Uint8Array | undefined;
-  if (!pk || !pxy) return;
-  for (let i = 0; i < pk.length; i++) {
-    if (pk[i] !== 5) continue;
-    const x = pxy[i * 2], y = pxy[i * 2 + 1];
-    // the road through the crossing
-    let best: Prep | null = null, bk = 0, bd = 6;
-    for (const P of preps) {
-      if (P.c > 6) continue;
-      const r = P.run;
-      for (let k = 0; k < r.x.length; k++) {
-        const d = Math.hypot(r.x[k] - x, r.y[k] - y);
-        if (d < bd) { bd = d; best = P; bk = k; }
-      }
-    }
-    if (!best) continue;
-    const r = best.run;
-    const tx = best.tx[bk], ty = best.ty[bk];
-    const nx = -ty, ny = tx;
-    const hwL = r.pl[bk], hwR = r.pr[bk];
-    const gated = pv ? (pv[i] & 1) !== 0 : false;
-    // one assembly per direction: on the right of the approach, ~5 m before the track
-    for (const dir of [1, -1]) {
-      const ax = x - dir * tx * 5.5, ay = y - dir * ty * 5.5;
-      const side = dir > 0 ? -1 : 1; // right of travel
-      const off = (side < 0 ? hwR : hwL) + 1.3;
-      const px = ax + side * nx * off, py = ay + side * ny * off;
-      const g = terr.at(px, py);
-      b.box(px, py, g - 0.3, g + 4.2, 0, 0.07, 0.07, SURF_STRUCT, [215, 215, 212], 7);
-      // crossbuck blades (1.22 m x 0.2 m at ±45°, white with red border: Transport Canada GCS)
-      const ang = Math.atan2(dir * ty, dir * tx) + Math.PI / 2;
-      for (const tilt of [1, -1]) {
-        const ca = Math.cos(ang), sa = Math.sin(ang);
-        const h = g + 3.7;
-        b.plain(SURF_STRUCT, [246, 246, 244], 7.2);
-        b.n = [Math.cos(ang - Math.PI / 2), 0, -Math.sin(ang - Math.PI / 2)];
-        const Pt = (u: number, v: number) => b.v(px + ca * u * 0.707, h + tilt * u * 0.707 + v, -(py + sa * u * 0.707), u, v);
-        const q0 = Pt(-0.61, -0.1), q1 = Pt(0.61, -0.1), q2 = Pt(0.61, 0.1), q3 = Pt(-0.61, 0.1);
-        b.q(q0, q1, q2, q3); b.q(q0, q3, q2, q1);
-      }
-      // flasher heads (dark boxes with red lenses read from the shader tint)
-      b.box(px + Math.cos(ang) * 0.38, py + Math.sin(ang) * 0.38, g + 2.5, g + 2.8, ang, 0.15, 0.1, SURF_STRUCT, [40, 30, 30], 7.2);
-      b.box(px - Math.cos(ang) * 0.38, py - Math.sin(ang) * 0.38, g + 2.5, g + 2.8, ang, 0.15, 0.1, SURF_STRUCT, [40, 30, 30], 7.2);
-      if (gated) {
-        // gate arm raised (vertical), red/white
-        b.box(px + dir * tx * 0.4, py + dir * ty * 0.4, g + 1.0, g + 1.0 + (side < 0 ? hwR : hwL) + 1.0, 0, 0.06, 0.06, SURF_STRUCT, [200, 60, 50], 7.2);
-      }
     }
   }
 }
@@ -1193,7 +1159,7 @@ function ballast(b: RoadBuilder, P: Prep, k0: number, k1: number, hw: number, c:
     const br = (vf & V_BRIDGE) !== 0;
     const lift = kind === 2 ? 0.07 : br ? 0.35 : 0.03;
     const x = run.x[k], y = run.y[k];
-    if (kind === 2) b.plain(SURF_PANEL, [255, 255, 255], 5.9, c);
+    if (kind === 2) b.plain(SURF_PANEL, [255, 255, 255], 6.2, c);
     else if (kind === 1) b.plain(SURF_GRASS, [235, 255, 225], 7.1, c);
     else b.plain(SURF_BALLAST, bc, 0.5, c);
     b.eL = b.eR = hw;
@@ -1230,7 +1196,8 @@ function railLine(b: RoadBuilder, P: Prep, k0: number, k1: number, u: number, hw
     const vf = run.vf[k];
     const embedded = tram || (vf & V_EMBED) !== 0;
     const lift = embedded ? 0.09 : (vf & V_BRIDGE ? 0.35 : 0.03) + BALLAST_TOP + 0.16;
-    b.code = code; b.eL = b.eR = hw; b.n = [0, 1, 0]; b.c = [rgb[0], rgb[1], rgb[2], Math.round(prio * 25)]; b.j = [FAR, FAR, 0, 0];
+    // embedded rail must win over junction surfaces (5.8) and track panels
+    b.code = code; b.eL = b.eR = hw; b.n = [0, 1, 0]; b.c = [rgb[0], rgb[1], rgb[2], Math.round((embedded ? Math.max(prio, 8) : prio) * 25)]; b.j = [FAR, FAR, 0, 0];
     b.mk = embedded ? 1 : 0; b.fx = 0;
     const l = Math.hypot(ox[k], oy[k]) || 1;
     const nx = ox[k] / l, ny = oy[k] / l;

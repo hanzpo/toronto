@@ -225,7 +225,8 @@ fn street_level_king_spadina() {
         return;
     }
     let (fx, fy) = (-1300.0, -900.0);
-    let mut w = World::new(5, 16000, 12000);
+    let seed: u64 = std::env::var("SEED").ok().and_then(|x| x.parse().ok()).unwrap_or(5);
+    let mut w = World::new(seed, 16000, 12000);
     load_around(&mut w, &dir, fx, fy, 2600.0);
     w.focus = (fx, fy);
     w.radius = 1900.0;
@@ -241,6 +242,10 @@ fn street_level_king_spadina() {
     let mut samples = 0;
     let mut ex = Vec::new();
     let t_all = std::time::Instant::now();
+    let mut causes = [0u32; 10];
+    let mut cex: Vec<Vec<String>> = vec![Vec::new(); 10];
+    let mut young = u32::MAX;
+    let mut uniq: Vec<std::collections::HashSet<String>> = vec![Default::default(); 10];
     for k in 0..1500 {
         if k % 3 == 0 {
             w.set_obstacles(&obst);
@@ -255,6 +260,24 @@ fn street_level_king_spadina() {
             worst = worst.max(ms);
         }
         if k >= 300 && k % 25 == 0 {
+            let (cz, ce) = w.overlap_causes(young, 400);
+            for e in ce.iter() {
+                let kk: usize = e[1..2].parse().unwrap();
+                let id = e.split(' ').nth(2).unwrap().to_string();
+                uniq[kk].insert(id);
+            }
+            for q in 0..10 {
+                causes[q] += cz[q];
+            }
+            if cz.iter().sum::<u32>() > 0 {
+                for e in ce {
+                    let kk: usize = e[1..2].parse().unwrap();
+                    if cex[kk].len() < 5 && !cex[kk].iter().any(|x: &String| x.split(' ').nth(2) == e.split(' ').nth(2)) {
+                        cex[kk].push(e);
+                    }
+                }
+            }
+            young = w.next_car_id();
             let (n, nb, e) = overlaps(&w);
             max_ov = max_ov.max(n);
             sum_ov += n;
@@ -277,6 +300,20 @@ fn street_level_king_spadina() {
         max_ov,
         t_all.elapsed().as_secs_f64()
     );
+    let names = ["spawn", "lane change", "short link", "junction crossing", "same lane", "adjacent lanes", "merge", "other", "junction following", "structure vs street"];
+    // bridge / tunnel cars over unconnected streets are drawn on another level: not visible
+    let visible = causes[..9].iter().sum::<u32>() as f64 / samples.max(1) as f64;
+    eprintln!("  overlaps on the same level: avg {visible:.2} per sample");
+    assert!(visible <= 15.0, "car bodies overlap: {visible:.1} per sample");
+    eprintln!("  overlap causes (sum over samples): {}", names.iter().zip(causes.iter()).map(|(a, b)| format!("{a} {b}")).collect::<Vec<_>>().join(", "));
+    eprintln!("  distinct pairs: {}", names.iter().zip(uniq.iter()).map(|(a, b)| format!("{a} {}", b.len())).collect::<Vec<_>>().join(", "));
+    if std::env::var("OV_EX").is_ok() {
+        for (q, v) in cex.iter().enumerate() {
+            for e in v {
+                eprintln!("    {} {e}", names[q]);
+            }
+        }
+    }
     eprintln!("  phases ms/step [validate sort occ accel lanechg advance spawn peds]: {:?}", w.prof.map(|x| (x / 1500.0 * 100.0).round() / 100.0));
     for e in ex.iter().take(12) {
         eprintln!("  {e}");
@@ -288,11 +325,45 @@ fn street_level_king_spadina() {
         let lb = &w.g.links[b as usize];
         eprintln!("in len {} lanes {} out len {} lanes {} sb_in {} sb_out {} to==from {}", la.len, la.lanes, lb.len, lb.lanes, w.sb_in(a), w.sb_out(b), la.to == lb.from);
         let bp = w.box_path(a, 0, b, 0);
-        eprintln!("p0 {:?} p1 {:?} p2 {:?} arc {:?}", bp.bez.p0, bp.bez.p1, bp.bez.p2, bp.arc);
+        eprintln!("p0 {:?} c1 {:?} c2 {:?} p2 {:?} arc {:?}", bp.bez.p0, bp.bez.c1, bp.bez.c2, bp.bez.p2, bp.arc);
         let n = &w.g.nodes[la.to as usize];
         eprintln!("node {:.1},{:.1} setback {} control {:?}", n.x, n.y, n.setback, n.control);
         for k in 0..=10 { let (x, y, _) = bp.at(k as f32 / 10.0); eprint!("({:.1},{:.1}) ", x, y); }
         eprintln!();
     }
     assert!(w.cars.len() > 2000);
+    // median waits: how far the body is turned off the gap it waits in
+    let m = w.median_waits();
+    let mut rows: Vec<(f32, f32, f32, f32, f32, f32, u32, u32)> = Vec::new();
+    for r in m.chunks_exact(10) {
+        // the body must point within the turn's sweep (from the road it left to the gap), ±20°
+        let turn = graph_wrap(r[3] - r[4]);
+        let rel = graph_wrap(r[2] - r[4]);
+        let (lo, hi) = (turn.min(0.0) - 0.35, turn.max(0.0) + 0.35);
+        let off = if r[4].is_nan() { 0.0 } else if rel < lo { lo - rel } else if rel > hi { rel - hi } else { 0.0 };
+        let dp = graph_wrap(r[2] - r[4]).abs().to_degrees();
+        rows.push((r[0], r[1], off.to_degrees(), dp, r[5], r[7], r[8] as u32, r[9] as u32));
+    }
+    rows.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap());
+    eprintln!("median waits: {} (body outside the turn sweep by > 10 deg: {})", rows.len(), rows.iter().filter(|r| r.2 > 10.0).count());
+    // (a few outliers are metric artefacts: hooked edge ends in the source geometry)
+    assert!(rows.iter().filter(|r| r.2 > 30.0).count() * 50 <= rows.len().max(50), "cars turned off their path while waiting in medians");
+    for r in rows.iter().take(6) {
+        eprintln!("  at ({:.0}, {:.0}) outside sweep {:.0} deg, body-road {:.0} deg, gap len {:.1} m, s {:.1}", r.0, r.1, r.2, r.3, r.4, r.5);
+        let dump = |li: u32| -> String {
+            if li as usize >= w.g.links.len() { return "-".into(); }
+            let l = &w.g.links[li as usize];
+            (0..=4).map(|k| { let p = w.g.link_pose(li, l.len * k as f32 / 4.0, 0.0); format!("({:.1},{:.1} h{:.0})", p.x, p.y, p.h.to_degrees()) }).collect::<Vec<_>>().join(" ")
+        };
+        eprintln!("     gap  {}", dump(r.6));
+        eprintln!("     prev {}", dump(r.7));
+    }
+
+}
+
+fn graph_wrap(a: f32) -> f32 {
+    let mut a = a;
+    while a > std::f32::consts::PI { a -= std::f32::consts::TAU; }
+    while a < -std::f32::consts::PI { a += std::f32::consts::TAU; }
+    a
 }

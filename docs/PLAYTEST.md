@@ -73,7 +73,7 @@ the wrong way, trains colliding → transit-agents. Pearson apron → airports.
 CIBC Square flicker → fixed in 3eda5f1.
 
 ### User screenshot 10 (Spadina over the rail corridor, ?cam=-842,-1248,124.6,343,10&t=2026-09-30T08:15:26)
-- [ ] Spadina drawn at grade across the rail yard; parapets float as slabs. → roads (sent)
+- [x] Spadina drawn at grade across the rail yard: now a bridge with walls (network model, consolidated merge)
 - [ ] Far station labels (Ossington … College, kms away) stack on the horizon
   at street level: limit by distance/altitude/occlusion. → stations/UX
 - [ ] Waiting pedestrians clump into one blob on the sidewalk: spread crowds
@@ -91,11 +91,10 @@ CIBC Square flicker → fixed in 3eda5f1.
   → landmarks (new pass)
 - [ ] Station labels float across street views and show through buildings
   (Union visible from the Harbourfront/Queen W). → stations/UX
-- [ ] Lake: huge featureless grey-blue plane with moiré banding; islands flat;
-  no shoreline treatment. → ground/water
-- [ ] Large blank beige areas (land class 0 = untextured) in rail lands,
-  Markham fields and yards; grass patches pixelated. → ground/water (vector
-  ground + textures)
+- [x] Lake: vector water with ripples (no moiré), typed shores (dockwall,
+  revetment, beach), real water levels (consolidated merge)
+- [x] Blank beige land and pixelated grass: vector ground with textured
+  classes within ~1.5 km (consolidated merge)
 - [ ] Parking lots: aisles drawn as dark ribbons over blank ground, no
   stalls/cars. → buildings/props (parking lots)
 - [ ] Brick facade texture scale far too large (bricks ~1 m) on Scarborough
@@ -111,15 +110,18 @@ CIBC Square flicker → fixed in 3eda5f1.
   A350/Air Canada cockpit masks, door handles. → aircraft (later)
 
 ### Requested: railway level crossings (user)
-- [ ] Full crossings (panels, stop bars, crossbucks, flashers, gate arms,
-  pedestrian gates, cantilevers) → roads; gates and lights driven by real
-  train positions, cars and pedestrians stop, keep-clear → transit/sim.
+- [x] Level crossings: 3,469 crossings drawn (2,439 gated) with crossbucks,
+  flashers, bells, cantilevers and gate arms; 2,111 driven by the rail sim
+  (warning 32 s, gates down 21 s before a train); cars stop at the stop bars
+  (consolidated merge)
 
 ### Station/clipping hunt (user: "make sure things don't clip into other things")
-- [ ] Union: track deck shows grass with a floating roof slab, trees and a
-  building wall clip into the complex; pulling in must be clean → stations
-- [ ] Clearance checks at all stations: platform edge 1.6–1.7 m from track,
-  columns ≥ 2.2 m, no buildings/trees over tracks → stations (+ script)
+- [x] Union: deck at rail height, no grass, 326 clipping buildings suppressed,
+  platforms 1.65 m from track, shed columns cleared (consolidated merge).
+  Platforms still plain (chunky black columns) → later polish
+- [x] Station clearances: platform_track_clearance 386 → 55 (minor gaps),
+  columns 0, building_over_track near stations 70 → 3, trains through
+  buildings 13 → 0, trees on platforms 15 → 0 (consolidated merge)
 - [x] Traffic doesn't drop at night: surplus cars and pedestrians now retire
   out of view (downtown cars 7036 at 17:30 → ~380 at 03:00). 04d38ac
 - [ ] Camera collision leaves the camera hugging building walls at stations
@@ -165,6 +167,21 @@ Queued until an agent slot frees up (overnight cap is 5):
 Sent to stations: platform_track_clearance 386, building_over_track (Allen Rd
 stations, Union shed), trains through Allen Rd station buildings, trees on
 platforms.
+
+### Consolidated merge follow-ups (tonight)
+- [ ] Bus pattern stretches with no road path: 935 (old graph) → 2,327 →
+  2,067 after the one-way fix. Roads agent tracing the remaining causes.
+- [ ] Red far-vehicle dots still show across the city in normal mode. → UI
+- [ ] Floating black boxes above Spadina near the corridor (crane parts?).
+- [ ] osm_extract keeps only the first outer ring of building multipolygons
+  (Pearson T3 missing; airports fills it as a stopgap). → buildings agent
+- [ ] Allen stations: Lawrence West buried (rail data 8 m below terrain),
+  Wilson has no platform, Yorkdale ballast off the train path.
+- [ ] landmark_road_overlap 11 left (Union, CIBC Square, AGO, Legislature …).
+- [ ] tpipe.roadnet --workers 2 hung on macOS (forked workers died); now
+  ProcessPoolExecutor fails loudly. Serial is 10–14 min.
+- [ ] Pipeline outputs could be written into app/public/data through a stray
+  symlink (736 tiles overwritten once). Agents now use TPIPE_OUT.
 
 ## Resolved
 - [x] Tree LOD popping and stippled crowns: matched high/mid/far models,

@@ -6,6 +6,10 @@ or house not in the landmark's `suppress` list whose footprint overlaps the
 landmark footprint (or one of its parts) is drawn inside / against the model:
 the walls z-fight or poke through (user report: CIBC Square).
 Also reports landmark-vs-landmark footprint overlaps.
+
+landmark_road_overlap: carriageway at grade inside the model's ground footprint. Courtyard
+`holes` are open ground; a `covered` roadway (tpipe.landmarks covered_roadway) counts only
+its ground-floor masses and posts, the rest being >= `clear` (>= 4.5) m over the road.
 """
 
 from __future__ import annotations
@@ -54,7 +58,22 @@ def run_global(cats: set, bbox=None) -> list[dict]:
         if foot is None:
             continue
         parts = [g for g in (_world(L, r) for r in (L.get("parts") or {}).values()) if g is not None]
-        shapes.append((L, shapely.union_all([foot] + parts)))
+        geom = shapely.union_all([foot] + parts)
+        # courtyards (landmarks.json `holes`, e.g. Old City Hall) are open ground
+        holes = [g for rs in (L.get("holes") or {}).values() for g in (_world(L, r) for r in rs) if g is not None]
+        if holes:
+            geom = geom.difference(shapely.union_all(holes))
+        shapes.append((L, geom))
+    ground_of = {}
+    for L, geom in shapes:
+        cov = L.get("covered")
+        if cov and cov.get("clear", 0) >= 4.5:
+            # covered roadway: only the ground-floor masses and the posts stand at road level;
+            # the rest of the model is >= `clear` m over the carriageway (like a bridge deck)
+            g = [x for x in (_world(L, m["ring"]) for m in cov.get("lower", [])) if x is not None]
+            g += [x for x in (_world(L, [[cx - 0.45, cy - 0.45], [cx + 0.45, cy - 0.45], [cx + 0.45, cy + 0.45], [cx - 0.45, cy + 0.45]])
+                              for cx, cy in cov.get("columns", [])) if x is not None]
+            ground_of[L["id"]] = shapely.union_all(g) if g else Polygon()
     for L, geom in shapes:
         x, y = L["pos"]
         if bbox and not (bbox[0] <= x < bbox[2] and bbox[1] <= y < bbox[3]):
@@ -65,7 +84,7 @@ def run_global(cats: set, bbox=None) -> list[dict]:
             blocks[bk] = (B.buildings(), B.houses(), Carriageway(B))
         (polys, A), (hp, H), cw = blocks[bk]
         if "landmark_road_overlap" in cats and cw.ok and "span" not in L:
-            out += _roads(L, geom, cw)
+            out += _roads(L, ground_of.get(L["id"], geom), cw)
         if "landmark_overlap" not in cats:
             continue
         sup = {int(o) for o in L.get("suppress", [])}

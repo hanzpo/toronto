@@ -1,7 +1,7 @@
 // Pure meshing functions used by the tile worker. All output coordinates are
 // tile-local three.js axes: x = E - tx·S, y = elevation (datum m), z = -(N - ty·S).
 import type { TypedArray } from '../data/tbn';
-import { orientHouses } from './houseFront';
+import { EAVE_FRAC, H_ROW, H_SHED, orientHouses } from './houseFront';
 
 export interface MeshBuf {
   position: Float32Array;
@@ -24,6 +24,8 @@ export interface HouseBuf {
   height: Float32Array;
   type: Uint8Array;
   variant: Uint8Array;
+  /** roof sanity counts for this tile (workers/houseFront.ts houseRoofQa), read by __qa.extra */
+  qa?: import('./houseFront').HouseQa;
 }
 
 export interface TileMeshes {
@@ -49,6 +51,8 @@ export interface TileMeshes {
   canopy: Float32Array | null;
   /** street props / parking lots (level 0), consumed by PropsLayer */
   props: import('./props').PropsBuf | null;
+  /** rooftop equipment, construction sites, laneways (level 0), consumed by UrbanLayer */
+  urban?: import('./urban').UrbanBuf | null;
   counts: { buildings: number; houses: number; roads: number; rails: number };
 }
 
@@ -212,7 +216,7 @@ export { buildRoads, buildRail } from './roads';
 
 // --------------------------------------------------------------------------- houses
 
-export function extractHouses(a: Record<string, TypedArray>, suppress: Set<number>, originE = 0, originN = 0): HouseBuf | null {
+export function extractHouses(a: Record<string, TypedArray>, suppress: Set<number>, originE = 0, originN = 0, names?: string[]): HouseBuf | null {
   const xy = a.h_xy as Float32Array | undefined;
   if (!xy || xy.length < 2) return null;
   const n = xy.length / 2;
@@ -236,6 +240,76 @@ export function extractHouses(a: Record<string, TypedArray>, suppress: Set<numbe
     variant: pick(a.h_var as Uint8Array, Uint8Array),
   };
   // face each house to its street and pick a Toronto archetype (./houseFront)
-  orientHouses(hb, a, originE, originN, osm ? Float64Array.from(keep, (k) => osm[k]) : undefined);
+  orientHouses(hb, a, originE, originN, osm ? Float64Array.from(keep, (k) => osm[k]) : undefined, names);
   return hb;
+}
+
+/**
+ * Footprints the house pass classed as houses but that aren't: longer than
+ * 25 m, narrower than 3.5 m, or long and narrow (aspect > 4 under 6 m wide:
+ * main-street shops, lane-side sheds, rows mis-tagged). They are appended to
+ * the tile's extruded buildings (flat roof, generic kind → storefronts,
+ * parapets, rooftop kit) and dropped from the house instances. Mutates `a`
+ * (b_* arrays) — call before buildBuildings / props / collide.
+ */
+export function promoteNonHouses(a: Record<string, TypedArray>, hb: HouseBuf): { hb: HouseBuf; n: number } {
+  const bad: number[] = [];
+  for (let i = 0; i < hb.count; i++) {
+    if (hb.type[i] === H_SHED) continue;
+    const F = hb.len[i], D = hb.wid[i];
+    const L = Math.max(F, D), W = Math.min(F, D);
+    // a terrace of row houses fronting the street along its long side is still houses
+    if (hb.type[i] === H_ROW && F >= D && W >= 6 && W <= 16 && L <= 60) continue;
+    if (L > 25 || W < 3.5 || (L / W > 4 && W < 6)) bad.push(i);
+  }
+  if (!bad.length) return { hb, n: 0 };
+  const nB0 = a.b_ring_off ? a.b_ring_off.length - 1 : 0;
+  const nR0 = a.b_vert_off ? a.b_vert_off.length - 1 : 0;
+  const nV0 = a.b_xy ? a.b_xy.length / 2 : 0;
+  const n = bad.length;
+  const grow = <T extends TypedArray>(src: T | undefined, Ctor: new (n: number) => T, extra: number): T => {
+    const o = new Ctor((src?.length ?? 0) + extra);
+    if (src) (o as unknown as { set(x: ArrayLike<number>): void }).set(src as ArrayLike<number>);
+    return o;
+  };
+  const ringOff = grow(a.b_ring_off as Uint32Array | undefined, Uint32Array, nB0 ? n : n + 1);
+  const vertOff = grow(a.b_vert_off as Uint32Array | undefined, Uint32Array, nR0 ? n : n + 1);
+  const xy = grow(a.b_xy as Float32Array | undefined, Float32Array, n * 8);
+  const H = grow(a.b_height as Float32Array | undefined, Float32Array, n), MIN = grow(a.b_min as Float32Array | undefined, Float32Array, n);
+  const BASE = grow(a.b_base as Float32Array | undefined, Float32Array, n), KIND = grow(a.b_kind as Uint8Array | undefined, Uint8Array, n);
+  const ROOF = grow(a.b_roof as Uint8Array | undefined, Uint8Array, n), COL = grow(a.b_color as Uint32Array | undefined, Uint32Array, n);
+  const OSM = grow(a.b_osm as Float64Array | undefined, Float64Array, n);
+  bad.forEach((i, j) => {
+    const b = nB0 + j, r = nR0 + j, v = nV0 + j * 4;
+    ringOff[b] = r; ringOff[b + 1] = r + 1;
+    vertOff[r] = v; vertOff[r + 1] = v + 4;
+    const ca = Math.cos(hb.angle[i]), sa = Math.sin(hb.angle[i]);
+    const hx = hb.len[i] / 2, hy = hb.wid[i] / 2, cx = hb.xy[i * 2], cy = hb.xy[i * 2 + 1];
+    // CCW outer ring: local (x along angle, y = depth toward the back)
+    [[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]].forEach(([u, w], k) => {
+      xy[(v + k) * 2] = cx + ca * u - sa * w; xy[(v + k) * 2 + 1] = cy + sa * u + ca * w;
+    });
+    // a flat-roofed block about as tall as the house's eaves (2–4 storeys)
+    H[b] = Math.min(14, Math.max(6.5, hb.height[i] * (EAVE_FRAC[hb.type[i]] ?? 0.7) + 1.2));
+    MIN[b] = 0; BASE[b] = hb.base[i]; KIND[b] = 0; ROOF[b] = 0; COL[b] = 0;
+    OSM[b] = -(4e12 + Math.round(cx * 16) * 65536 + Math.round(cy * 16)); // synthetic, stable id
+  });
+  Object.assign(a, { b_ring_off: ringOff, b_vert_off: vertOff, b_xy: xy, b_height: H, b_min: MIN, b_base: BASE, b_kind: KIND, b_roof: ROOF, b_color: COL, b_osm: OSM });
+  // drop them from the house instances
+  const keep: number[] = [];
+  const isBad = new Uint8Array(hb.count);
+  for (const i of bad) isBad[i] = 1;
+  for (let i = 0; i < hb.count; i++) if (!isBad[i]) keep.push(i);
+  const pick = <T extends Float32Array | Uint8Array>(src: T, stride = 1): T => {
+    const o = new (src.constructor as new (n: number) => T)(keep.length * stride);
+    keep.forEach((k, j) => { for (let s = 0; s < stride; s++) o[j * stride + s] = src[k * stride + s]; });
+    return o;
+  };
+  return {
+    hb: {
+      count: keep.length, xy: pick(hb.xy, 2), base: pick(hb.base), angle: pick(hb.angle), len: pick(hb.len), wid: pick(hb.wid),
+      height: pick(hb.height), type: pick(hb.type), variant: pick(hb.variant),
+    },
+    n,
+  };
 }

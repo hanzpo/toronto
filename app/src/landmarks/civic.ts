@@ -10,6 +10,7 @@ import type { MatKey } from './materials'
 import { addOsmParts } from './osmparts'
 import type { BuildCtx, OsmPart } from './types'
 import { tower } from './financial'
+import { holesOf, slabHoles, walls } from './kit2'
 
 const part = (ctx: BuildCtx, name: string, fb: V2[]) => ccw(cleanPoly(ctx.part(name, fb)))
 
@@ -87,8 +88,11 @@ export function buildCityHall(ctx: BuildCtx) {
 export function buildOldCityHall(ctx: BuildCtx) {
   const P = new Parts()
   const fp = ctx.footprint(rect(90, 70))
-  P.add('sandstone', prism(fp, 0, 18, { top: false }))
-  P.add('slate', slab(fp, 18))
+  // hollow square: the courtyard (a sunken parking court reached through the
+  // north wing) stays open, walls face it
+  const court = holesOf(ctx, 'building')
+  walls(P, fp, court, 0, 18, 'sandstone')
+  P.add('slate', court.length ? slabHoles(fp, court, 18) : slab(fp, 18))
   let clock: OsmPart | undefined
   addOsmParts(P, ctx, (p) => {
     if (p.minH >= 70) return { wall: 'sandstone', pitched: 'copper', roof: 'copper' }
@@ -198,9 +202,19 @@ export function buildCasaLoma(ctx: BuildCtx) {
 // ---------------------------------------------------------------------------
 // ROM Michael Lee-Chin Crystal: aluminium-clad crystalline prisms.
 
+const ROM_CRYSTAL_BASE = 992753871 // glazed ground floor under the lifted prisms (Bloor St lobby)
+
 export function buildRomCrystal(ctx: BuildCtx) {
   const P = new Parts()
-  addOsmParts(P, ctx, () => ({ wall: 'romAlu', roof: 'romAlu', pitched: 'romAlu' }))
+  // Prisms that start above ground sink 0.6 m into what carries them (the
+  // lobby block, the 1914 wing's roof): they interlock without coplanar faces.
+  const e = ctx.entry
+  const sunk: BuildCtx = e?.osmParts
+    ? { ...ctx, entry: { ...e, osmParts: e.osmParts.map((p) => (p.minH > 0.5 ? { ...p, minH: p.minH - 0.6 } : p)) } }
+    : ctx
+  addOsmParts(P, sunk, (p) => p.id === ROM_CRYSTAL_BASE
+    ? { wall: 'glassGrey', roof: 'romAlu' }
+    : { wall: 'romAlu', roof: 'romAlu', pitched: 'romAlu' })
   if (!ctx.entry?.osmParts?.length) {
     P.add('romAlu', prismTopFn([[-30, -20], [20, -25], [35, 10], [-10, 30]], 0, (x, y) => 25 + 0.25 * x + 0.2 * y))
   }
@@ -210,11 +224,38 @@ export function buildRomCrystal(ctx: BuildCtx) {
 // ---------------------------------------------------------------------------
 // Pearson Terminal 1: glass processor under a gently arched roof.
 
+// The apron service roads run under the piers (drive-throughs, the pier ends)
+// and the landside departures / arrivals curbs run along the frontage: those
+// stretches are a covered roadway. landmarks.json `covered` (tpipe.landmarks
+// covered_roadway) gives the ground-floor masses clear of the lanes, the clear
+// height (5.5 m) under the building above, posts on the clear-zone edge (≥ 1.2 m
+// off the lanes) and the cantilevered curb canopy.
+interface Covered { clear: number; lower: { ring: V2[]; holes?: V2[][] }[]; columns: V2[]; canopy?: V2[][] }
+
 export function buildPearsonT1(ctx: BuildCtx) {
   const P = new Parts()
   const fp = ctx.footprint(rect(500, 200))
-  P.add('glassBlue', prism(fp, 0, 16, { top: false }))
-  P.add('roofLight', prism(offsetPoly(fp, 1.5), 16, 19))
+  const cov = (ctx.entry as unknown as { covered?: Covered } | null)?.covered
+  const H = 16
+  if (!cov) {
+    P.add('glassBlue', prism(fp, 0, H, { top: false }))
+  } else {
+    const y = cov.clear
+    for (const m of cov.lower) {
+      const r = ccw(cleanPoly(m.ring))
+      if (r.length < 3) continue
+      walls(P, r, (m.holes ?? []).map((h) => [...ccw(cleanPoly(h))].reverse()), 0, y, 'glassBlue')
+    }
+    // upper floors over the roads: glass walls + a concrete soffit
+    P.add('glassBlue', prism(fp, y, H, { top: false }))
+    P.add('concrete', prism(fp, y - 0.01, y, { top: false, bottom: true }))
+    for (const [x, yy] of cov.columns) P.add('concrete', box(0.9, y, 0.9, x, y / 2, yy))
+    for (const c of cov.canopy ?? []) {
+      const r = ccw(cleanPoly(c))
+      if (r.length >= 3) P.add('roofLight', prism(r, H - 0.9, H - 0.3, { bottom: true }))
+    }
+  }
+  P.add('roofLight', prism(offsetPoly(fp, 1.5), H, H + 3))
   return P.build('pearson_t1')
 }
 

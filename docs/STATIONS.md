@@ -42,6 +42,9 @@ levels, depths and grades from the references below.
       "center": [lat, lon], "bearing": 73.5, "length": 152, "tracks": 2,
       "platforms": [{ "type": "island", "center": [lat, lon], "bearing": 73.5, "length": 141, "width": 9.3, "osm": 123 }],
       "landmark": "union_station",               // optional: platforms drawn by a landmark model
+      "structure": { "kind": "glencairn" },      // optional: Allen Rd median station structure (stations/allen.ts):
+                                                 // enclosure, roof, bridging concourse(s) ("concourse": "n"|"s"|"both"),
+                                                 // walkways ("walks": [{from, to}]), Lawrence West bus deck ("deck")
       "note": "…" }],
   "entrances": [{ "pos": [lat, lon], "kind": "stair|pavilion|building|path|elevator|underground", "name": "…", "osm": 1 }],
   "buildings": [{ "kind": "station_building", "center": …, "length", "width", "bearing", "render": false }],

@@ -58,6 +58,30 @@ pub const RF_PENALTY: u32 = 16;
 pub const RF_HELD: u32 = 32;
 /// trip is managed by the rail sim but not (yet) placed: draw nothing
 pub const RF_PENDING: u32 = 64;
+/// sounding the horn (approaching a public level crossing)
+pub const RF_HORN: u32 = 128;
+
+/// Level crossing timing (Transport Canada Grade Crossings Standards: warning >= 20 s
+/// before the train arrives, gates horizontal >= 5 s before; our gates take 8 s):
+/// warning (lights, gates lowering) this long before arrival ...
+pub const XING_WARN: f32 = 32.0;
+/// ... gates down this long before arrival
+pub const XING_DOWN: f32 = 21.0;
+/// horn from this long before the crossing
+pub const XING_HORN: f32 = 20.0;
+
+pub struct Crossing {
+    pub osm: f64,
+    pub edge: u32,
+    pub s: f32,
+    pub x: f64,
+    pub y: f64,
+    /// 0 idle, 1 warning (lights, gates lowering), 2 gates down
+    pub state: u8,
+    pub changed: bool,
+    /// last time a train was near (for the clear delay)
+    pub last: f64,
+}
 
 /// s of ATP overspeed warning before the penalty brake (player)
 const ATP_WARN: f32 = 3.0;
@@ -600,6 +624,7 @@ pub struct Train {
     pub sight_v: f32,
     /// depot it is parked in / heading for (NONE otherwise)
     pub depot: u32,
+    pub horn: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -693,6 +718,8 @@ pub struct RailSim {
     /// pull-outs tried recently: (feed, trip) -> time
     pullout_tried: std::collections::HashMap<(u32, u32), f64>,
     pub pullouts: u32,
+    /// level-crossing closures (gates down) since reset
+    pub xing_closures: u32,
     pub pullins: u32,
     /// trips placed from the timetable well inside the radius (after start-up: pops)
     pub spawned_inside: u32,
@@ -703,6 +730,10 @@ pub struct RailSim {
     pub pop_log: Vec<String>,
     /// camera (x, y, forward x, forward y); None = unknown (tests)
     pub camera: Option<(f64, f64, f64, f64)>,
+    pub crossings: Vec<Crossing>,
+    /// crossings each plan passes: (crossing index, route distance)
+    plan_xings: std::collections::HashMap<u32, Vec<(u32, f32)>>,
+    xing_by_edge: std::collections::HashMap<u32, Vec<u32>>,
     pub turnbacks: u32,
 }
 
@@ -738,6 +769,7 @@ impl Default for RailSim {
             park_cache: std::collections::HashMap::new(),
             pullout_tried: std::collections::HashMap::new(),
             pullouts: 0,
+            xing_closures: 0,
             pullins: 0,
             spawned_inside: 0,
             spawned_first: 0,
@@ -745,6 +777,9 @@ impl Default for RailSim {
             po_last: [0; 5],
             pop_log: Vec::new(),
             camera: None,
+            crossings: Vec::new(),
+            plan_xings: std::collections::HashMap::new(),
+            xing_by_edge: std::collections::HashMap::new(),
             turnbacks: 0,
         }
     }
@@ -883,6 +918,7 @@ impl RailSim {
         self.stable_cache.clear();
         self.park_cache.clear();
         self.pullout_tried.clear();
+        self.plan_xings.clear();
         for d in self.depots.iter_mut() {
             d.filled = false;
             d.rep = None;
@@ -1140,6 +1176,7 @@ impl RailSim {
             sight_gap: f32::INFINITY,
             sight_v: 0.0,
             depot: NONE,
+            horn: false,
         };
         if let Some(k) = dwell_at {
             let (_, dep) = f.times(trip, k);
@@ -1377,6 +1414,7 @@ impl RailSim {
         }
         self.terminals(t);
         self.trains.retain(|tr| !tr.dead);
+        self.crossings_step(t);
     }
 
     fn drive(&mut self, ti: usize, dt: f32, t: f64) {
@@ -1830,6 +1868,118 @@ impl RailSim {
         d < 60.0 || (dx * fx + dy * fy) / d > 0.42
     }
 
+    // ------------------------------------------------------------------ level crossings
+
+    /// crossings: [osm id, edge, s, E, N]* (network header)
+    pub fn set_crossings(&mut self, data: &[f64]) {
+        let ne = self.net.e_from.len() as u32;
+        self.crossings = data
+            .chunks_exact(5)
+            .filter(|c| (c[1] as u32) < ne)
+            .map(|c| Crossing { osm: c[0], edge: c[1] as u32, s: c[2] as f32, x: c[3], y: c[4], state: 0, changed: false, last: -1e9 })
+            .collect();
+        self.plan_xings.clear();
+        self.xing_by_edge.clear();
+        for (ci, c) in self.crossings.iter().enumerate() {
+            self.xing_by_edge.entry(c.edge).or_default().push(ci as u32);
+        }
+    }
+
+    fn plan_crossings(&mut self, pi: u32) -> Vec<(u32, f32)> {
+        if let Some(v) = self.plan_xings.get(&pi) {
+            return v.clone();
+        }
+        let p = &self.plans[pi as usize];
+        let mut v = Vec::new();
+        for it in &p.items {
+            if let Some(list) = self.xing_by_edge.get(&it.edge) {
+                for &ci in list {
+                    let c = &self.crossings[ci as usize];
+                    let l = self.net.e_len[it.edge as usize];
+                    let along = if it.dir > 0 { c.s } else { l - c.s };
+                    v.push((ci, it.base + along));
+                }
+            }
+        }
+        self.plan_xings.insert(pi, v.clone());
+        v
+    }
+
+    /// Crossing states from the trains' positions and speeds; horn flags.
+    fn crossings_step(&mut self, t: f64) {
+        if self.crossings.is_empty() {
+            return;
+        }
+        let nc = self.crossings.len();
+        let mut eta = vec![f32::INFINITY; nc];
+        for ti in 0..self.trains.len() {
+            let (pi, front, len, v, dead) = {
+                let tr = &self.trains[ti];
+                (tr.plan, tr.front, tr.len, tr.v, tr.dead)
+            };
+            if dead {
+                continue;
+            }
+            let xs = self.plan_crossings(pi);
+            let mut horn = false;
+            for (ci, r) in xs {
+                let d = r - front;
+                if d < -len - 8.0 || d > 1500.0 {
+                    continue;
+                }
+                let mut e = if d <= 0.0 { 0.0 } else { d / v.max(1.0) };
+                // a train standing well before the crossing does not close it
+                if d > 60.0 && v < 1.0 {
+                    e = f32::INFINITY;
+                }
+                let k = ci as usize;
+                eta[k] = eta[k].min(e);
+                if d > 0.0 && e < XING_HORN && v > 3.0 {
+                    horn = true;
+                }
+            }
+            self.trains[ti].horn = horn;
+        }
+        for (k, c) in self.crossings.iter_mut().enumerate() {
+            let e = eta[k];
+            if e <= XING_WARN {
+                c.last = t;
+            }
+            let mut want = if e <= XING_DOWN {
+                2
+            } else if e <= XING_WARN {
+                c.state.max(1)
+            } else if t - c.last < 4.0 {
+                c.state // hold a few seconds after the train has passed
+            } else {
+                0
+            };
+            // warning always precedes gates down
+            if want == 2 && c.state == 0 {
+                want = 1;
+            }
+            if want != c.state {
+                if want == 2 {
+                    self.xing_closures += 1;
+                }
+                c.state = want;
+                c.changed = true;
+            }
+        }
+    }
+
+    /// crossings whose state changed since the last call: [osm id, state]*
+    pub fn crossing_changes(&mut self) -> Vec<f64> {
+        let mut out = Vec::new();
+        for c in self.crossings.iter_mut() {
+            if c.changed {
+                c.changed = false;
+                out.extend_from_slice(&[c.osm, c.state as f64]);
+            }
+        }
+        out
+    }
+
     // ------------------------------------------------------------------ depots
 
     /// depots: per depot [group, feed mask] + storage edge list, centre point
@@ -2187,7 +2337,7 @@ impl RailSim {
             id, feed: fi as u32, trip: trip as u32, plan: last as u32, front: r, v: 0.0, a: 0.0, len, dy: dyn_for(mode),
             held: vec![false; n], next: 0, lo: 0, ma: r, stop: 0, state: TState::Run, until: 0.0, since: t, delay: 0.0,
             player: false, penalty: false, held_t: 0.0, dead: false, cmd: 0.0, emerg: false, toff, dh: false, legs: Vec::new(),
-            warn: 0.0, ext_gap: f32::INFINITY, ext_v: 0.0, sight_gap: f32::INFINITY, sight_v: 0.0, depot: NONE,
+            warn: 0.0, ext_gap: f32::INFINITY, ext_v: 0.0, sight_gap: f32::INFINITY, sight_v: 0.0, depot: NONE, horn: false,
         });
         let ti = self.trains.len() - 1;
         if !self.place(ti, r) {
@@ -2241,6 +2391,7 @@ impl RailSim {
             sight_gap: f32::INFINITY,
             sight_v: 0.0,
             depot: di,
+            horn: false,
         });
         let ti = self.trains.len() - 1;
         if self.place(ti, front) {
@@ -2741,6 +2892,9 @@ impl RailSim {
             }
             if tr.held_t > 1.0 {
                 f |= RF_HELD;
+            }
+            if tr.horn {
+                f |= RF_HORN;
             }
             let p0 = (self.out_path.len() / 3) as u32;
             let (a, b) = (tr.front - tr.len - 3.0, tr.front + 3.0);

@@ -30,6 +30,103 @@ def _offsets(counts):
     return off
 
 
+def _snap_ends(G, na, nb, nuq, nxy_all, reach=30.0):
+    """End the edge exactly on its graph nodes without hooks: near each end, cut the polyline at
+    its closest approach to the node (ramps pushed beside the mainline for rendering, fillets)
+    and finish on the node itself."""
+    cum = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(G[:, :2], axis=0).T))])
+    total = cum[-1]
+    lo, hi = 0, len(G) - 1
+    ends = []
+    for which, nd in ((0, na), (1, nb)):
+        q = np.searchsorted(nuq, nd)
+        if q >= len(nuq) or nuq[q] != nd:
+            ends.append(None)
+            continue
+        P = nxy_all[q]
+        m = (cum <= reach) if which == 0 else (cum >= total - reach)
+        idx = np.nonzero(m)[0]
+        d = np.hypot(G[idx, 0] - P[0], G[idx, 1] - P[1])
+        if d.min() > 15.0:        # the node is not near this end at all: leave the geometry alone
+            ends.append(None)
+            continue
+        k = int(idx[np.argmin(d)])
+        if which == 0:
+            lo = k
+        else:
+            hi = k
+        ends.append(P)
+    if hi - lo < 1:
+        # degenerate after trimming: a straight edge between the nodes
+        if ends[0] is None or ends[1] is None:
+            return G
+        z = np.array([G[0, 2], G[-1, 2]])
+        return np.column_stack([np.array([ends[0], ends[1]]), z])
+    H = G[lo:hi + 1].copy()
+    if ends[0] is not None:
+        H[0, :2] = ends[0]
+    if ends[1] is not None:
+        H[-1, :2] = ends[1]
+    return H
+
+
+MICRO = 2.0    # m: links shorter than this are merged into their junction
+
+
+def _merge_micro(E_geo, E_way, E_from, E_to, E_len):
+    """Contract very short links (duplicate junction nodes a metre apart): their two nodes become
+    one (the lower OSM id), the link is dropped and neighbouring edges end on the kept node.
+    Then every node gets one elevation (median of its edge ends), blended into each edge over
+    its first / last 20 m, so no link carries a step."""
+    parent = {}
+
+    def find(a):
+        while parent.get(a, a) != a:
+            a = parent[a]
+        return a
+    for g, a, b, L in zip(E_geo, E_from, E_to, E_len):
+        if L < MICRO and a != b:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+    pos = {}
+    keep = []
+    for k, (g, a, b, L) in enumerate(zip(E_geo, E_from, E_to, E_len)):
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            continue
+        if ra == a:
+            pos.setdefault(a, g[0].copy())
+        if rb == b:
+            pos.setdefault(b, g[-1].copy())
+        keep.append(k)
+    zs = {}
+    out_g, out_w, out_f, out_t, out_l = [], [], [], [], []
+    for k in keep:
+        g = E_geo[k].copy()
+        a, b = find(E_from[k]), find(E_to[k])
+        if a in pos:
+            g[0, :2] = pos[a][:2]
+        if b in pos:
+            g[-1, :2] = pos[b][:2]
+        zs.setdefault(a, []).append(g[0, 2])
+        zs.setdefault(b, []).append(g[-1, 2])
+        out_g.append(g); out_w.append(E_way[k]); out_f.append(a); out_t.append(b)
+    zn = {n: float(np.median(v)) for n, v in zs.items()}
+    for g, a, b in zip(out_g, out_f, out_t):
+        cum = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(g[:, :2], axis=0).T))])
+        L = cum[-1]
+        for end, n in ((0, a), (1, b)):
+            dz = zn[n] - (g[0, 2] if end == 0 else g[-1, 2])
+            if abs(dz) < 1e-3 or abs(dz) > 6.0:
+                continue
+            d = cum if end == 0 else L - cum
+            g[:, 2] += dz * np.clip(1.0 - d / min(20.0, max(L, 1e-3)), 0.0, 1.0)
+        out_l.append(float(L))
+    print(f"  merged {len(E_geo) - len(keep):,} micro links (< {MICRO} m)", flush=True)
+    return out_g, out_w, out_f, out_t, out_l
+
+
 def main() -> None:
     """Edges follow the shared network model (tpipe.roadnet, work/roadnet.npz):
     the same smoothed centrelines, solved bridge / ramp / grade-separation
@@ -50,8 +147,9 @@ def main() -> None:
     pos = np.searchsorted(sorted_id, wid)
     pos = np.clip(pos, 0, len(sorted_id) - 1)
     row = order_id[pos]
-    ok = (sorted_id[pos] == wid) & (d["kind"][row] == 0) & (d["cls"][row] <= DRIVABLE_MAX_CLASS) \
-        & ((W["way_flags"] & 32) == 0)
+    # parking aisles / driveways (flag 32, not drawn as roads: the parking-lot generator draws
+    # them) stay in the graph -- bus terminals, station loops and lots are reached through them
+    ok = (sorted_id[pos] == wid) & (d["kind"][row] == 0) & (d["cls"][row] <= DRIVABLE_MAX_CLASS)
     ways = np.nonzero(ok)[0]
     print(f"{len(ways):,} drivable ways from the network model", flush=True)
     woff, wxyz, ws = W["way_off"], W["way_xyz"], W["way_s"]
@@ -85,26 +183,40 @@ def main() -> None:
             k = np.maximum(1, np.ceil(seg / STEP).astype(np.int64))
             S2 = np.concatenate([[S[0]]] + [S[i] + seg[i] * np.arange(1, k[i] + 1) / k[i] for i in range(len(seg))])
             G = np.column_stack([np.interp(S2, s, P[:, c]) for c in range(3)])
-            for end, nd in ((0, nodes[a]), (-1, nodes[b])):
-                q = np.searchsorted(nuq, nd)
-                if q < len(nuq) and nuq[q] == nd and np.hypot(*(nxy_all[q] - G[end, :2])) < 12.0:
-                    G[end, :2] = nxy_all[q]
+            G = _snap_ends(G, nodes[a], nodes[b], nuq, nxy_all)
+            if G is None:
+                continue
+            # drop near-duplicate points (lane-change vertices, snapped ends): no zero-length steps
+            if len(G) > 2:
+                keepv = np.ones(len(G), bool)
+                last = G[0, :2]
+                for q in range(1, len(G) - 1):
+                    if np.hypot(*(G[q, :2] - last)) < 0.3:
+                        keepv[q] = False
+                    else:
+                        last = G[q, :2]
+                if np.hypot(*(G[-1, :2] - last)) < 0.3 and keepv.sum() > 2:
+                    keepv[np.nonzero(keepv[:-1])[0][-1]] = False
+                G = G[keepv]
             E_geo.append(G)
             E_way.append(w)
             E_from.append(int(nodes[a]))
             E_to.append(int(nodes[b]))
             E_len.append(float(np.hypot(*np.diff(G[:, :2], axis=0).T).sum()))
+    E_geo, E_way, E_from, E_to, E_len = _merge_micro(E_geo, E_way, E_from, E_to, E_len)
     print(f"{len(E_geo):,} edges ({time.time() - t0:.0f}s)", flush=True)
     ne = len(E_geo)
     E_way = np.array(E_way, np.int64)
     r = row[E_way]
     c = d["cls"][r].astype(np.int64)
-    flags = (W["way_flags"][E_way] & 31).astype(np.int64)
+    flags = (W["way_flags"][E_way] & 63).astype(np.int64)   # 32 = parking aisle / driveway
     fwd = W["way_nF"][E_way].astype(np.int64)
     bwd = W["way_nB"][E_way].astype(np.int64)
     oneway = (flags & 1) != 0
     fwd = np.maximum(1, fwd)
-    bwd = np.where(oneway, 0, np.maximum(bwd, 0))
+    # two-way roads always carry traffic both ways (a single shared lane -- lanes=1 service roads,
+    # lanes / residential streets -- is nF=1, nB=0 in the render model: unmarked, but two-way)
+    bwd = np.where(oneway, 0, np.maximum(bwd, 1))
     sp = d["speed"][r]
     kmh = np.where((sp > 5) & (sp < 140), sp, DEFAULT_KMH[np.minimum(c, 6)])
     with np.load(geo.WORK / "osm_nodes.npz") as f:

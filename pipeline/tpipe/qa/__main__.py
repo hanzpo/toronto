@@ -41,7 +41,8 @@ STATION_BOOST = 2.0  # score = sev x boost near stations; ranks follow score
 OWNER = {  # which workstream fixes each category (docs/QA.md)
     **{c: "roads" for c in ("road_width_step", "bridge_width_anomaly", "road_overlap_nonjunction", "flat_crossing", "deck_below_clearance",
                             "junction_hardware_on_grade_sep", "elevation_jump", "road_below_terrain", "duplicate_footway",
-                            "footway_as_road", "sidewalk_bridge_discontinuity", "dash_phase_break")},
+                            "footway_as_road", "sidewalk_bridge_discontinuity", "dash_phase_break", "graph_connectivity",
+                            "hooked_edge", "micro_link", "carriageway_overlap", "graph_vs_drawn_elevation")},
     **{c: "stations" for c in ("platform_track_clearance", "station_column_clearance", "tree_on_platform")},
     **{c: "rail" for c in ("rail_kink", "rail_gap", "route_track_conflict", "building_over_track")},
     **{c: "transit" for c in ("transit_route_off_road", "transit_wrong_way", "vehicle_path_through_building")},

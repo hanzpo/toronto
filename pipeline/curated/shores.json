@@ -1,0 +1,142 @@
+{
+ "version": 1,
+ "about": "Shore treatment zones (tpipe.ground). A shore edge whose midpoint is inside a zone gets its type, unless the land beside it is sand (beach), a pier (dockwall) or a breakwater (revetment). Types: dockwall, revetment, beach, natural.",
+ "zones": [
+  {
+   "name": "Toronto Central Waterfront (Bathurst Quay \u2192 Parliament Slip)",
+   "type": "dockwall",
+   "polygon": [
+    [
+     -79.4035,
+     43.6325
+    ],
+    [
+     -79.39,
+     43.6345
+    ],
+    [
+     -79.36,
+     43.641
+    ],
+    [
+     -79.356,
+     43.645
+    ],
+    [
+     -79.36,
+     43.649
+    ],
+    [
+     -79.404,
+     43.6415
+    ]
+   ],
+   "refs": [
+    "https://en.wikipedia.org/wiki/Harbourfront,_Toronto",
+    "https://www.waterfrontoronto.ca/"
+   ],
+   "notes": "Queens Quay dockwalls and slips (Spadina, Rees, York, Simcoe, Yonge); the islands' north shore is south of the polygon"
+  },
+  {
+   "name": "Port Lands channels and slips (Keating Channel, Ship Channel, Polson Slip)",
+   "type": "dockwall",
+   "polygon": [
+    [
+     -79.362,
+     43.636
+    ],
+    [
+     -79.325,
+     43.636
+    ],
+    [
+     -79.325,
+     43.652
+    ],
+    [
+     -79.362,
+     43.652
+    ]
+   ],
+   "refs": [
+    "https://en.wikipedia.org/wiki/Port_Lands"
+   ],
+   "notes": "beaches (Cherry Beach) keep their sand: sand wins over zones"
+  },
+  {
+   "name": "Hamilton Harbour west piers (Pier 4\u20138, Bayfront)",
+   "type": "dockwall",
+   "polygon": [
+    [
+     -79.88,
+     43.268
+    ],
+    [
+     -79.854,
+     43.268
+    ],
+    [
+     -79.854,
+     43.279
+    ],
+    [
+     -79.88,
+     43.279
+    ]
+   ],
+   "refs": [
+    "https://en.wikipedia.org/wiki/Hamilton_Harbour"
+   ]
+  },
+  {
+   "name": "Port Credit harbour",
+   "type": "dockwall",
+   "polygon": [
+    [
+     -79.588,
+     43.548
+    ],
+    [
+     -79.578,
+     43.548
+    ],
+    [
+     -79.578,
+     43.556
+    ],
+    [
+     -79.588,
+     43.556
+    ]
+   ],
+   "refs": [
+    "https://en.wikipedia.org/wiki/Port_Credit"
+   ]
+  },
+  {
+   "name": "Oakville harbour (Sixteen Mile Creek mouth)",
+   "type": "dockwall",
+   "polygon": [
+    [
+     -79.672,
+     43.441
+    ],
+    [
+     -79.664,
+     43.441
+    ],
+    [
+     -79.664,
+     43.448
+    ],
+    [
+     -79.672,
+     43.448
+    ]
+   ],
+   "refs": [
+    "https://en.wikipedia.org/wiki/Oakville_Harbour"
+   ]
+  }
+ ]
+}

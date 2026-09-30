@@ -292,11 +292,12 @@ impl Graph {
             if b < a + 2 {
                 continue;
             }
-            let mut pts = Vec::with_capacity(b - a);
-            let mut cum = Vec::with_capacity(b - a);
+            let raw: Vec<[f64; 3]> = (a..b).map(|k| [x0 + d.e_xyz[k * 3] as f64, y0 + d.e_xyz[k * 3 + 1] as f64, d.e_xyz[k * 3 + 2] as f64]).collect();
+            let raw = despike(raw);
+            let mut pts = Vec::with_capacity(raw.len());
+            let mut cum = Vec::with_capacity(raw.len());
             let mut acc = 0.0f32;
-            for k in a..b {
-                let p = [x0 + d.e_xyz[k * 3] as f64, y0 + d.e_xyz[k * 3 + 1] as f64, d.e_xyz[k * 3 + 2] as f64];
+            for p in raw {
                 if let Some(q) = pts.last() {
                     let q: &[f64; 3] = q;
                     acc += ((p[0] - q[0]).hypot(p[1] - q[1])) as f32;
@@ -929,6 +930,26 @@ impl Graph {
 
 /// segment index k such that cum[k] <= s < cum[k+1] (clamped)
 #[inline]
+/// Drop duplicate points and spikes (a vertex where the line doubles back by more than
+/// 120°, e.g. a centreline that overshoots a clustered junction node and comes back to it):
+/// the cars' paths, headings and junction curves assume a line that runs forward.
+pub fn despike(mut p: Vec<[f64; 3]>) -> Vec<[f64; 3]> {
+    p.dedup_by(|b, a| (b[0] - a[0]).hypot(b[1] - a[1]) < 0.05);
+    let mut i = 1;
+    while p.len() > 2 && i + 1 < p.len() {
+        let (a, b, c) = (p[i - 1], p[i], p[i + 1]);
+        let (d1, d2) = ([b[0] - a[0], b[1] - a[1]], [c[0] - b[0], c[1] - b[1]]);
+        let n = d1[0].hypot(d1[1]) * d2[0].hypot(d2[1]);
+        if n > 1e-9 && (d1[0] * d2[0] + d1[1] * d2[1]) / n < -0.5 {
+            p.remove(i);
+            i = i.saturating_sub(1).max(1);
+        } else {
+            i += 1;
+        }
+    }
+    p
+}
+
 pub fn seg_index(cum: &[f32], s: f32) -> usize {
     let n = cum.len();
     if n < 2 {

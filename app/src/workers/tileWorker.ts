@@ -1,15 +1,19 @@
 // Tile worker: fetch + gunzip + decode TBN1 + build transferable geometry.
 import { decodeTbn } from '../data/tbn';
 
-import { buildBuildings, buildRail, buildRoads, buildTerrain, concatMeshes, extractHouses, TerrainSampler, type MeshBuf, type TileMeshes } from './meshing';
+import { buildBuildings, buildRail, buildRoads, buildTerrain, concatMeshes, extractHouses, promoteNonHouses, TerrainSampler, type MeshBuf, type TileMeshes } from './meshing';
 import { buildProps } from './props';
+import { buildUrban } from './urban';
+import { houseRoofQa } from './houseFront';
 import { buildStreet } from './street';
 import { buildGround, cutData } from './ground';
 import { buildCanopy } from './vegetation';
 import { extractFootprints } from './collide';
+import { applyStationZones, setStationZones } from './stationZones';
+import { dropAirsideTile } from './airside';
 
 export type WorkerIn =
-  | { type: 'config'; suppress: number[]; build: number }
+  | { type: 'config'; suppress: number[]; build: number; zones?: number[][]; vground?: boolean }
   | { type: 'prefetch'; url: string }
   | { type: 'load'; id: number; url: string; level: number; tx: number; ty: number; size: number; grid: number }
   | { type: 'cancel'; id: number };
@@ -22,6 +26,8 @@ export type WorkerOut =
   | { type: 'error'; id: number; message: string };
 
 let suppress = new Set<number>();
+/** level-0 vector ground (off with ?vground=0, for A/B checks) */
+let useVGround = true;
 /** where tile bytes came from: local Cache Storage, CDN edge cache, or R2 (edge miss) */
 export type TileSource = 'local' | 'edge' | 'origin';
 const sources = new Map<string, TileSource>();
@@ -84,6 +90,8 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
   const msg = ev.data;
   if (msg.type === 'config') {
     suppress = new Set(msg.suppress);
+    useVGround = msg.vground !== false;
+    setStationZones(msg.zones);
     openCache(msg.build);
     return;
   }
@@ -108,24 +116,30 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     if (ac.signal.aborted) { post({ type: 'cancelled', id }); return; }
     const t1 = performance.now();
     const { arrays: a, header } = decodeTbn<{ names?: string[] }>(buf);
+    if (level === 0) applyStationZones(a, msg.tx * size, msg.ty * size, size);
+    if (level === 0) await dropAirsideTile(a, url, msg.tx * size, msg.ty * size, size); // apron roads: drawn by AirportLayer
     const G = (a.terrain_h ? Math.round(Math.sqrt(a.terrain_h.length)) : grid) || grid;
     const terr = buildTerrain(a.terrain_h as Int16Array, G, size, level);
     const sampler = new TerrainSampler(terr.heights, G, size);
-    const vground = level === 0 ? buildGround(a, sampler) : null;
+    const vground = level === 0 && useVGround ? buildGround(a, sampler, a.ground as Uint8Array | undefined) : null;
     const cuts = level === 0 ? cutData(a, size) : null;
-    const bld = buildBuildings(a, suppress, level, msg.tx * size, msg.ty * size, sampler);
+    // houses first: footprints that aren't houses (long / narrow) join the extruded buildings
+    let houses = level === 0 ? extractHouses(a, suppress, msg.tx * size, msg.ty * size, header.names) : null;
+    if (houses) { houses = promoteNonHouses(a, houses).hb; houses.qa = houseRoofQa(houses, a, msg.tx * size, msg.ty * size); }
+    const bld = buildBuildings(a, suppress, level, msg.tx * size, msg.ty * size, sampler, header.names);
     const ground = a.ground ? (a.ground as Uint8Array).slice() : new Uint8Array(256 * 256);
     const roads = buildRoads(a, sampler, level, ground);
     const rail = buildRail(a, sampler, level);
-    const houses = level === 0 ? extractHouses(a, suppress, msg.tx * size, msg.ty * size) : null;
     const street = level === 0 ? buildStreet(a, roads.streets, roads.junctions, sampler, ground, msg.tx, msg.ty) : null;
     const props = level === 0 ? buildProps(a, header.names ?? [], roads.streets, roads.junctions, sampler, ground, houses, msg.tx, msg.ty) : null;
+    // rooftops (from buildBuildings), construction sites, laneways: layers/UrbanLayer.ts
+    const urban = level === 0 ? buildUrban(a, header.names ?? [], bld.items, sampler, ground, houses, msg.tx, msg.ty) : null;
     const canopy = level === 1 ? buildCanopy(a, ground, sampler, msg.tx, msg.ty, size) : null;
     const street3d = concatMeshes(roads.mesh, rail.mesh);
     const collide = level === 0 ? extractFootprints(a, suppress) : null;
     const result: TileMeshes = {
       terrain: terr.mesh, vground, cuts, heights: terr.heights, grid: G, ground, minH: terr.minH, maxH: Math.max(terr.maxH, 0),
-      buildings: bld.mesh, collide, roads: street3d, railStart: roads.mesh ? roads.mesh.index.length : 0, houses, street, canopy, props,
+      buildings: bld.mesh, collide, roads: street3d, railStart: roads.mesh ? roads.mesh.index.length : 0, houses, street, canopy, props, urban,
       counts: { buildings: bld.count, houses: houses?.count ?? 0, roads: roads.count, rails: rail.count },
     };
     const tr: Transferable[] = [terr.heights.buffer, ground.buffer];
@@ -133,6 +147,7 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     transfers(terr.mesh, tr); transfers(vground, tr);
     if (cuts) tr.push(cuts.off.buffer, cuts.xy.buffer, cuts.type.buffer, cuts.toff.buffer, cuts.txyz.buffer, cuts.tkind.buffer, cuts.box.buffer); transfers(bld.mesh, tr); transfers(street3d, tr);
     if (canopy) tr.push(canopy.buffer);
+    if (urban) tr.push(urban.items.buffer);
     if (props) { tr.push(props.items.buffer, props.segs.buffer); transfers(props.ground, tr); }
     if (street) tr.push(street.veg.buffer, street.vegCells.buffer, street.lamps.buffer, street.signals.buffer, street.signalIds.buffer);
     if (houses) tr.push(houses.xy.buffer, houses.base.buffer, houses.angle.buffer, houses.len.buffer, houses.wid.buffer, houses.height.buffer, houses.type.buffer, houses.variant.buffer);

@@ -107,6 +107,30 @@ class LabelBoard {
 
 export const labelBoard = new LabelBoard();
 
+// QA counters (window.__qa): labels drawn this frame and screen overlaps between them.
+function qaVisible(): HTMLElement[] {
+  return [...document.querySelectorAll<HTMLElement>('.stn-label, .place-label')].filter(
+    (e) => e.isConnected && e.style.visibility !== 'hidden' && parseFloat(e.style.opacity || '0') > 0.05);
+}
+function qaOverlaps(): number {
+  const R = qaVisible().map((e) => e.getBoundingClientRect());
+  let n = 0;
+  for (let i = 0; i < R.length; i++) for (let j = i + 1; j < R.length; j++) {
+    const a = R[i], b = R[j];
+    if (a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top) n++;
+  }
+  return n;
+}
+if (typeof window !== 'undefined') {
+  const w = window as unknown as { __qa?: Record<string, unknown> };
+  w.__qa = Object.assign(w.__qa ?? {}, {
+    /** pairs of drawn labels whose boxes overlap on screen */
+    labelsOverlapping: () => qaOverlaps(),
+    /** labels drawn now (stations + places), with their text */
+    labelsVisibleAtStreet: () => { const v = qaVisible(); return { count: v.length, labels: v.map((e) => e.textContent ?? '') }; },
+  });
+}
+
 /**
  * Line of sight from the camera to a world point (E, N, elevation): false when
  * terrain or a (loaded) building volume is in between. The last `skipEnd`

@@ -137,6 +137,14 @@ fn load() -> Option<RailSim> {
         }
     }
     sim.set_depots(&groups, &masks, &off, &edges);
+    // level crossings: "crossings":[[osm,edge,s,e,n],...]
+    if let Some(a) = nh.find("\"crossings\":[") {
+        let body = &nh[a + 13..];
+        let end = body.find("]]").map(|k| k + 1).unwrap_or(0);
+        let v: Vec<f64> = body[..end].split(|c| c == '[' || c == ']' || c == ',').filter_map(|x| x.trim().parse().ok()).collect();
+        sim.set_crossings(&v);
+        eprintln!("crossings loaded: {}", sim.crossings.len());
+    }
     eprintln!("depots loaded: {}", sim.depots.len());
     Some(sim)
 }
@@ -321,6 +329,9 @@ fn early_morning_pullouts() {
     eprintln!("after start-up: placed inside the radius {} (first of block {}) pull-out failures {:?}", sim.spawned_inside - i0, sim.spawned_first - f0, sim.po_fail);
     for l in sim.pop_log.iter().take(25) { eprintln!("  pop {l}"); }
     let parked = sim.trains.iter().filter(|t| t.state == TState::Parked).count();
+    let active = sim.crossings.iter().filter(|c| c.state > 0).count();
+    eprintln!("crossings active now: {active}, gate closures in the run: {}", sim.xing_closures);
+    assert!(sim.xing_closures > 0, "no level crossing ever closed");
     eprintln!("morning: pullouts {} pullins {} parked {} max trains {} overlaps {} overruns {} held>30s {}%", sim.pullouts, sim.pullins, parked, r.max_trains, r.overlaps, r.overruns, r.stuck);
     assert_eq!(r.overlaps, 0);
     assert_eq!(r.overruns, 0);

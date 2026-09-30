@@ -35,8 +35,8 @@ Shores (edges of water against land, water on the left)
   great-lake water against industrial / commercial / paved land → dockwall,
   against anything else → revetment; everything else → natural bank.
 
-Terrain (65 x 65 at level 0, 16 m)
-  Land within 24 m of a shore is raised to at least water level + freeboard of
+Terrain (33 x 33 at level 0, 32 m)
+  Land within 1.5 grid cells (48 m) of a shore is raised to at least water level + freeboard of
   that shore type (dockwall 1.6 m, revetment 1.1, beach 0.25, natural 0.35), so
   the drawn shore never dips under the water; points in the water sit at the
   water level.

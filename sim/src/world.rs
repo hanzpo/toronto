@@ -29,6 +29,16 @@ pub const F_HELD: u8 = 8;
 /// floats per car record in the output buffer
 pub const CAR_STRIDE: usize = 8;
 pub const NO_LANE: u8 = 255;
+/// 12 m grid cell key of (x, y) shifted by (dx, dy) cells
+#[inline]
+fn pcell(x: f64, y: f64, dx: i64, dy: i64) -> u64 {
+    let cx = (x / 12.0).floor() as i64 + dx + (1 << 20);
+    let cy = (y / 12.0).floor() as i64 + dy + (1 << 20);
+    ((cx as u64) << 22) | (cy as u64 & 0x3f_ffff)
+}
+
+/// links shorter than this: the link after them is chosen in advance (see choose_next)
+const SHORT_LINK: f32 = 30.0;
 /// samples along a junction path
 pub const NS: usize = 13;
 /// two junction paths conflict where they come closer than this (m)
@@ -115,18 +125,30 @@ pub struct Player {
 #[derive(Clone, Copy, Debug)]
 pub struct Bez {
     pub p0: [f64; 3],
-    pub p1: [f64; 2],
+    pub c1: [f64; 2],
+    pub c2: [f64; 2],
     pub p2: [f64; 3],
 }
 
 impl Bez {
+    /// cubic from a quadratic control point
+    pub fn quad(p0: [f64; 3], p1: [f64; 2], p2: [f64; 3]) -> Bez {
+        let k = 2.0 / 3.0;
+        Bez {
+            p0,
+            c1: [p0[0] + (p1[0] - p0[0]) * k, p0[1] + (p1[1] - p0[1]) * k],
+            c2: [p2[0] + (p1[0] - p2[0]) * k, p2[1] + (p1[1] - p2[1]) * k],
+            p2,
+        }
+    }
     #[inline]
     pub fn at(&self, u: f32) -> (f64, f64, f32) {
         let u = u.clamp(0.0, 1.0) as f64;
-        let (w0, w1, w2) = ((1.0 - u) * (1.0 - u), 2.0 * u * (1.0 - u), u * u);
+        let v = 1.0 - u;
+        let (w0, w1, w2, w3) = (v * v * v, 3.0 * u * v * v, 3.0 * u * u * v, u * u * u);
         (
-            w0 * self.p0[0] + w1 * self.p1[0] + w2 * self.p2[0],
-            w0 * self.p0[1] + w1 * self.p1[1] + w2 * self.p2[1],
+            w0 * self.p0[0] + w1 * self.c1[0] + w2 * self.c2[0] + w3 * self.p2[0],
+            w0 * self.p0[1] + w1 * self.c1[1] + w2 * self.c2[1] + w3 * self.p2[1],
             (self.p0[2] + (self.p2[2] - self.p0[2]) * u) as f32,
         )
     }
@@ -153,6 +175,9 @@ pub struct BoxPath {
     pub bez: Bez,
     /// normalised cumulative arc length at u = k/8
     pub arc: [f32; 9],
+    /// drawn length over the sim distance it stands for (setback in + setback out):
+    /// < 1 where the path is shorter than the two legs it replaces (sharp turns)
+    pub r: f32,
     /// NS samples at equal arc-length steps, relative to the node
     pub pts: [[f32; 2]; NS],
 }
@@ -165,8 +190,9 @@ impl BoxPath {
         tl: 0,
         ver: 0,
         node: NONE,
-        bez: Bez { p0: [0.0; 3], p1: [0.0; 2], p2: [0.0; 3] },
+        bez: Bez { p0: [0.0; 3], c1: [0.0; 2], c2: [0.0; 2], p2: [0.0; 3] },
         arc: [0.0; 9],
+        r: 1.0,
         pts: [[0.0; 2]; NS],
     };
 
@@ -232,6 +258,11 @@ pub struct World {
     keys: Vec<(u64, u32)>,
     order: Vec<u32>,
     lead: Vec<u32>,
+    /// per car: junction path drawn/sim length ratio under its body (see box_ratio)
+    rbox: Vec<f32>,
+    /// car body centres by 12 m cell (sorted (cell key, car)) for the physical look-ahead
+    pgrid: Vec<(u64, u32)>,
+    ov_young: u32,
     acc: Vec<f32>,
     lim: Vec<f32>,
     step_no: u32,
@@ -269,7 +300,7 @@ pub struct World {
     /// building outlines for player collisions
     pub fp: Footprints,
     ped_boxes: Vec<(u32, [[f32; 2]; NS], u8)>,
-    /// accumulated native ms per phase (tests / benchmarks; zero in wasm)
+    /// accumulated ms per phase [validate sort occ accel lanechg advance spawn peds]
     pub prof: [f64; 8],
     // buses (bus.rs)
     pub bus_pats: std::collections::HashMap<u32, BusPattern>,
@@ -281,29 +312,50 @@ pub struct World {
     pub bus_gone: Vec<f32>,
     /// camera (sims avoid spawning / removing agents in plain view)
     pub camera: crate::view::Camera,
+    /// railway level crossings: (E, N, state 0 idle / 1 warning / 2 gates down)
+    pub xings: Vec<(f64, f64, u8)>,
+    /// crossing stop bars per road link: (crossing, stop bar s, far side s)
+    xmarks: std::collections::HashMap<u32, Vec<(u32, f32, f32)>>,
+    xmarks_ver: u32,
+    xmarks_focus: (f64, f64),
 }
 
-/// phase timer (no-op on wasm, where `Instant` is unavailable)
+/// phase timer (native: Instant; wasm: performance.now())
 struct Prof {
-    #[cfg(not(target_arch = "wasm32"))]
-    t: std::time::Instant,
+    t: f64,
 }
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen::prelude::wasm_bindgen(js_namespace = performance, js_name = now)]
+    fn perf_now() -> f64;
+}
+
+#[inline]
+fn now_ms() -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        perf_now()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::sync::OnceLock;
+        static T0: OnceLock<std::time::Instant> = OnceLock::new();
+        T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0
+    }
+}
+
 impl Prof {
     #[inline]
     fn start() -> Self {
-        Prof {
-            #[cfg(not(target_arch = "wasm32"))]
-            t: std::time::Instant::now(),
-        }
+        Prof { t: now_ms() }
     }
     #[inline]
-    fn lap(&mut self, _acc: &mut f64) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let n = std::time::Instant::now();
-            *_acc += (n - self.t).as_secs_f64() * 1000.0;
-            self.t = n;
-        }
+    fn lap(&mut self, acc: &mut f64) {
+        let n = now_ms();
+        *acc += n - self.t;
+        self.t = n;
     }
 }
 
@@ -360,6 +412,9 @@ impl World {
             keys: Vec::new(),
             order: Vec::new(),
             lead: Vec::new(),
+            rbox: Vec::new(),
+            pgrid: Vec::new(),
+            ov_young: 0,
             acc: Vec::new(),
             lim: Vec::new(),
             step_no: 1,
@@ -399,6 +454,10 @@ impl World {
             out_bus_path: Vec::new(),
             bus_gone: Vec::new(),
             camera: None,
+            xings: Vec::new(),
+            xmarks: std::collections::HashMap::new(),
+            xmarks_ver: u32::MAX,
+            xmarks_focus: (1e12, 1e12),
         }
     }
 
@@ -457,6 +516,7 @@ impl World {
         self.update_paths();
         t.lap(&mut self.prof[1]);
         self.build_occupancy();
+        self.refresh_xmarks();
         t.lap(&mut self.prof[2]);
         self.compute_accel(dt);
         t.lap(&mut self.prof[3]);
@@ -675,20 +735,26 @@ impl World {
         let (da, db) = ((pa.h.cos() as f64, pa.h.sin() as f64), (pb.h.cos() as f64, pb.h.sin() as f64));
         let (dx, dy) = (pb.x - pa.x, pb.y - pa.y);
         let chord = dx.hypot(dy);
-        let mut p1 = [(pa.x + pb.x) * 0.5, (pa.y + pb.y) * 0.5];
+        let (p0, p2) = ([pa.x, pa.y, pa.z as f64], [pb.x, pb.y, pb.z as f64]);
+        let dot = da.0 * db.0 + da.1 * db.1;
         let cross = da.0 * db.1 - da.1 * db.0;
         if cross.abs() > 0.08 {
             // intersection of the two lane tangents
             let t = (dx * db.1 - dy * db.0) / cross;
             let u = (dx * da.1 - dy * da.0) / cross;
             if t > 0.05 * chord && t < 1.2 * chord && u > 0.05 * chord && u < 1.2 * chord {
-                p1 = [pa.x + da.0 * t, pa.y + da.1 * t];
+                return Bez::quad(p0, [pa.x + da.0 * t, pa.y + da.1 * t], p2);
             }
-        } else if chord > 0.5 && (da.0 * db.0 + da.1 * db.1) > 0.0 {
+        } else if chord > 0.5 && dot > 0.0 {
             // (nearly) straight through, possibly with a lane shift: S-free simple blend
-            p1 = [(pa.x + pb.x) * 0.5, (pa.y + pb.y) * 0.5];
+            return Bez::quad(p0, [(pa.x + pb.x) * 0.5, (pa.y + pb.y) * 0.5], p2);
         }
-        Bez { p0: [pa.x, pa.y, pa.z as f64], p1, p2: [pb.x, pb.y, pb.z as f64] }
+        // sharp turns (U-turns through a median gap) and tangents that do not meet ahead:
+        // leave along the lane and arrive along the next lane (a straight chord could point
+        // sideways or backwards)
+        // (a U-turn needs room to swing round even when both ends are close together)
+        let k = if dot < -0.3 { (0.66 * chord).max(3.5) } else { (0.4 * chord).max(1.5) }.min(25.0);
+        Bez { p0, c1: [pa.x + da.0 * k, pa.y + da.1 * k], c2: [pb.x - db.0 * k, pb.y - db.1 * k], p2 }
     }
 
     /// Junction path between two lanes, parametrised by arc length.
@@ -707,7 +773,8 @@ impl World {
         }
         let node = self.zone_of(self.g.links[link as usize].to);
         let n = &self.g.nodes[node as usize];
-        let mut bp = BoxPath { link, next, lane, tl, ver: self.g.version, node, bez, arc, pts: [[0.0; 2]; NS] };
+        let r = (total / (self.sb_in(link) + self.sb_out(next)).max(0.1)).min(1.5);
+        let mut bp = BoxPath { link, next, lane, tl, ver: self.g.version, node, bez, arc, r, pts: [[0.0; 2]; NS] };
         for k in 0..NS {
             let (x, y, _) = bp.at(k as f32 / (NS - 1) as f32);
             bp.pts[k] = [(x - n.x) as f32, (y - n.y) as f32];
@@ -831,6 +898,117 @@ impl World {
         (x, y, z, self.structural(c.link))
     }
 
+    /// stop bars of the level crossings near the focus on the road links that cross them
+    fn refresh_xmarks(&mut self) {
+        if self.xings.is_empty() {
+            return;
+        }
+        let moved = (self.focus.0 - self.xmarks_focus.0).hypot(self.focus.1 - self.xmarks_focus.1);
+        if self.xmarks_ver == self.g.version && moved < 300.0 {
+            return;
+        }
+        self.xmarks_ver = self.g.version;
+        self.xmarks_focus = self.focus;
+        self.xmarks.clear();
+        let r = self.radius + 400.0;
+        let mut near = Vec::new();
+        for (ci, &(x, y, _)) in self.xings.iter().enumerate() {
+            if (x - self.focus.0).hypot(y - self.focus.1) > r {
+                continue;
+            }
+            self.g.edges_near(x, y, 12.0, &mut near);
+            for &eid in &near {
+                let e = &self.g.edges[eid as usize];
+                if !e.alive || e.flags & crate::demand::FLAG_TUNNEL != 0 || e.flags & crate::demand::FLAG_BRIDGE != 0 {
+                    continue;
+                }
+                let (se, lat, _, _) = self.g.project_on_edge(eid, x, y);
+                if lat.abs() > e.half_w + 1.5 || se <= 0.5 || se >= e.len - 0.5 {
+                    continue;
+                }
+                for (k, &link) in e.links.iter().enumerate() {
+                    if link == NONE {
+                        continue;
+                    }
+                    let sc = if k == 0 { se } else { e.len - se };
+                    // Transport Canada / OTM Book 11: stop line ~5 m before the nearest rail
+                    self.xmarks.entry(link).or_default().push((ci as u32, sc - 5.4, sc + 3.5));
+                }
+            }
+        }
+    }
+
+    /// Level crossings: stop at the stop bar while the warning is on (unless too close to
+    /// stop safely during the warning) or the gates are down, and never stop on the tracks
+    /// (keep clear when the queue ahead would leave the car on them).
+    fn crossing_gap(&self, i: usize) -> Option<f32> {
+        if self.xmarks.is_empty() {
+            return None;
+        }
+        let c = &self.cars[i];
+        let (s, v) = (c.s, c.v);
+        let l = &self.g.links[c.link as usize];
+        let mut best: Option<f32> = None;
+        let mut consider = |ss: f32, sf: f32, off: f32, ci: u32, ahead_same: bool| {
+            let d = off + ss - s;
+            if d < -0.3 || d > 150.0 {
+                return;
+            }
+            let st = self.xings.get(ci as usize).map_or(0, |x| x.2);
+            let stop = match st {
+                2 => true,
+                1 => v * v / (2.0 * d.max(0.1)) < 4.5,
+                _ => {
+                    // keep clear: a stopped queue ahead reaching back over the tracks
+                    ahead_same
+                        && self.lead[i] != NONE
+                        && {
+                            let ld = &self.cars[self.lead[i] as usize];
+                            let rear = ld.s - ld.len;
+                            rear > off + ss && rear < off + sf + c.len + 1.0 && ld.v < 2.5
+                        }
+                }
+            };
+            if stop {
+                best = Some(best.map_or(d.max(0.0), |b: f32| b.min(d.max(0.0))));
+            }
+        };
+        if let Some(ms) = self.xmarks.get(&c.link) {
+            for &(ci, ss, sf) in ms {
+                consider(ss, sf, 0.0, ci, true);
+            }
+        }
+        if c.next != NONE {
+            if let Some(ms) = self.xmarks.get(&c.next) {
+                for &(ci, ss, sf) in ms {
+                    if ss > 0.0 {
+                        consider(ss, sf, l.len, ci, false);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// cars whose body overlaps an occupied crossing (gates down) — must be 0
+    pub fn cars_on_closed_crossing(&self) -> u32 {
+        let mut n = 0;
+        for c in &self.cars {
+            if c.flags & F_DEAD != 0 || c.link == NONE {
+                continue;
+            }
+            if let Some(ms) = self.xmarks.get(&c.link) {
+                for &(ci, ss, sf) in ms {
+                    let st = self.xings.get(ci as usize).map_or(0, |x| x.2);
+                    if st == 2 && c.s > ss + 5.4 - 2.0 && c.s - c.len < sf - 3.5 + 2.0 {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    }
+
     /// a short link whose both ends belong to the same junction conflict zone
     #[inline]
     fn internal_link(&self, link: u32) -> bool {
@@ -868,6 +1046,147 @@ impl World {
             }
         }
         n
+    }
+
+    /// the next car id (cars with an id at or above a remembered value are younger)
+    pub fn next_car_id(&self) -> u32 {
+        self.next_id
+    }
+
+    /// overlap_causes counts, with "spawn" = cars placed since the previous call
+    pub fn overlap_counts(&mut self) -> [u32; 10] {
+        let young = if self.ov_young == 0 { u32::MAX } else { self.ov_young };
+        let (c, _) = self.overlap_causes(young, 0);
+        self.ov_young = self.next_id;
+        c
+    }
+
+    /// junction zone a car's body is in (its entry or exit box), or NONE
+    fn car_zone(&self, c: &Car) -> u32 {
+        let l = &self.g.links[c.link as usize];
+        if c.next != NONE && c.s > l.len - self.sb_in(c.link) {
+            return self.zone_of(l.to);
+        }
+        if self.prev_ok(c) && c.s - c.len < self.sb_out(c.link) {
+            return self.zone_of(l.from);
+        }
+        NONE
+    }
+
+    /// smallest drawn/sim length ratio of the junction paths car `i`'s body is on (1 = none)
+    pub fn box_ratio(&self, i: usize) -> f32 {
+        let c = &self.cars[i];
+        let l = &self.g.links[c.link as usize];
+        let mut r = 1.0f32;
+        if c.next != NONE && self.g.links[c.next as usize].alive && c.s > l.len - self.sb_in(c.link) {
+            r = r.min(self.path_in(i).r);
+        }
+        if self.prev_ok(c) && c.s - c.len < self.sb_out(c.link) {
+            r = r.min(self.path_out(i).r);
+        }
+        r
+    }
+
+    /// QA: overlapping car bodies (OBB penetration > 0.35 m) by cause:
+    /// [spawn, lane change, short link, junction: different movements, same lane, adjacent lanes,
+    ///  merge / converging links, other, junction: one behind the other on the same movement,
+    ///  bridge / tunnel against a street at the same height (road data)];
+    /// plus up to `nex` examples
+    pub fn overlap_causes(&self, young_id: u32, nex: usize) -> ([u32; 10], Vec<String>) {
+        let mut out = [0u32; 10];
+        let mut ex = Vec::new();
+        let mut grid: std::collections::HashMap<(i32, i32), Vec<usize>> = std::collections::HashMap::new();
+        let mut boxes = Vec::with_capacity(self.cars.len());
+        for (i, c) in self.cars.iter().enumerate() {
+            if c.flags & F_DEAD != 0 || c.link == NONE || !self.g.links[c.link as usize].alive {
+                boxes.push(None);
+                continue;
+            }
+            let (p, _) = self.car_pose(i);
+            let b = Obb { x: p.x, y: p.y, h: p.h, hl: c.len * 0.5 - 0.15, hw: HALF_W[c.kind as usize] - 0.1 };
+            grid.entry(((p.x / 10.0).floor() as i32, (p.y / 10.0).floor() as i32)).or_default().push(i);
+            boxes.push(Some((b, p.z)));
+        }
+        for (i, c) in self.cars.iter().enumerate() {
+            let Some((b, z)) = boxes[i] else { continue };
+            let (cx, cy) = ((b.x / 10.0).floor() as i32, (b.y / 10.0).floor() as i32);
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    let Some(v) = grid.get(&(cx + dx, cy + dy)) else { continue };
+                    for &j in v {
+                        let Some((bj, zj)) = boxes[j] else { continue };
+                        if j <= i || (zj - z).abs() > 3.0 {
+                            continue;
+                        }
+                        if !obb_overlap(&b, &bj).map_or(false, |(_, pen)| pen > 0.35) {
+                            continue;
+                        }
+                        let o = &self.cars[j];
+                        let (l1, l2) = (&self.g.links[c.link as usize], &self.g.links[o.link as usize]);
+                        let (z1, z2) = (self.car_zone(c), self.car_zone(o));
+                        let k = if !self.same_level(c, o) {
+                            9
+                        } else if c.id >= young_id || o.id >= young_id {
+                            0
+                        } else if c.lc_from != NO_LANE || o.lc_from != NO_LANE {
+                            1
+                        } else if l1.len < c.len + 1.0 || l2.len < o.len + 1.0 {
+                            2
+                        } else if (z1 != NONE || z2 != NONE) && (z1 == z2 || c.link != o.link) {
+                            let chain = |a: &Car, b: &Car| a.link == b.link && a.lane == b.lane || a.next == b.link || (a.prev == b.prev && a.link == b.link);
+                            if chain(c, o) || chain(o, c) {
+                                8
+                            } else {
+                                3
+                            }
+                        } else if c.link == o.link && c.lane == o.lane {
+                            4
+                        } else if c.link == o.link {
+                            5
+                        } else if self.zone_of(l1.to) == self.zone_of(l2.to) || c.next == o.link || o.next == c.link {
+                            6
+                        } else {
+                            7
+                        };
+                        out[k] += 1;
+                        if ex.len() < nex {
+                            ex.push(format!(
+                                "[{k}] ids {}-{} plane {}/{} plen {:.1}/{:.1} r {:.2}/{:.2} @({:.0},{:.0}) link {}/{} len {:.1}/{:.1} lanes {}/{} lane {}/{} s {:.1}/{:.1} v {:.1}/{:.1} zone {}/{} prev {}/{} next {}/{} lc {}/{} ctl {:?}/{:?} fl {}/{}",
+                                c.id.min(o.id), c.id.max(o.id), c.prev_lane, o.prev_lane, if c.prev != NONE { self.g.links[c.prev as usize].len } else { -1.0 }, if o.prev != NONE { self.g.links[o.prev as usize].len } else { -1.0 }, self.box_ratio(i), self.box_ratio(j), b.x, b.y, c.link, o.link, l1.len, l2.len, l1.lanes, l2.lanes, c.lane, o.lane, c.s, o.s, c.v, o.v,
+                                z1 as i64, z2 as i64, c.prev as i64, o.prev as i64, c.next as i64, o.next as i64, c.lc_from, o.lc_from,
+                                self.g.nodes[l1.to as usize].control, self.g.nodes[l2.to as usize].control, l1.flags, l2.flags
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        (out, ex)
+    }
+
+    /// QA: cars waiting inside a split junction (median): [x, y, car heading, link heading at
+    /// the car, heading of the carriageway it came from, link length, car length, s, link, prev]*
+    pub fn median_waits(&self) -> Vec<f32> {
+        let mut out = Vec::new();
+        for (i, c) in self.cars.iter().enumerate() {
+            if c.flags & (F_DEAD | F_PLAYER) != 0 || c.v >= 0.5 || c.link == NONE || c.flags & F_COMMIT != 0 {
+                continue;
+            }
+            if !self.internal_link(c.link) {
+                continue;
+            }
+            let (p, _) = self.car_pose(i);
+            let l = &self.g.links[c.link as usize];
+            let lh = self.g.link_pose(c.link, (c.s - c.len * 0.5).clamp(0.5, (l.len - 0.5).max(0.5)), 0.0).h;
+            let ph = if c.prev != NONE {
+                let pl = &self.g.links[c.prev as usize];
+                self.g.link_pose(c.prev, (pl.len - 1.0).max(0.0), 0.0).h
+            } else {
+                f32::NAN
+            };
+            out.extend_from_slice(&[p.x as f32, p.y as f32, p.h, lh, ph, l.len, c.len, c.s, c.link as f32, c.prev as f32]);
+        }
+        out
     }
 
     /// is `link` a major approach at its end node
@@ -1350,6 +1669,23 @@ impl World {
         self.acc.resize(n, 0.0);
         self.lim.clear();
         self.lim.resize(n, f32::INFINITY);
+        let mut rbox = std::mem::take(&mut self.rbox);
+        rbox.clear();
+        for i in 0..n {
+            let c = &self.cars[i];
+            let ok = c.flags & F_DEAD == 0 && c.link != NONE && self.g.links[c.link as usize].alive;
+            rbox.push(if ok { self.box_ratio(i).max(0.2) } else { 1.0 });
+        }
+        self.rbox = rbox;
+        let mut pg = std::mem::take(&mut self.pgrid);
+        pg.clear();
+        for (i, c) in self.cars.iter().enumerate() {
+            if c.posed && c.flags & F_DEAD == 0 {
+                pg.push((pcell(c.pose.x, c.pose.y, 0, 0), i as u32));
+            }
+        }
+        pg.sort_unstable();
+        self.pgrid = pg;
         for i in 0..n {
             if self.cars[i].flags & (F_PLAYER | F_DEAD) != 0 {
                 continue;
@@ -1370,10 +1706,22 @@ impl World {
                 *a = a.min(idm::accel(&p, v, v0, rear - s, v - lv));
                 *lim = lim.min(rear - 0.3);
             };
+            // following through a junction path drawn shorter than the distance it stands for
+            // (r < 1): keep the drawn gap, r * (leader front - own front) - leader length
+            let rb = &self.rbox;
+            let follow_r = |a: &mut f32, lim: &mut f32, front: f32, len: f32, lv: f32, r: f32| {
+                if r >= 0.98 {
+                    *a = a.min(idm::accel(&p, v, v0, front - len - s, v - lv));
+                    *lim = lim.min(front - len - 0.3);
+                } else {
+                    *a = a.min(idm::accel(&p, v, v0, r * (front - s) - len, v - lv));
+                    *lim = lim.min(front - (len + 0.3) / r);
+                }
+            };
             let li = self.lead[i];
             if li != NONE {
                 let ld = &self.cars[li as usize];
-                follow(&mut a, &mut lim, ld.s - ld.len, ld.v);
+                follow_r(&mut a, &mut lim, ld.s, ld.len, ld.v, rb[i].min(rb[li as usize]));
             }
             if let Some((rear, lv)) = self.ghost_ahead(link, lane, s, i) {
                 follow(&mut a, &mut lim, rear, lv);
@@ -1395,7 +1743,13 @@ impl World {
                 let tl = target_lane(lane, nl.lanes, turn);
                 if let Some(t) = self.lane_tail(next, tl) {
                     let tc = &self.cars[t];
-                    follow(&mut a, &mut lim, l.len + tc.s - tc.len, tc.v);
+                    follow_r(&mut a, &mut lim, l.len + tc.s, tc.len, tc.v, rb[i].min(rb[t]));
+                } else if nl.len < 40.0 {
+                    // short links (clustered junctions): the car ahead may be further on
+                    if let Some((front, t)) = self.tail_beyond(i, next, tl, l.len + nl.len) {
+                        let tc = &self.cars[t];
+                        follow_r(&mut a, &mut lim, front, tc.len, tc.v, rb[i].min(rb[t]));
+                    }
                 }
                 if let Some((rear, ov)) = self.obst_ahead(next, tl, -1e3) {
                     follow(&mut a, &mut lim, l.len + rear, ov);
@@ -1417,7 +1771,7 @@ impl World {
                     }
                     let oc = &self.cars[o.car as usize];
                     if oc.prev == link && oc.link != next && oc.flags & F_PLAYER == 0 {
-                        follow(&mut a, &mut lim, l.len + oc.s - oc.len, oc.v);
+                        follow_r(&mut a, &mut lim, l.len + oc.s, oc.len, oc.v, rb[i].min(rb[o.car as usize]));
                     }
                 }
             }
@@ -1466,6 +1820,22 @@ impl World {
             if let Some(gap) = self.control_gap(i, dt) {
                 a = a.min(idm::accel(&p, v, v0, gap, v));
             }
+            // physical look-ahead: any body ahead in our path, whatever link it is on (roads drawn
+            // over each other, auxiliary lanes, clustered junctions). Not needed by a car that
+            // stays stopped anyway or whose lane leader is close ahead.
+            let covered = (v < 0.3 && a <= 0.0)
+                || (li != NONE && {
+                    let ld = &self.cars[li as usize];
+                    ld.s - ld.len - s < 12.0 && self.rbox[i] >= 0.98
+                });
+            if let Some((gap, lv)) = if covered { None } else { self.body_ahead(i) } {
+                a = a.min(idm::accel(&p, v, v0, gap, v - lv));
+                lim = lim.min(s + (gap - 0.3).max(0.0));
+            }
+            if let Some(gap) = self.crossing_gap(i) {
+                a = a.min(idm::accel(&p, v, v0, gap + p.s0, v));
+                lim = lim.min(self.cars[i].s + gap.max(0.0) + 0.3);
+            }
             if self.cars[i].bus != NONE {
                 if let Some(gap) = self.bus_stop_gap(i) {
                     // IDM keeps s0 to an obstacle: aim s0 beyond the stop point to stop at it
@@ -1476,6 +1846,141 @@ impl World {
             self.acc[i] = a;
             self.lim[i] = lim;
         }
+    }
+
+    /// false for a car on a bridge / in a tunnel against one on an unconnected street (drawn on
+    /// different levels; the graph's heights do not always tell them apart)
+    fn same_level(&self, c: &Car, o: &Car) -> bool {
+        if c.link == NONE || o.link == NONE {
+            return true;
+        }
+        let (l1, l2) = (&self.g.links[c.link as usize], &self.g.links[o.link as usize]);
+        (l1.flags ^ l2.flags) & (FLAG_BRIDGE | FLAG_TUNNEL) == 0 || c.link == o.link || c.next == o.link || o.next == c.link || c.prev == o.link || o.prev == c.link
+    }
+
+    /// is any car body centre (last rendered poses) within `r` (< 12 m) of (x, y)
+    fn body_near(&self, x: f64, y: f64, r: f64) -> bool {
+        for dx in -1..=1 {
+            let (k0, k1) = (pcell(x, y, dx, -1), pcell(x, y, dx, 1));
+            let a = self.pgrid.partition_point(|e| e.0 < k0);
+            for &(k, j) in &self.pgrid[a..] {
+                if k > k1 {
+                    break;
+                }
+                let o = &self.cars[j as usize];
+                if (o.pose.x - x).hypot(o.pose.y - y) < r {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Nearest body in front of car `i` (from the last rendered poses) that its own body would
+    /// run into: same general direction (< 60°), laterally overlapping, not on a different level.
+    /// (gap bumper to bumper along our heading, its speed along our heading)
+    fn body_ahead(&self, i: usize) -> Option<(f32, f32)> {
+        let c = &self.cars[i];
+        if !c.posed {
+            return None;
+        }
+        let (px, py, h) = (c.pose.x, c.pose.y, c.pose.h);
+        let (hx, hy) = (h.cos() as f64, h.sin() as f64);
+        let hw = HALF_W[c.kind as usize];
+        let mut best: Option<(f32, f32)> = None;
+        for dx in -1..=1 {
+            // (cells (dx, -1..=1) have consecutive keys)
+            let (k0, k1) = (pcell(px, py, dx, -1), pcell(px, py, dx, 1));
+            let a = self.pgrid.partition_point(|e| e.0 < k0);
+            {
+                for &(k, j) in &self.pgrid[a..] {
+                    if k > k1 {
+                        break;
+                    }
+                    let j = j as usize;
+                    if j == i {
+                        continue;
+                    }
+                    let o = &self.cars[j];
+                    if (o.pose.z - c.pose.z).abs() > 2.5 || !self.same_level(c, o) {
+                        continue;
+                    }
+                    let dh = wrap_pi(o.pose.h - h);
+                    if dh.abs() > 1.05 {
+                        continue;
+                    }
+                    let (ex, ey) = (o.pose.x - px, o.pose.y - py);
+                    let f = (ex * hx + ey * hy) as f32;
+                    let lat = (-ex * hy + ey * hx) as f32;
+                    // the other body's half extent across our heading
+                    let ohw = HALF_W[o.kind as usize] * dh.cos().abs() + o.len * 0.5 * dh.sin().abs();
+                    if f <= 0.0 || lat.abs() > hw + ohw - 0.15 {
+                        continue;
+                    }
+                    // mutual: only the one further behind yields
+                    let (ohx, ohy) = (o.pose.h.cos() as f64, o.pose.h.sin() as f64);
+                    let f2 = (-(ex * ohx + ey * ohy)) as f32;
+                    if f2 > 0.0 && (f2 > f || (f2 == f && j > i)) {
+                        continue;
+                    }
+                    let ohl = o.len * 0.5 * dh.cos().abs() + HALF_W[o.kind as usize] * dh.sin().abs();
+                    let gap = f - c.len * 0.5 - ohl;
+                    if gap > 25.0 {
+                        continue;
+                    }
+                    if best.map_or(true, |b| gap < b.0) {
+                        best = Some((gap, o.v * dh.cos()));
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Last car in the lane the car would take beyond the short link `link` (its end is `off`
+    /// ahead of the car's link start): (its front in the car's link coordinates, index).
+    /// Follows the car's pre-chosen exit (next2) or the only way on, up to 3 links / 60 m.
+    fn tail_beyond(&self, i: usize, link: u32, lane: u8, off: f32) -> Option<(f32, usize)> {
+        let (mut cur, mut ln, mut off) = (link, lane, off);
+        let s0 = self.cars[i].s;
+        for k in 0..3 {
+            if off - s0 > 80.0 {
+                return None;
+            }
+            let cl = &self.g.links[cur as usize];
+            let nx = if k == 0 && self.cars[i].next2 != NONE {
+                self.cars[i].next2
+            } else {
+                let node = &self.g.nodes[cl.to as usize];
+                let mut only = NONE;
+                for &o in &node.outs {
+                    let ol = &self.g.links[o as usize];
+                    if !ol.alive || ol.edge == cl.edge {
+                        continue;
+                    }
+                    if only != NONE {
+                        return None; // a choice we cannot predict
+                    }
+                    only = o;
+                }
+                only
+            };
+            if nx == NONE {
+                return None;
+            }
+            let nl = &self.g.links[nx as usize];
+            if !nl.alive || nl.from != cl.to {
+                return None;
+            }
+            let turn = classify_turn(cl.bearing_end, nl.bearing_start);
+            ln = target_lane(ln, nl.lanes, turn);
+            if let Some(t) = self.lane_tail(nx, ln) {
+                return Some((off + self.cars[t].s, t));
+            }
+            off += nl.len;
+            cur = nx;
+        }
+        None
     }
 
     /// Junction control: gap to the stop line if the car must stop there.
@@ -1816,17 +2321,23 @@ impl World {
             let pl = &self.g.links[pre as usize];
             if pl.alive && pl.from == self.g.links[link as usize].to {
                 let t = classify_turn(self.g.links[link as usize].bearing_end, pl.bearing_start);
+                let short = pl.len < SHORT_LINK;
                 let c = &mut self.cars[i];
                 c.next = pre;
                 c.turn = t;
                 c.ngen = pl.gen;
+                if short {
+                    let (n2, _) = self.pick_next(pre, dest);
+                    self.cars[i].next2 = n2;
+                }
                 return;
             }
         }
         let (nx, t) = self.pick_next(link, dest);
         // entering a split junction: choose the way out now too, so the car only goes in
-        // when it can come out (see can_enter)
-        if nx != NONE && self.internal_link(nx) {
+        // when it can come out (see can_enter); through short links (clustered junctions)
+        // the way on is known too, so the car ahead beyond them is followed (tail_beyond)
+        if nx != NONE && (self.internal_link(nx) || self.g.links[nx as usize].len < SHORT_LINK) {
             let (n2, _) = self.pick_next(nx, dest);
             self.cars[i].next2 = n2;
         }
@@ -1949,6 +2460,11 @@ impl World {
         let total = *self.cum_w.last().unwrap();
         let mut tries = 0;
         let mut made = 0;
+        // bodies placed in this call (not yet in the sorted lane lists): (link, lane, rear, front)
+        let mut placed: Vec<(u32, u8, f32, f32)> = Vec::new();
+        // no spawn onto a body already there (lanes of another link drawn over the same ground:
+        // converging / auxiliary lanes); pgrid holds the bodies of the last rendered poses
+        let mut near_new: Vec<[f64; 2]> = Vec::new();
         while made < k && tries < k * 3 {
             tries += 1;
             let r = self.rng.f32() * total;
@@ -1979,6 +2495,13 @@ impl World {
             if self.obst_block(link, lane, s - len - 10.0, s + 10.0) || self.ghost_near(link, lane, s - len - 6.0, s + 6.0, usize::MAX) {
                 continue;
             }
+            if placed.iter().any(|&(pl, pn, r0, f0)| pl == link && pn == lane && s + 8.0 > r0 && s - len - 8.0 < f0) {
+                continue;
+            }
+            let (cx, cy, _) = self.g.link_xyz(link, s - len * 0.5, self.g.lane_offset(l, lane));
+            if near_new.iter().any(|p| (p[0] - cx).hypot(p[1] - cy) < 7.0) || self.body_near(cx, cy, 7.0) {
+                continue;
+            }
             let (ld, fl) = self.neighbours(link, lane, s, usize::MAX);
             let mut v = l.speed * self.rng.range(0.6, 1.0);
             if let Some(x) = ld {
@@ -1999,6 +2522,8 @@ impl World {
                 v = v.min(4.0);
             }
             self.spawn_car(link, lane, s, v.max(0.0), kind);
+            placed.push((link, lane, s - len, s));
+            near_new.push([cx, cy]);
             made += 1;
         }
     }
@@ -2186,6 +2711,9 @@ impl World {
         let Some(slot) = self.buses.iter().position(|b| b.as_ref().map_or(false, |b| b.trip == old && b.state == BusState::OutOfService)) else { return false };
         let Some(ci) = self.cars.iter().position(|c| c.bus == slot as u32 && c.flags & F_DEAD == 0) else { return false };
         let Some(p) = self.bus_pats.get(&pat) else { return false };
+        if !self.g.links[self.cars[ci].link as usize].alive {
+            return false; // (its tile was unloaded: the bus is about to be evicted)
+        }
         let (x, y, _, _) = self.car_point(ci, 0.0, 0.0);
         let (sd, d) = p.project(x, y, 0.0, 400.0);
         if d > 60.0 {
@@ -2256,6 +2784,9 @@ impl World {
     pub fn bus_pullin(&mut self, trip: u32, gx: f64, gy: f64) -> bool {
         let Some(slot) = self.buses.iter().position(|b| b.as_ref().map_or(false, |b| b.trip == trip && b.state == BusState::OutOfService)) else { return false };
         let Some(ci) = self.cars.iter().position(|c| c.bus == slot as u32 && c.flags & F_DEAD == 0) else { return false };
+        if !self.g.links[self.cars[ci].link as usize].alive {
+            return false;
+        }
         let mut near = std::mem::take(&mut self.tmp);
         self.g.edges_near(gx, gy, 150.0, &mut near);
         let mut best: Option<(f32, u32)> = None;

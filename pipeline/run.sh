@@ -36,10 +36,15 @@ mkdir -p raw/massing raw/overture
 # 4. Region, OSM extraction, tile pyramid, transit, landmarks
 uv run python -m tpipe.region
 uv run python -m tpipe.osm_extract
-uv run python -m tpipe.osm_tiles
+uv run python -m tpipe.roadnet --workers 2   # road/rail network model (docs/ROADS.md) -> tiles + graph
+uv run python -m tpipe.osm_tiles --workers 2
 uv run python -m tpipe.graph
 uv run python -m tpipe.congestion
 uv run python -m tpipe.transit
+uv run python -m tpipe.ferries  # water life: ferry routes, marinas, sailing loops -> data/water/ferries.json
+# vector ground at level 0 (land cover, water, shores, open cuts / portals; docs/SPEC.md)
+osmium tags-filter work/combined.osm.pbf nwr/leisure=pitch,track nwr/man_made=pier,breakwater,groyne,quay w/cutting w/embankment w/natural=cliff -o work/ground_extra.osm.pbf --overwrite
+uv run python -m tpipe.ground --workers 2
 uv run python -m tpipe.landmarks
 
 # 5. Air traffic (needs raw/air/sd: vradarserver standing-data, see docs/AIR.md)

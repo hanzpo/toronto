@@ -22,7 +22,7 @@ import type { MeshBuf, TerrainSampler } from './meshing';
 
 export const G_WATER = 1;
 export const BANK_BASE = 30; // 30 dockwall · 31 revetment · 32 beach · 33 natural bank
-export const PORTAL_WALL = 34, PORTAL_FLOOR = 35, PORTAL_MOUTH = 36, PORTAL_HEAD = 37, PORTAL_RAIL = 38;
+export const PORTAL_WALL = 34, PORTAL_FLOOR = 35, PORTAL_MOUTH = 36, PORTAL_HEAD = 37, PORTAL_RAIL = 38, EMB_GRASS = 39;
 const FRAMED = new Set([19, 24, 25, 26]);
 const LAKE_LEVELS = [-0.3, 99.2];
 
@@ -255,7 +255,7 @@ const BANK: Record<number, { slope: number; cap: number; below: number }> = {
   4: { slope: 1.0, cap: 3.0, below: 0.8 }, // natural earth bank
 };
 
-export function buildGround(a: Record<string, TypedArray>, terr: TerrainSampler): MeshBuf | null {
+export function buildGround(a: Record<string, TypedArray>, terr: TerrainSampler, raster?: Uint8Array): MeshBuf | null {
   const off = a.gp_off as Uint32Array | undefined;
   if (!off || off.length < 2) return null;
   const S = terr.S, G = terr.G, c = terr.cell, H = terr.h;
@@ -346,6 +346,10 @@ export function buildGround(a: Record<string, TypedArray>, terr: TerrainSampler)
   banks(b, a, terr, S);
   const cuts = cutData(a, S);
   if (cuts) portals(b, cuts, terr);
+  if (raster) {
+    embankments(b, a.r_off as Uint32Array, a.r_xyz as Float32Array, a.r_flags as Uint8Array, a.r_class as Uint8Array, a.r_width as Float32Array, terr, raster, false);
+    embankments(b, a.l_off as Uint32Array, a.l_xyz as Float32Array, a.l_flags as Uint8Array, a.l_class as Uint8Array, null, terr, raster, true);
+  }
   skirts(b, terr);
   return b.finish();
 }
@@ -489,7 +493,8 @@ function portals(b: GB, c: CutBuf, terr: TerrainSampler) {
     const g = c.tkind[r] === 3 ? 0.7475 : 0.7175;
     for (const side of [-g, g]) {
       let prev: number[] | null = null;
-      for (let v = c.toff[r]; v < c.toff[r + 1]; v++) {
+      const v0 = c.toff[r], v1 = c.toff[r + 1] - 1;
+      for (let v = v0; v <= v1; v = v < v1 && v + 3 > v1 ? v1 : v + 3) {
         const x = c.txyz[3 * v], y = c.txyz[3 * v + 1], z = c.txyz[3 * v + 2];
         const w = Math.min(v + 1, c.toff[r + 1] - 1), u = Math.max(v - 1, c.toff[r]);
         const dx = c.txyz[3 * w] - c.txyz[3 * u], dy = c.txyz[3 * w + 1] - c.txyz[3 * u + 1], L = Math.hypot(dx, dy) || 1;
@@ -501,8 +506,12 @@ function portals(b: GB, c: CutBuf, terr: TerrainSampler) {
           b.v(cx + nx * 0.036, cy + ny * 0.036, z, 0, 1, 0, PORTAL_RAIL, 0, 0, 0),
           b.v(cx + nx * 0.036, cy + ny * 0.036, z - BALLAST, 0, 1, 0, PORTAL_RAIL, 0, 0, 0),
         ];
-        if (prev) for (let k = 0; k < 3; k++) { b.t(prev[k], ids[k + 1], ids[k]); b.t(prev[k], prev[k + 1], ids[k + 1]); b.t(prev[k], ids[k], ids[k + 1]); b.t(prev[k], ids[k + 1], prev[k + 1]); }
+        if (prev) for (let k = 0; k < 3; k++) {
+          // outward-facing sides + top (strip runs along the track; both sides are seen)
+          b.t(prev[k], ids[k], ids[k + 1]); b.t(prev[k], ids[k + 1], prev[k + 1]);
+        }
         prev = ids;
+        if (v === v1) break;
       }
     }
   }
@@ -586,4 +595,115 @@ function skirts(b: GB, terr: TerrainSampler) {
       pt = t; pb = bo;
     }
   }
+}
+
+// ------------------------------------------------------------------ embankments
+
+/** fill under a deck from this clearance up (m); beyond EMB_MAX the bridge stands on an abutment */
+const EMB_MIN = 0.5, EMB_MAX = 5.5;
+const EMB_TOP = 0.35; // fill top below the deck surface
+
+/**
+ * Earth embankments under low bridge decks: where a bridge's deck (the z the
+ * road / rail mesher draws it at) is less than EMB_MAX above the ground, the
+ * approach is a grass-sloped fill (1:2 roads, 1:1.5 rail) up to the deck; the
+ * fill ends at a concrete abutment where the span starts. Never over water.
+ */
+function embankments(b: GB, off: Uint32Array | undefined, xyz: Float32Array | undefined, flags: Uint8Array | undefined,
+  cls: Uint8Array | undefined, width: Float32Array | null, terr: TerrainSampler, raster: Uint8Array, rail: boolean) {
+  if (!off || !xyz || !flags || off.length < 2) return;
+  const S = terr.S;
+  const water = (x: number, y: number) => {
+    const i = Math.min(255, Math.max(0, Math.floor((x / S) * 256))), j = Math.min(255, Math.max(0, Math.floor((y / S) * 256)));
+    return raster[j * 256 + i] === G_WATER;
+  };
+  for (let w = 0; w + 1 < off.length; w++) {
+    if (!(flags[w] & 2) || (flags[w] & 4)) continue;
+    const c = cls ? cls[w] : 0;
+    if (!rail && c > 5) continue; // footbridges / service: no fill
+    if (rail && c > 3) continue;
+    const hw = rail ? 2.6 : Math.max(3, (width ? width[w] : 8) / 2 + 0.6);
+    const slope = rail ? 1.5 : 2.0;
+    // densified samples inside the tile
+    const P: number[] = [];
+    for (let v = off[w]; v + 1 < off[w + 1]; v++) {
+      const x0 = xyz[3 * v], y0 = xyz[3 * v + 1], z0 = xyz[3 * v + 2], x1 = xyz[3 * v + 3], y1 = xyz[3 * v + 4], z1 = xyz[3 * v + 5];
+      const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 6));
+      for (let k = v === off[w] ? 0 : 1; k <= n; k++) {
+        const t = k / n;
+        P.push(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, z0 + (z1 - z0) * t);
+      }
+    }
+    const n = P.length / 3;
+    if (n < 2) continue;
+    let prev: number[] | null = null;
+    let prevOn = false;
+    for (let k = 0; k < n; k++) {
+      const x = P[3 * k], y = P[3 * k + 1], z = P[3 * k + 2];
+      const inside = x >= -1 && y >= -1 && x <= S + 1 && y <= S + 1;
+      const kk = Math.min(k + 1, n - 1), kp = Math.max(k - 1, 0);
+      let tx = P[3 * kk] - P[3 * kp], ty = P[3 * kk + 1] - P[3 * kp + 1];
+      const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl;
+      const nx = -ty, ny = tx;
+      const g = terr.at(x, y);
+      const top = z - EMB_TOP;
+      const clr = top - g;
+      const on = inside && clr > EMB_MIN - EMB_TOP && clr < EMB_MAX && !water(x, y);
+      if (!on) {
+        // abutment where a fill meets the open span
+        if (prevOn && prev && inside && clr >= EMB_MAX) abut(b, prev);
+        prev = null; prevOn = false;
+        continue;
+      }
+      // cross-section: toeL, topL, topR, toeR (toe where the 1:slope face meets the ground, 2 iterations)
+      const ids: number[] = [];
+      const pts: [number, number, number][] = [];
+      for (const sd of [1, -1]) {
+        let run = hw + clr * slope, gz = g;
+        for (let it = 0; it < 2; it++) {
+          gz = terr.at(x + nx * sd * run, y + ny * sd * run);
+          run = hw + Math.max(0, top - gz) * slope;
+        }
+        const tox = x + nx * sd * run, toy = y + ny * sd * run;
+        const toe: [number, number, number] = [tox, toy, terr.at(tox, toy) - 0.15];
+        const tp: [number, number, number] = [x + nx * sd * hw, y + ny * sd * hw, top];
+        if (sd === 1) { pts.push(toe, tp); } else { pts.push(tp, toe); }
+      }
+      // normals: left face leans +n, right face -n
+      const L = Math.hypot(1, slope);
+      const nh = 1 / L, nv = slope / L;
+      ids.push(b.v(pts[0][0], pts[0][1], pts[0][2], nx * nh, nv, -ny * nh, EMB_GRASS, 0, 0, 0));
+      ids.push(b.v(pts[1][0], pts[1][1], pts[1][2], nx * nh, nv, -ny * nh, EMB_GRASS, 0, 0, 0));
+      ids.push(b.v(pts[2][0], pts[2][1], pts[2][2], -nx * nh, nv, ny * nh, EMB_GRASS, 0, 0, 0));
+      ids.push(b.v(pts[3][0], pts[3][1], pts[3][2], -nx * nh, nv, ny * nh, EMB_GRASS, 0, 0, 0));
+      ids.push(b.v(pts[1][0], pts[1][1], pts[1][2], 0, 1, 0, rail ? PORTAL_FLOOR : EMB_GRASS, 0, 0, 0));
+      ids.push(b.v(pts[2][0], pts[2][1], pts[2][2], 0, 1, 0, rail ? PORTAL_FLOOR : EMB_GRASS, 0, 0, 0));
+      if (prev) {
+        // travel direction t, left = +n: faces toeL→topL (left slope), topL→topR (top), topR→toeR (right slope)
+        const quads: [number, number][] = [[0, 1], [4, 5], [2, 3]];
+        for (const [p0, p1] of quads) {
+          b.t(prev[p0], ids[p1], ids[p0]);
+          b.t(prev[p0], prev[p1], ids[p1]);
+        }
+      } else if (k > 0) {
+        // fill starts after an open span: abutment facing back along the road
+        abut(b, ids, true);
+      }
+      prev = ids; prevOn = true;
+    }
+  }
+}
+
+/** vertical concrete end face of a fill (cross-section ids: toeL, topL, topR, toeR, ...) */
+function abut(b: GB, ids: number[], back = false) {
+  const P = (i: number) => [b.pos[3 * i], -b.pos[3 * i + 2], b.pos[3 * i + 1]]; // E, N, elevation
+  const [tl, ptl, ptr, tr] = [P(ids[0]), P(ids[1]), P(ids[2]), P(ids[3])];
+  const lo = Math.min(tl[2], tr[2]) - 0.3;
+  const q = [
+    b.v(ptl[0], ptl[1], lo, 0, 0, 0, PORTAL_HEAD, 0, 0, 0), b.v(ptl[0], ptl[1], ptl[2] + 0.3, 0, 0, 0, PORTAL_HEAD, 0, 0, 0),
+    b.v(ptr[0], ptr[1], ptr[2] + 0.3, 0, 0, 0, PORTAL_HEAD, 0, 0, 0), b.v(ptr[0], ptr[1], lo, 0, 0, 0, PORTAL_HEAD, 0, 0, 0),
+  ];
+  // both windings (cheap, and the face is seen from the span side)
+  b.t(q[0], q[1], q[2]); b.t(q[0], q[2], q[3]); b.t(q[0], q[2], q[1]); b.t(q[0], q[3], q[2]);
+  void back; void tl; void tr;
 }

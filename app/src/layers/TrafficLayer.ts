@@ -22,7 +22,7 @@ import { clock } from '../state/clock';
 import { useApp } from '../state/store';
 import {
   CAR_FLAG, CAR_STRIDE, H, HEADER_BYTES, HF, HF_COUNT, MAX_CARS, MAX_PEDS, OB_FLAG, OB_STRIDE, PED_STRIDE, RAIL_OFFSET, RAIL_PATH_OFFSET, RAIL_RADIUS, RAIL_STRIDE, BUS_OFFSET, BUS_PATH_OFFSET, BUS_STRIDE, SAB_BYTES, SIG_OFFSET, SIG_STRIDE,
-  SLOT_BYTES, SLOT_HEADER, type FromWorker, type TickMsg, type ToWorker,
+  OVERLAP_CAUSES, SLOT_BYTES, SLOT_HEADER, type FromWorker, type TickMsg, type ToWorker,
 } from '../sim/protocol';
 import { CAR_LENGTH, carLowGeometries, carPalette, carVariantsForKind, pedestrianGeometries, pedestrianLowGeometry, shirtPalette, type CarVariant } from './traffic/models';
 import { CongestionOverlay } from './traffic/congestion';
@@ -344,6 +344,22 @@ export class TrafficLayer implements Layer {
         break;
       case 'railFeeds': this.railFeeds = m.agencies; this.railFeedsProfile = m.profile; break;
       case 'railPlayer': this.railWaiters.splice(0).forEach((f) => f(m.ok)); break;
+      case 'crossings': {
+        // drive the crossing lights / gates (CrossingsLayer: window.__street.setCrossing)
+        const w = window as unknown as { __street?: { setCrossing?: (id: number, s: 0 | 1 | 2) => void }; __crossings?: { setCrossing?: (id: number, s: 0 | 1 | 2) => void } };
+        const set = w.__street?.setCrossing ?? w.__crossings?.setCrossing;
+        for (let i = 0; i + 1 < m.data.length; i += 2) {
+          this.crossingState.set(m.data[i], m.data[i + 1]);
+          set?.(m.data[i], m.data[i + 1] as 0 | 1 | 2);
+        }
+        break;
+      }
+      case 'overlaps': {
+        // QA: sim-side overlapping car bodies by cause (__qa.carOverlapCauses)
+        const qa = (window as unknown as { __qa?: Record<string, unknown> }).__qa;
+        if (qa) qa.carOverlapCauses = Object.fromEntries(OVERLAP_CAUSES.map((k, i) => [k, m.counts[i] ?? 0]));
+        break;
+      }
       case 'majorsGeom': this.congestion?.setGeometry(m); break;
       case 'majorsRatio': this.congestion?.setRatios(m.ratio); break;
       case 'plans':
@@ -363,6 +379,8 @@ export class TrafficLayer implements Layer {
   /** service profile the rail agents follow (set by the TransitLayer) */
   railProfile: 'weekday' | 'saturday' | 'sunday' | null = null;
   railEnabled = true;
+  /** level crossing states from the rail sim (osm node id -> 0 idle, 1 warning, 2 gates down) */
+  crossingState = new Map<number, number>();
   private camDir = new THREE.Vector3();
   private railCmd: { cmd: number; emergency: boolean } | null = null;
   private railWaiters: ((ok: boolean) => void)[] = [];
@@ -772,6 +790,8 @@ export class TrafficLayer implements Layer {
       qa.carsTarget = Math.round(this.hf[HF.TARGET_CARS]); qa.carsActive = this.hf[HF.CARS];
       qa.pedsTarget = Math.round(this.hf[HF.TARGET_PEDS]); qa.pedsActive = this.hf[HF.PEDS];
       qa.carsStoppedInBox = this.hf[HF.BOX_STOPPED];
+      const P = HF.PHASES;
+      qa.simPhasesMs = { prep: this.hf[P], follow: this.hf[P + 1], laneAdvance: this.hf[P + 2], spawn: this.hf[P + 3], peds: this.hf[P + 4], output: this.hf[HF.OUT_MS], rail: this.hf[HF.RAIL_MS], total: this.hf[HF.STEP_AVG] };
     }
     this.simRadius = radius;
     if (this.busQueue.spawn.length || this.busQueue.retrip.length || this.busQueue.patterns.length || this.busQueue.pullout.length || this.busQueue.pullin.length) {

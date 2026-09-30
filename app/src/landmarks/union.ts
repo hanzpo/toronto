@@ -31,37 +31,83 @@ import type { BuildCtx } from './types'
 export const UNION_RAIL = 6.5
 /** platform top above rail */
 const PLAT_H = 0.9
-/** track centrelines (local y) at x = −150 and x = +150, north → south (OSM) */
-const TRACKS: [number, number][] = [
-  [17.0, 16.4], [12.4, 12.6], [4.4, 4.4], [-2.9, -3.5], [-10.4, -11.3], [-19.0, -19.5],
-  [-26.0, -27.4], [-34.5, -35.3], [-41.7, -42.6], [-50.4, -51.0], [-59.0, -59.5],
+/** track centrelines (local y), north → south, sampled every 15 m from x = −195 to 225 (OSM rail ways) */
+const TX0 = -195, TDX = 15
+const TRACK_TAB: number[][] = [
+  [16.2, 10.38, 3.38, -3.0, -10.32, -18.86, -25.83, -34.39, -41.63, -50.17, -58.66],
+  [17.12, 11.8, 4.01, -2.92, -10.36, -18.9, -25.83, -34.4, -41.65, -50.28, -58.83],
+  [17.05, 12.37, 4.37, -2.87, -10.4, -18.93, -25.87, -34.43, -41.68, -50.37, -58.96],
+  [17.0, 12.4, 4.38, -2.9, -10.42, -18.96, -25.96, -34.48, -41.7, -50.41, -58.98],
+  [16.95, 12.44, 4.38, -2.93, -10.44, -18.98, -26.06, -34.52, -41.73, -50.45, -59.01],
+  [16.9, 12.47, 4.38, -2.96, -10.46, -19.01, -26.16, -34.57, -41.75, -50.48, -59.03],
+  [16.85, 12.51, 4.39, -2.99, -10.49, -19.04, -26.26, -34.62, -41.78, -50.52, -59.06],
+  [16.8, 12.52, 4.39, -3.02, -10.51, -19.06, -26.35, -34.67, -41.8, -50.56, -59.08],
+  [16.75, 12.52, 4.39, -3.05, -10.53, -19.09, -26.45, -34.72, -41.83, -50.6, -59.11],
+  [16.69, 12.53, 4.4, -3.08, -10.55, -19.12, -26.55, -34.77, -41.86, -50.63, -59.13],
+  [16.64, 12.53, 4.4, -3.11, -10.57, -19.14, -26.64, -34.81, -41.88, -50.67, -59.16],
+  [16.59, 12.53, 4.4, -3.15, -10.6, -19.17, -26.74, -34.86, -41.91, -50.71, -59.18],
+  [16.54, 12.53, 4.41, -3.18, -10.62, -19.2, -26.84, -34.91, -41.93, -50.74, -59.21],
+  [16.49, 12.53, 4.41, -3.21, -10.64, -19.22, -26.94, -34.96, -41.96, -50.78, -59.23],
+  [16.46, 12.53, 4.41, -3.24, -10.68, -19.25, -27.01, -35.0, -42.0, -50.81, -59.26],
+  [16.45, 12.54, 4.42, -3.26, -10.75, -19.28, -27.05, -35.04, -42.07, -50.83, -59.28],
+  [16.44, 12.54, 4.42, -3.29, -10.81, -19.3, -27.09, -35.07, -42.14, -50.85, -59.31],
+  [16.43, 12.54, 4.42, -3.32, -10.88, -19.33, -27.13, -35.1, -42.21, -50.86, -59.33],
+  [16.42, 12.54, 4.43, -3.35, -10.94, -19.36, -27.17, -35.14, -42.28, -50.88, -59.36],
+  [16.41, 12.55, 4.43, -3.37, -11.01, -19.39, -27.21, -35.17, -42.35, -50.9, -59.38],
+  [16.4, 12.55, 4.43, -3.4, -11.08, -19.41, -27.25, -35.21, -42.41, -50.92, -59.41],
+  [16.39, 12.55, 4.44, -3.43, -11.14, -19.44, -27.29, -35.24, -42.48, -50.93, -59.44],
+  [16.38, 12.55, 4.44, -3.46, -11.21, -19.47, -27.33, -35.28, -42.55, -50.95, -59.46],
+  [16.37, 12.56, 4.45, -3.48, -11.27, -19.49, -27.37, -35.31, -42.62, -50.97, -59.49],
+  [16.36, 12.56, 4.45, -3.51, -11.34, -19.52, -27.42, -35.35, -42.69, -50.99, -59.51],
+  [14.75, 12.07, 4.45, -3.54, -11.4, -19.55, -27.46, -35.38, -42.75, -51.01, -59.54],
+  [12.26, 12.26, 4.32, -3.68, -11.33, -19.6, -27.5, -35.45, -42.72, -51.11, -59.56],
+  [9.89, 9.89, 3.58, -4.29, -11.38, -19.8, -27.54, -35.55, -42.62, -51.29, -59.58],
+  [8.0, 8.0, 2.76, -4.9, -11.43, -20.0, -27.58, -35.63, -42.6, -51.43, -59.6],
 ]
+const NT = 11
+/** the UP Express track west of York (continuation of the north track), [x, y] */
+const UP_TRACK: V2[] = [[-280, 9.5], [-262, 11.0], [-240, 12.7], [-220, 14.3], [-200, 15.8], [-190, 16.6], [-180, 17.12]]
 const EDGE = 1.65
 const DECK_X0 = -169, DECK_X1 = 187, DECK_Y0 = -78, DECK_Y1 = 34
-const PLAT_X0 = -190, PLAT_X1 = 215
+const PLAT_X0 = -167, PLAT_X1 = 185
 const SHED_X0 = -166, SHED_X1 = 184
 const ATRIUM = { x0: -38, x1: 52, y0: -38, y1: 8 }
+/** Bush shed eave above rail (a GO bilevel is 4.8 m tall) */
+const EAVE = 5.9
 
 export const trackY = (i: number, x: number) => {
-  const [a, b] = TRACKS[i]
-  return a + ((b - a) * (x + 150)) / 300
+  const f = Math.max(0, Math.min(TRACK_TAB.length - 1.0001, (x - TX0) / TDX))
+  const k = Math.floor(f), u = f - k
+  return TRACK_TAB[k][i] * (1 - u) + TRACK_TAB[k + 1][i] * u
 }
 
-/** Island platforms: lateral range between adjacent tracks (for StationsLayer / QA). */
+const upY = (x: number) => {
+  for (let i = 0; i < UP_TRACK.length - 1; i++) {
+    const [xa, ya] = UP_TRACK[i], [xb, yb] = UP_TRACK[i + 1]
+    if (x <= xb) return ya + ((yb - ya) * (x - xa)) / (xb - xa)
+  }
+  return UP_TRACK[UP_TRACK.length - 1][1]
+}
+
+/** Platforms: lateral range between adjacent tracks (for StationsLayer / QA). */
 export function unionPlatforms(): { y0: (x: number) => number; y1: (x: number) => number; x0: number; x1: number; name: string }[] {
   const out = []
-  // track 3 (north side platform)
-  out.push({ y0: (x: number) => trackY(0, x) + EDGE, y1: (x: number) => trackY(0, x) + EDGE + 3.8, x0: SHED_X0, x1: 170, name: '3' })
+  // track 3 (north side platform), ends where the north tracks converge
+  out.push({ y0: (x: number) => trackY(0, x) + EDGE, y1: (x: number) => trackY(0, x) + EDGE + 3.8, x0: PLAT_X0, x1: 168, name: '3' })
   let n = 4
-  for (let i = 1; i < TRACKS.length - 1; i++) {
+  for (let i = 1; i < NT - 1; i++) {
     const a = i, b = i + 1
-    out.push({ y0: (x: number) => trackY(b, x) + EDGE, y1: (x: number) => trackY(a, x) - EDGE, x0: PLAT_X0, x1: PLAT_X1, name: `${n}–${n + 1}` })
+    // only where the two tracks are far enough apart for a platform
+    let x0 = PLAT_X0, x1 = PLAT_X1
+    while (x0 < x1 && trackY(a, x0) - trackY(b, x0) < 2 * EDGE + 2.5) x0 += 5
+    while (x1 > x0 && trackY(a, x1) - trackY(b, x1) < 2 * EDGE + 2.5) x1 -= 5
+    out.push({ y0: (x: number) => trackY(b, x) + EDGE, y1: (x: number) => trackY(a, x) - EDGE, x0, x1, name: `${n}–${n + 1}` })
     n += 2
   }
   return out
 }
 
-function strip(y0: (x: number) => number, y1: (x: number) => number, x0: number, x1: number, step = 30): V2[] {
+function strip(y0: (x: number) => number, y1: (x: number) => number, x0: number, x1: number, step = 15): V2[] {
   const xs: number[] = []
   for (let x = x0; x < x1; x += step) xs.push(x)
   xs.push(x1)
@@ -78,14 +124,15 @@ export function buildUnionStation(ctx: BuildCtx) {
 
   // ---------------------------------------------------------------- track deck + concourses
   const deck = rect(DECK_X1 - DECK_X0, DECK_Y1 - DECK_Y0, (DECK_X0 + DECK_X1) / 2, (DECK_Y0 + DECK_Y1) / 2)
-  P.add('concrete', prism(deck, -2, R - 0.35))
+  // the terrain here is already raised to rail level (embankment): keep the deck just above it
+  P.add('concrete', prism(deck, -2, R + 0.04))
   // glazed York / Bay concourse fronts on the street underpasses
   for (const [x, s] of [[DECK_X0 - 0.15, -1], [DECK_X1 + 0.15, 1]] as [number, number][]) {
     P.add('glassGrey', box(0.3, 4.6, 70, x, 2.5, -26))
     P.add('metalDark', box(0.6, 0.5, 72, x + s * 0.2, 5.0, -26))
   }
-  // UP Express deck west of York St
-  P.add('concrete', prism(rect(92, 16, -215, 17), -2, R - 0.35))
+  // UP Express deck west of York St (follows the UP track)
+  P.add('concrete', prism(ccw(strip((x) => upY(x) - 3.5, (x) => upY(x) + 8.5, -268, DECK_X0 + 1, 6)), -2, R + 0.04))
 
   // ---------------------------------------------------------------- platforms
   const plats = unionPlatforms()
@@ -100,23 +147,25 @@ export function buildUnionStation(ctx: BuildCtx) {
     }
   }
   // ballast / track bed under every track (dark), so the tracks read between the platforms
-  for (let i = 0; i < TRACKS.length; i++) {
+  for (let i = 0; i < NT; i++) {
     const t = (x: number) => trackY(i, x)
-    P.add('roofDark', prism(ccw(strip((x) => t(x) - 1.45, (x) => t(x) + 1.45, DECK_X0, DECK_X1)), R - 0.36, R - 0.3))
+    P.add('roofDark', prism(ccw(strip((x) => t(x) - 1.65, (x) => t(x) + 1.65, DECK_X0, DECK_X1)), R + 0.04, R + 0.07))
+    // running rails (standard gauge): the tile rails drape on the terrain below the deck
+    if (hi) for (const g of [-0.7175, 0.7175]) P.add('metalDark', prism(ccw(strip((x) => t(x) + g - 0.04, (x) => t(x) + g + 0.04, DECK_X0, DECK_X1)), R + 0.07, R + 0.2))
   }
   // UP Express platform 1A (side platform north of the UP track, west of York)
-  const upY = 17.2 + EDGE
-  P.add('concrete', prism(rect(72, 4.2, -226, upY + 2.1), R - 0.3, R + 1.05))
-  // UP canopy: white steel with glass roof
-  P.add('steelWhite', prism(rect(70, 5.2, -226, upY + 2.2), R + 4.6, R + 4.9))
-  for (let x = -258; x <= -194; x += 8) P.add('steelWhite', cyl(0.18, 3.6, R + 1.05, 6, 0.18, x, upY + 3.6))
+  P.add('concrete', prism(ccw(strip((x) => upY(x) + EDGE, (x) => upY(x) + EDGE + 4.2, -262, -190, 6)), R - 0.3, R + 1.05))
+  if (hi) P.add('yellow', prism(ccw(strip((x) => upY(x) + EDGE, (x) => upY(x) + EDGE + 0.6, -262, -190, 6)), R + 1.05, R + 1.07))
+  // UP canopy: white steel, glass roof, set back from the platform edge
+  P.add('steelWhite', prism(ccw(strip((x) => upY(x) + EDGE + 0.6, (x) => upY(x) + EDGE + 4.6, -260, -192, 6)), R + 4.9, R + 5.2))
+  for (let x = -256; x <= -196; x += 8) P.add('steelWhite', cyl(0.18, 3.85, R + 1.05, 6, 0.18, x, upY(x) + EDGE + 3.4))
 
   // ---------------------------------------------------------------- Bush train shed
   // Per platform: a low gabled roof on a centre row of columns; open smoke
   // slots (~1.4 m) over every track between the roofs.
   const inAtrium = (x: number) => x > ATRIUM.x0 && x < ATRIUM.x1
   const shedSeg = (x0: number, x1: number, y0: (x: number) => number, y1: (x: number) => number, ridge: number) => {
-    const eave = R + 5.4, rid = R + 5.4 + ridge
+    const eave = R + EAVE, rid = R + EAVE + ridge
     const xm = (x0 + x1) / 2
     const a0 = y0(xm), a1 = y1(xm)
     const mid = (a0 + a1) / 2
@@ -127,14 +176,14 @@ export function buildUnionStation(ctx: BuildCtx) {
     P.add('roofDark', skewSlab(s2, [rid, rid, eave, eave], 0.35, true))
     P.add('shedUnder', skewSlab(s1, [eave, eave, rid, rid], 0.35, false))
     P.add('shedUnder', skewSlab(s2, [rid, rid, eave, eave], 0.35, false))
-    P.add('concreteDark', box(x1 - x0, 0.9, 0.25, xm, eave - 0.3, a0 + 0.12))
-    P.add('concreteDark', box(x1 - x0, 0.9, 0.25, xm, eave - 0.3, a1 - 0.12))
+    P.add('concreteDark', box(x1 - x0, 0.6, 0.25, xm, eave - 0.2, a0 + 0.12))
+    P.add('concreteDark', box(x1 - x0, 0.6, 0.25, xm, eave - 0.2, a1 - 0.12))
   }
   const bays: { y0: (x: number) => number; y1: (x: number) => number }[] = []
   bays.push({ y0: (x) => trackY(0, x) + 0.7, y1: (x) => trackY(0, x) + EDGE + 4.3 }) // track 3 platform
-  for (let i = 1; i < TRACKS.length - 1; i++) bays.push({ y0: (x) => trackY(i + 1, x) + 0.7, y1: (x) => trackY(i, x) - 0.7 })
-  bays.push({ y0: (x) => trackY(TRACKS.length - 1, x) - 4.5, y1: (x) => trackY(TRACKS.length - 1, x) - 0.7 }) // south edge
-  const segL = hi ? 25 : 50
+  for (let i = 1; i < NT - 1; i++) bays.push({ y0: (x) => trackY(i + 1, x) + 0.7, y1: (x) => trackY(i, x) - 0.7 })
+  bays.push({ y0: (x) => trackY(NT - 1, x) - 4.5, y1: (x) => trackY(NT - 1, x) - 0.7 }) // south edge
+  const segL = hi ? 15 : 30
   for (const b of bays) {
     for (let x = SHED_X0; x < SHED_X1 - 0.1; x += segL) {
       const x1 = Math.min(SHED_X1, x + segL)
@@ -151,7 +200,8 @@ export function buildUnionStation(ctx: BuildCtx) {
     for (let x = SHED_X0 + 4; x < SHED_X1; x += 12) {
       const y = (b.y0(x) + b.y1(x)) / 2
       if (inAtrium(x) && y > ATRIUM.y0 && y < ATRIUM.y1) continue
-      P.add('metalDark', box(0.4, 5.4 - PLAT_H, 0.4, x, R + PLAT_H + (5.4 - PLAT_H) / 2, y))
+      if (Math.abs(x - 151) < 3) continue // Bay St streetcar tunnel below (keep in sync with tpipe/stations.py)
+      P.add('metalDark', box(0.4, EAVE - PLAT_H, 0.4, x, R + PLAT_H + (EAVE - PLAT_H) / 2, y))
     }
   }
 

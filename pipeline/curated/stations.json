@@ -767,6 +767,57 @@
    "label": "Allandale Waterfront"
   },
   {
+   "id": "allen",
+   "name": "Allen",
+   "ids": [
+    "grt:ion:P_Allen_Station"
+   ],
+   "center": [
+    43.460105,
+    -80.518843
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.459826,
+      -80.518338
+     ],
+     "bearing": 129.5,
+     "tracks": 2,
+     "platforms": [
+      {
+       "type": "island",
+       "center": [
+        43.459826,
+        -80.518338
+       ],
+       "bearing": 129.5,
+       "length": 134.5,
+       "width": 6.0,
+       "osm": 743458294
+      }
+     ],
+     "length": 134.5,
+     "layout": "island",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Allen",
+   "rank": 1
+  },
+  {
    "id": "appleby",
    "name": "Appleby",
    "ids": [
@@ -1873,6 +1924,57 @@
    "label": "Birchmount"
   },
   {
+   "id": "block-line",
+   "name": "Block Line",
+   "ids": [
+    "grt:ion:P_Block_Line_Station"
+   ],
+   "center": [
+    43.422763,
+    -80.463031
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.422808,
+      -80.463059
+     ],
+     "bearing": 140.0,
+     "tracks": 2,
+     "platforms": [
+      {
+       "type": "island",
+       "center": [
+        43.422808,
+        -80.463059
+       ],
+       "bearing": 140.0,
+       "length": 88.5,
+       "width": 6.0,
+       "osm": 690921055
+      }
+     ],
+     "length": 88.5,
+     "layout": "island",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Block Line",
+   "rank": 1
+  },
+  {
    "id": "bloomington",
    "name": "Bloomington",
    "ids": [
@@ -2346,6 +2448,57 @@
    "reviewed": true,
    "rank": 3,
    "label": "Bloor-Yonge"
+  },
+  {
+   "id": "borden",
+   "name": "Borden",
+   "ids": [
+    "grt:ion:P_Borden_Station"
+   ],
+   "center": [
+    43.442279,
+    -80.47478
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.442427,
+      -80.47544
+     ],
+     "bearing": 107.9,
+     "tracks": 2,
+     "platforms": [
+      {
+       "type": "island",
+       "center": [
+        43.442427,
+        -80.47544
+       ],
+       "bearing": 107.9,
+       "length": 82.2,
+       "width": 4.8,
+       "osm": 16692801
+      }
+     ],
+     "length": 82.2,
+     "layout": "island",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Borden",
+   "rank": 1
   },
   {
    "id": "bradford",
@@ -3839,6 +3992,68 @@
    "label": "Centennial"
   },
   {
+   "id": "central",
+   "name": "Central",
+   "ids": [
+    "grt:ion:P_Central_Station"
+   ],
+   "center": [
+    43.452945,
+    -80.498635
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.453272,
+      -80.49908
+     ],
+     "bearing": 114.6,
+     "tracks": 2,
+     "platforms": [
+      {
+       "type": "side",
+       "center": [
+        43.453272,
+        -80.49908
+       ],
+       "bearing": 114.6,
+       "length": 64.9,
+       "width": 3.5,
+       "osm": 739451234
+      },
+      {
+       "type": "side",
+       "center": [
+        43.45309,
+        -80.499186
+       ],
+       "bearing": 114.3,
+       "length": 64.7,
+       "width": 3.5,
+       "osm": 739451232
+      }
+     ],
+     "length": 64.9,
+     "layout": "side",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Central",
+   "rank": 1
+  },
+  {
    "id": "chaplin",
    "name": "Chaplin",
    "ids": [
@@ -4483,6 +4698,68 @@
    "reviewed": true,
    "rank": 2,
    "label": "College"
+  },
+  {
+   "id": "conestoga",
+   "name": "Conestoga",
+   "ids": [
+    "grt:ion:P_Conestoga_Station"
+   ],
+   "center": [
+    43.498282,
+    -80.529556
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.49817,
+      -80.529408
+     ],
+     "bearing": 161.0,
+     "tracks": 2,
+     "platforms": [
+      {
+       "type": "side",
+       "center": [
+        43.49817,
+        -80.529408
+       ],
+       "bearing": 161.0,
+       "length": 79.5,
+       "width": 3.5,
+       "osm": 744253498
+      },
+      {
+       "type": "side",
+       "center": [
+        43.498142,
+        -80.529516
+       ],
+       "bearing": 161.7,
+       "length": 79.5,
+       "width": 3.5,
+       "osm": 744253497
+      }
+     ],
+     "length": 79.5,
+     "layout": "side",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Conestoga",
+   "rank": 1
   },
   {
    "id": "confederation",
@@ -7083,6 +7360,68 @@
    "label": "Fairbank"
   },
   {
+   "id": "fairway",
+   "name": "Fairway",
+   "ids": [
+    "grt:ion:P_Fairway_Station"
+   ],
+   "center": [
+    43.422359,
+    -80.442557
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.422278,
+      -80.441847
+     ],
+     "bearing": 78.1,
+     "tracks": 2,
+     "platforms": [
+      {
+       "type": "side",
+       "center": [
+        43.422278,
+        -80.441847
+       ],
+       "bearing": 78.1,
+       "length": 88.9,
+       "width": 4.5,
+       "osm": 18870231
+      },
+      {
+       "type": "side",
+       "center": [
+        43.422381,
+        -80.44188
+       ],
+       "bearing": 78.1,
+       "length": 88.7,
+       "width": 4.5,
+       "osm": 18870230
+      }
+     ],
+     "length": 88.9,
+     "layout": "side",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Fairway",
+   "rank": 1
+  },
+  {
    "id": "finch",
    "name": "Finch",
    "ids": [
@@ -7604,6 +7943,57 @@
    "label": "Forest Hill"
   },
   {
+   "id": "frederick",
+   "name": "Frederick",
+   "ids": [
+    "grt:ion:P_Frederick_Station"
+   ],
+   "center": [
+    43.449402,
+    -80.487483
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.449616,
+      -80.487366
+     ],
+     "bearing": 26.2,
+     "tracks": 1,
+     "platforms": [
+      {
+       "type": "side",
+       "center": [
+        43.449616,
+        -80.487366
+       ],
+       "bearing": 26.2,
+       "length": 80.3,
+       "width": 3.5,
+       "osm": 729743029
+      }
+     ],
+     "length": 80.3,
+     "layout": "side",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Frederick",
+   "rank": 1
+  },
+  {
    "id": "georgetown",
    "name": "Georgetown",
    "ids": [
@@ -7741,7 +8131,11 @@
      "length": 152.0,
      "platforms": [],
      "source": "curated",
-     "line": "1"
+     "line": "1",
+     "structure": {
+      "kind": "glencairn",
+      "concourse": "both"
+     }
     }
    ],
    "entrances": [
@@ -7914,6 +8308,57 @@
    "reviewed": false,
    "rank": 2,
    "label": "Gormley"
+  },
+  {
+   "id": "grand-river-hospital",
+   "name": "Grand River Hospital",
+   "ids": [
+    "grt:ion:P_Grand_River_Hospital_Station"
+   ],
+   "center": [
+    43.457158,
+    -80.511585
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.457309,
+      -80.512098
+     ],
+     "bearing": 115.1,
+     "tracks": 2,
+     "platforms": [
+      {
+       "type": "side",
+       "center": [
+        43.457309,
+        -80.512098
+       ],
+       "bearing": 115.1,
+       "length": 85.4,
+       "width": 3.5,
+       "osm": 823658168
+      }
+     ],
+     "length": 85.4,
+     "layout": "side",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Grand River Hospital",
+   "rank": 1
   },
   {
    "id": "greenwood",
@@ -10165,6 +10610,121 @@
    "label": "Kitchener"
   },
   {
+   "id": "kitchener-city-hall",
+   "name": "Kitchener City Hall",
+   "ids": [
+    "grt:ion:P_Kitchener_City_Hall_Station"
+   ],
+   "center": [
+    43.452108,
+    -80.491181
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.45194,
+      -80.490812
+     ],
+     "bearing": 119.7,
+     "tracks": 1,
+     "platforms": [
+      {
+       "type": "side",
+       "center": [
+        43.45194,
+        -80.490812
+       ],
+       "bearing": 119.7,
+       "length": 64.6,
+       "width": 3.5,
+       "osm": 825518269
+      }
+     ],
+     "length": 64.6,
+     "layout": "side",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [
+    {
+     "kind": "station_building",
+     "center": [
+      43.449394,
+      -80.492394
+     ],
+     "length": 67.4,
+     "width": 33.8,
+     "bearing": 33.8,
+     "osm": 953882223,
+     "render": false
+    }
+   ],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Kitchener City Hall",
+   "rank": 1
+  },
+  {
+   "id": "kitchener-market",
+   "name": "Kitchener Market",
+   "ids": [
+    "grt:ion:P_Kitchener_Market_Station"
+   ],
+   "center": [
+    43.446388,
+    -80.483833
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.446282,
+      -80.483545
+     ],
+     "bearing": 124.6,
+     "tracks": 2,
+     "platforms": [
+      {
+       "type": "island",
+       "center": [
+        43.446282,
+        -80.483545
+       ],
+       "bearing": 124.6,
+       "length": 92.6,
+       "width": 6.0,
+       "osm": 466402907
+      }
+     ],
+     "length": 92.6,
+     "layout": "island",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Kitchener Market",
+   "rank": 1
+  },
+  {
    "id": "laird",
    "name": "Laird",
    "ids": [
@@ -10504,6 +11064,57 @@
    "label": "Lansdowne"
   },
   {
+   "id": "laurier-waterloo-park",
+   "name": "Laurier-Waterloo Park",
+   "ids": [
+    "grt:ion:P_Laurier_Waterloo_Park_Station"
+   ],
+   "center": [
+    43.46898,
+    -80.53459
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.468843,
+      -80.5344
+     ],
+     "bearing": 128.8,
+     "tracks": 2,
+     "platforms": [
+      {
+       "type": "island",
+       "center": [
+        43.468843,
+        -80.5344
+       ],
+       "bearing": 128.8,
+       "length": 81.7,
+       "width": 2.8,
+       "osm": 696298644
+      }
+     ],
+     "length": 81.7,
+     "layout": "island",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Laurier-Waterloo Park",
+   "rank": 1
+  },
+  {
    "id": "lawrence",
    "name": "Lawrence",
    "ids": [
@@ -10606,7 +11217,14 @@
      "length": 152.0,
      "platforms": [],
      "source": "curated",
-     "line": "1"
+     "line": "1",
+     "structure": {
+      "kind": "lawrence_west",
+      "deck": {
+       "west": 24,
+       "len": 34
+      }
+     }
     }
    ],
    "entrances": [
@@ -11796,6 +12414,57 @@
    "reviewed": false,
    "rank": 2,
    "label": "Meadowvale"
+  },
+  {
+   "id": "mill",
+   "name": "Mill",
+   "ids": [
+    "grt:ion:P_Mill_Station"
+   ],
+   "center": [
+    43.433391,
+    -80.47775
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.4336,
+      -80.477898
+     ],
+     "bearing": 139.6,
+     "tracks": 2,
+     "platforms": [
+      {
+       "type": "island",
+       "center": [
+        43.4336,
+        -80.477898
+       ],
+       "bearing": 139.6,
+       "length": 89.4,
+       "width": 6.0,
+       "osm": 690922712
+      }
+     ],
+     "length": 89.4,
+     "layout": "island",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Mill",
+   "rank": 1
   },
   {
    "id": "milliken",
@@ -13244,6 +13913,57 @@
    "reviewed": true,
    "rank": 2,
    "label": "North York Centre"
+  },
+  {
+   "id": "northfield",
+   "name": "Northfield",
+   "ids": [
+    "grt:ion:P_Northfield_Station"
+   ],
+   "center": [
+    43.496983,
+    -80.543062
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.497215,
+      -80.54321
+     ],
+     "bearing": 156.8,
+     "tracks": 2,
+     "platforms": [
+      {
+       "type": "island",
+       "center": [
+        43.497215,
+        -80.54321
+       ],
+       "bearing": 156.8,
+       "length": 82.1,
+       "width": 6.0,
+       "osm": 751178896
+      }
+     ],
+     "length": 82.1,
+     "layout": "island",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Northfield",
+   "rank": 1
   },
   {
    "id": "o-connor",
@@ -15064,6 +15784,70 @@
    "label": "Queen"
   },
   {
+   "id": "queen-grt",
+   "name": "Queen",
+   "ids": [
+    "grt:ion:P_Queen_Station"
+   ],
+   "center": [
+    43.448605,
+    -80.489357
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.448638,
+      -80.489428
+     ],
+     "bearing": 115.0,
+     "tracks": 1,
+     "platforms": [
+      {
+       "type": "side",
+       "center": [
+        43.448638,
+        -80.489428
+       ],
+       "bearing": 115.0,
+       "length": 64.5,
+       "width": 3.5,
+       "osm": 836238402
+      }
+     ],
+     "length": 64.5,
+     "layout": "side",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [
+    {
+     "kind": "station_building",
+     "center": [
+      43.449394,
+      -80.492394
+     ],
+     "length": 67.4,
+     "width": 33.8,
+     "bearing": 33.8,
+     "osm": 953882223,
+     "render": false
+    }
+   ],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Queen",
+   "rank": 1
+  },
+  {
    "id": "queen-s-park",
    "name": "Queen's Park",
    "ids": [
@@ -15167,6 +15951,57 @@
    "reviewed": true,
    "rank": 2,
    "label": "Queen's Park"
+  },
+  {
+   "id": "research-and-technology",
+   "name": "Research and Technology",
+   "ids": [
+    "grt:ion:P_Research_and_Technology_Station"
+   ],
+   "center": [
+    43.481597,
+    -80.545237
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.481628,
+      -80.545155
+     ],
+     "bearing": 177.5,
+     "tracks": 2,
+     "platforms": [
+      {
+       "type": "island",
+       "center": [
+        43.481628,
+        -80.545155
+       ],
+       "bearing": 177.5,
+       "length": 87.0,
+       "width": 6.0,
+       "osm": 699821963
+      }
+     ],
+     "length": 87.0,
+     "layout": "island",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Research and Technology",
+   "rank": 1
   },
   {
    "id": "richmond-hill",
@@ -18881,6 +19716,68 @@
    "label": "Unionville"
   },
   {
+   "id": "university-of-waterloo",
+   "name": "University Of Waterloo",
+   "ids": [
+    "grt:ion:P_University_Of_Waterloo_Station"
+   ],
+   "center": [
+    43.47337,
+    -80.541366
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.473235,
+      -80.541175
+     ],
+     "bearing": 145.7,
+     "tracks": 2,
+     "platforms": [
+      {
+       "type": "island",
+       "center": [
+        43.473235,
+        -80.541175
+       ],
+       "bearing": 145.7,
+       "length": 78.7,
+       "width": 2.3,
+       "osm": 532113393
+      }
+     ],
+     "length": 78.7,
+     "layout": "island",
+     "source": "osm"
+    }
+   ],
+   "entrances": [
+    {
+     "pos": [
+      43.473548,
+      -80.538283
+     ],
+     "kind": "building",
+     "name": "University of Waterloo Art Gallery (UWAG)",
+     "osm": 3724977711,
+     "wheelchair": false
+    }
+   ],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "University Of Waterloo",
+   "rank": 1
+  },
+  {
    "id": "vaughan-metropolitan-centre",
    "name": "Vaughan Metropolitan Centre",
    "ids": [
@@ -19190,6 +20087,70 @@
    "label": "Victoria Park"
   },
   {
+   "id": "victoria-park-grt",
+   "name": "Victoria Park",
+   "ids": [
+    "grt:ion:P_Victoria_Park_Station"
+   ],
+   "center": [
+    43.450085,
+    -80.493337
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.450198,
+      -80.49371
+     ],
+     "bearing": 114.3,
+     "tracks": 1,
+     "platforms": [
+      {
+       "type": "side",
+       "center": [
+        43.450198,
+        -80.49371
+       ],
+       "bearing": 114.3,
+       "length": 64.4,
+       "width": 3.5,
+       "osm": 836238403
+      }
+     ],
+     "length": 64.4,
+     "layout": "side",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [
+    {
+     "kind": "station_building",
+     "center": [
+      43.449394,
+      -80.492394
+     ],
+     "length": 67.4,
+     "width": 33.8,
+     "bearing": 33.8,
+     "osm": 953882223,
+     "render": false
+    }
+   ],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Victoria Park",
+   "rank": 1
+  },
+  {
    "id": "warden",
    "name": "Warden",
    "ids": [
@@ -19305,6 +20266,70 @@
    "reviewed": false,
    "rank": 2,
    "label": "Washago"
+  },
+  {
+   "id": "waterloo-public-square",
+   "name": "Waterloo Public Square",
+   "ids": [
+    "grt:ion:P_Waterloo_Public_Square_Station"
+   ],
+   "center": [
+    43.464236,
+    -80.522468
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.464146,
+      -80.522986
+     ],
+     "bearing": 81.3,
+     "tracks": 1,
+     "platforms": [
+      {
+       "type": "side",
+       "center": [
+        43.464146,
+        -80.522986
+       ],
+       "bearing": 81.3,
+       "length": 65.2,
+       "width": 3.9,
+       "osm": 657397944
+      }
+     ],
+     "length": 65.2,
+     "layout": "side",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [
+    {
+     "kind": "station_building",
+     "center": [
+      43.464674,
+      -80.520548
+     ],
+     "length": 43.7,
+     "width": 15.0,
+     "bearing": 84.7,
+     "osm": 149976263,
+     "render": false
+    }
+   ],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Waterloo Public Square",
+   "rank": 1
   },
   {
    "id": "wellesley",
@@ -19861,6 +20886,57 @@
    "label": "Whitby"
   },
   {
+   "id": "willis-way",
+   "name": "Willis Way",
+   "ids": [
+    "grt:ion:P_Willis_Way_Station"
+   ],
+   "center": [
+    43.462567,
+    -80.523815
+   ],
+   "agencies": [
+    "grt"
+   ],
+   "levels": [
+    {
+     "mode": "lrt",
+     "grade": "at-grade",
+     "center": [
+      43.462157,
+      -80.523374
+     ],
+     "bearing": 150.2,
+     "tracks": 1,
+     "platforms": [
+      {
+       "type": "side",
+       "center": [
+        43.462157,
+        -80.523374
+       ],
+       "bearing": 150.2,
+       "length": 88.8,
+       "width": 3.5,
+       "osm": 829567790
+      }
+     ],
+     "length": 88.8,
+     "layout": "side",
+     "source": "osm"
+    }
+   ],
+   "entrances": [],
+   "buildings": [],
+   "bus": [],
+   "sources": [
+    "OSM (platforms, entrances, buildings)"
+   ],
+   "reviewed": false,
+   "label": "Willis Way",
+   "rank": 1
+  },
+  {
    "id": "wilson",
    "name": "Wilson",
    "ids": [
@@ -19887,7 +20963,11 @@
      "length": 170.5,
      "layout": "island",
      "source": "curated",
-     "line": "1"
+     "line": "1",
+     "structure": {
+      "kind": "wilson",
+      "concourse": "s"
+     }
     }
    ],
    "entrances": [
@@ -20485,7 +21565,23 @@
      "length": 152.0,
      "platforms": [],
      "source": "curated",
-     "line": "1"
+     "line": "1",
+     "structure": {
+      "kind": "yorkdale",
+      "concourse": "both",
+      "walks": [
+       {
+        "from": [
+         43.7255358,
+         -79.4480092
+        ],
+        "to": [
+         43.7253554,
+         -79.4486792
+        ]
+       }
+      ]
+     }
     }
    ],
    "entrances": [
@@ -20564,6 +21660,410 @@
    "reviewed": true,
    "rank": 2,
    "label": "Yorkdale"
+  }
+ ],
+ "suppress_extra": [
+  {
+   "osm": 9406722,
+   "e": -5633.9,
+   "n": 405.0,
+   "reason": "streetcar track runs 63 m through building 9406722 (kind 9, 3 m, bottom +3.8 m vs rail)"
+  },
+  {
+   "osm": 24008403,
+   "e": -193.9,
+   "n": -1371.6,
+   "reason": "siding track runs 80 m through building 24008403 (kind 0, 3 m, bottom -1.6 m vs rail)"
+  },
+  {
+   "osm": 28135191,
+   "e": 6597.5,
+   "n": 3978.4,
+   "reason": "streetcar track runs 75 m through building 28135191 (kind 9, 3 m, bottom -0.2 m vs rail)"
+  },
+  {
+   "osm": 29471697,
+   "e": -1130.4,
+   "n": 4916.9,
+   "reason": "siding track runs 60 m through building 29471697 (kind 5, 3 m, bottom +2.9 m vs rail)"
+  },
+  {
+   "osm": 31367826,
+   "e": -6242.5,
+   "n": 244.3,
+   "reason": "subway track runs 69 m through building 31367826 (kind 9, 7 m, bottom -6.0 m vs rail)"
+  },
+  {
+   "osm": 31961923,
+   "e": 7643.6,
+   "n": 4654.8,
+   "reason": "subway track runs 316 m through building 31961923 (kind 9, 28 m, bottom -2.7 m vs rail)"
+  },
+  {
+   "osm": 32023077,
+   "e": -330.4,
+   "n": -1099.0,
+   "reason": "main line track runs 299 m through building 32023077 (kind 0, 13 m, bottom -3.4 m vs rail)"
+  },
+  {
+   "osm": 32052104,
+   "e": -8862.7,
+   "n": -417.4,
+   "reason": "subway track runs 49 m through building 32052104 (kind 0, 3 m, bottom -1.9 m vs rail)"
+  },
+  {
+   "osm": 32757923,
+   "e": -27284.1,
+   "n": -26035.6,
+   "reason": "siding track runs 59 m through building 32757923 (kind 0, 7 m, bottom -0.8 m vs rail)"
+  },
+  {
+   "osm": 33576527,
+   "e": -4312.8,
+   "n": 5286.1,
+   "reason": "subway track runs 5 m through building 33576527 (kind 9, 3 m, bottom +0.0 m vs rail)"
+  },
+  {
+   "osm": 43804667,
+   "e": -4610.2,
+   "n": 6133.2,
+   "reason": "subway track runs 458 m through building 43804667 (kind 9, 9 m, bottom -1.0 m vs rail)"
+  },
+  {
+   "osm": 43805674,
+   "e": -5390.1,
+   "n": 9065.3,
+   "reason": "subway track runs 367 m through building 43805674 (kind 9, 14 m, bottom +0.0 m vs rail)"
+  },
+  {
+   "osm": 43810918,
+   "e": -4855.4,
+   "n": 6780.6,
+   "reason": "subway track runs 1 m through building 43810918 (kind 9, 10 m, bottom -0.3 m vs rail)"
+  },
+  {
+   "osm": 43811624,
+   "e": -5181.3,
+   "n": 7918.5,
+   "reason": "subway track runs 349 m through building 43811624 (kind 9, 9 m, bottom -0.8 m vs rail)"
+  },
+  {
+   "osm": 43939020,
+   "e": -27293.6,
+   "n": -26109.2,
+   "reason": "siding track runs 5 m through building 43939020 (kind 0, 13 m, bottom -0.3 m vs rail)"
+  },
+  {
+   "osm": 43939026,
+   "e": -27264.8,
+   "n": -26129.6,
+   "reason": "siding track runs 5 m through building 43939026 (kind 0, 17 m, bottom -0.2 m vs rail)"
+  },
+  {
+   "osm": 43940109,
+   "e": -27325.1,
+   "n": -26089.3,
+   "reason": "siding track runs 31 m through building 43940109 (kind 0, 8 m, bottom -0.2 m vs rail)"
+  },
+  {
+   "osm": 67590559,
+   "e": -42964.0,
+   "n": 482.4,
+   "reason": "siding track runs 22 m through building 67590559 (kind 5, 8 m, bottom -0.4 m vs rail)"
+  },
+  {
+   "osm": 79146945,
+   "e": 87206.4,
+   "n": 32937.5,
+   "reason": "siding track runs 3 m through building 79146945 (kind 0, 13 m, bottom -5.9 m vs rail)"
+  },
+  {
+   "osm": 134722118,
+   "e": -89920.4,
+   "n": -21937.7,
+   "reason": "light rail track runs 5 m through building 134722118 (kind 3, 10 m, bottom -2.0 m vs rail)"
+  },
+  {
+   "osm": 137366401,
+   "e": -89753.2,
+   "n": -21236.8,
+   "reason": "main line track runs 7 m through building 137366401 (kind 5, 4 m, bottom -0.6 m vs rail)"
+  },
+  {
+   "osm": 150375158,
+   "e": -561.3,
+   "n": -175.2,
+   "reason": "siding track runs 52 m through building 150375158 (kind 2, 16 m, bottom +3.1 m vs rail)"
+  },
+  {
+   "osm": 179297875,
+   "e": -131.5,
+   "n": -1039.3,
+   "reason": "main line track runs 11 m through building 179297875 (kind 13, 82 m, bottom -0.4 m vs rail)"
+  },
+  {
+   "osm": 197982999,
+   "e": -13773.4,
+   "n": 51497.3,
+   "reason": "main line track runs 9 m through building 197982999 (kind 9, 3 m, bottom -0.0 m vs rail)"
+  },
+  {
+   "osm": 200092628,
+   "e": -18478.9,
+   "n": 3273.6,
+   "reason": "rail track runs 23 m through building 200092628 (kind 0, 8 m, bottom -21.3 m vs rail)"
+  },
+  {
+   "osm": 205278859,
+   "e": -5215.7,
+   "n": 8040.8,
+   "reason": "subway track runs 11 m through building 205278859 (kind 9, 9 m, bottom -1.2 m vs rail)"
+  },
+  {
+   "osm": 213928593,
+   "e": -4929.3,
+   "n": 7011.6,
+   "reason": "subway track runs 2 m through building 213928593 (kind 9, 9 m, bottom +0.1 m vs rail)"
+  },
+  {
+   "osm": 225373245,
+   "e": -561.3,
+   "n": -175.2,
+   "reason": "siding track runs 43 m through building 225373245 (kind 7, 3 m, bottom -0.2 m vs rail)"
+  },
+  {
+   "osm": 225373380,
+   "e": -557.9,
+   "n": -169.2,
+   "reason": "siding track runs 47 m through building 225373380 (kind 7, 3 m, bottom -0.1 m vs rail)"
+  },
+  {
+   "osm": 331010798,
+   "e": 41441.6,
+   "n": -85672.2,
+   "reason": "light rail track runs 16 m through building 331010798 (kind 15, 10 m, bottom +3.3 m vs rail)"
+  },
+  {
+   "osm": 331130805,
+   "e": 41407.7,
+   "n": -85834.0,
+   "reason": "light rail track runs 5 m through building 331130805 (kind 0, 10 m, bottom -0.0 m vs rail)"
+  },
+  {
+   "osm": 331130809,
+   "e": 41425.4,
+   "n": -85757.0,
+   "reason": "light rail track runs 5 m through building 331130809 (kind 0, 161 m, bottom -0.8 m vs rail)"
+  },
+  {
+   "osm": 339462483,
+   "e": -2688.1,
+   "n": -1902.6,
+   "reason": "streetcar track runs 7 m through building 339462483 (kind 15, 6 m, bottom +3.6 m vs rail)"
+  },
+  {
+   "osm": 507318570,
+   "e": 10676.7,
+   "n": 35317.3,
+   "reason": "main line track runs 28 m through building 507318570 (kind 0, 8 m, bottom -0.1 m vs rail)"
+  },
+  {
+   "osm": 589453543,
+   "e": 26740.0,
+   "n": -60324.5,
+   "reason": "main line track runs 92 m through building 589453543 (kind 15, 5 m, bottom +1.2 m vs rail)"
+  },
+  {
+   "osm": 662775841,
+   "e": 8398.8,
+   "n": 6424.4,
+   "reason": "subway track runs 317 m through building 662775841 (kind 9, 16 m, bottom -2.1 m vs rail)"
+  },
+  {
+   "osm": 664528029,
+   "e": -6916.1,
+   "n": 30.1,
+   "reason": "subway track runs 15 m through building 664528029 (kind 0, 38 m, bottom -3.4 m vs rail)"
+  },
+  {
+   "osm": 683468438,
+   "e": 6713.3,
+   "n": 3683.1,
+   "reason": "main line track runs 39 m through building 683468438 (kind 9, 9 m, bottom -0.0 m vs rail)"
+  },
+  {
+   "osm": 686335309,
+   "e": -10241.4,
+   "n": 5069.8,
+   "reason": "main line track runs 16 m through building 686335309 (kind 15, 5 m, bottom +3.5 m vs rail)"
+  },
+  {
+   "osm": 749087624,
+   "e": -2269.6,
+   "n": 1458.6,
+   "reason": "streetcar track runs 78 m through building 749087624 (kind 15, 6 m, bottom +3.4 m vs rail)"
+  },
+  {
+   "osm": 754590773,
+   "e": -93692.4,
+   "n": -16852.1,
+   "reason": "siding track runs 62 m through building 754590773 (kind 5, 5 m, bottom +0.8 m vs rail)"
+  },
+  {
+   "osm": 754590774,
+   "e": -93673.5,
+   "n": -16980.5,
+   "reason": "siding track runs 90 m through building 754590774 (kind 0, 6 m, bottom +1.3 m vs rail)"
+  },
+  {
+   "osm": 754590775,
+   "e": -93578.6,
+   "n": -16972.4,
+   "reason": "siding track runs 453 m through building 754590775 (kind 5, 7 m, bottom -0.2 m vs rail)"
+  },
+  {
+   "osm": 755562274,
+   "e": -8596.3,
+   "n": 4188.9,
+   "reason": "siding track runs 25 m through building 755562274 (kind 0, 10 m, bottom -0.5 m vs rail)"
+  },
+  {
+   "osm": 755562275,
+   "e": -8579.6,
+   "n": 4236.7,
+   "reason": "siding track runs 20 m through building 755562275 (kind 0, 8 m, bottom -0.5 m vs rail)"
+  },
+  {
+   "osm": 774852873,
+   "e": 41461.9,
+   "n": -85603.0,
+   "reason": "light rail track runs 24 m through building 774852873 (kind 15, 5 m, bottom +3.2 m vs rail)"
+  },
+  {
+   "osm": 801986603,
+   "e": 4030.1,
+   "n": 2887.3,
+   "reason": "siding track runs 5 m through building 801986603 (kind 5, 8 m, bottom +0.3 m vs rail)"
+  },
+  {
+   "osm": 833962539,
+   "e": -30779.5,
+   "n": -30631.8,
+   "reason": "siding track runs 3 m through building 833962539 (kind 0, 9 m, bottom -1.8 m vs rail)"
+  },
+  {
+   "osm": 840661589,
+   "e": 1995.2,
+   "n": 2640.9,
+   "reason": "streetcar track runs 14 m through building 840661589 (kind 15, 6 m, bottom +3.4 m vs rail)"
+  },
+  {
+   "osm": 840661590,
+   "e": 2013.0,
+   "n": 2652.5,
+   "reason": "streetcar track runs 9 m through building 840661590 (kind 15, 6 m, bottom +3.5 m vs rail)"
+  },
+  {
+   "osm": 840661591,
+   "e": 2004.8,
+   "n": 2647.2,
+   "reason": "streetcar track runs 11 m through building 840661591 (kind 15, 6 m, bottom +3.4 m vs rail)"
+  },
+  {
+   "osm": 950199242,
+   "e": -8932.6,
+   "n": -382.5,
+   "reason": "subway track runs 5 m through building 950199242 (kind 0, 8 m, bottom +1.6 m vs rail)"
+  },
+  {
+   "osm": 972686535,
+   "e": -2272.0,
+   "n": 1434.5,
+   "reason": "streetcar track runs 3 m through building 972686535 (kind 0, 3 m, bottom -0.1 m vs rail)"
+  },
+  {
+   "osm": 974176026,
+   "e": 426.3,
+   "n": 583.5,
+   "reason": "siding track runs 18 m through building 974176026 (kind 0, 7 m, bottom +2.8 m vs rail)"
+  },
+  {
+   "osm": 987974915,
+   "e": -11346.6,
+   "n": 11598.2,
+   "reason": "siding track runs 17 m through building 987974915 (kind 5, 7 m, bottom -0.6 m vs rail)"
+  },
+  {
+   "osm": 1010406092,
+   "e": -598.7,
+   "n": 3130.6,
+   "reason": "main line track runs 43 m through building 1010406092 (kind 0, 4 m, bottom -19.5 m vs rail)"
+  },
+  {
+   "osm": 1025054033,
+   "e": -24726.2,
+   "n": 5440.5,
+   "reason": "main line track runs 49 m through building 1025054033 (kind 9, 3 m, bottom -0.3 m vs rail)"
+  },
+  {
+   "osm": 1130684334,
+   "e": -1223.8,
+   "n": 5600.4,
+   "reason": "subway track runs 5 m through building 1130684334 (kind 0, 3 m, bottom -18.2 m vs rail)"
+  },
+  {
+   "osm": 1206225396,
+   "e": 41687.4,
+   "n": -85983.8,
+   "reason": "main line track runs 48 m through building 1206225396 (kind 15, 5 m, bottom +3.1 m vs rail)"
+  },
+  {
+   "osm": 1304930234,
+   "e": -19476.3,
+   "n": -7788.8,
+   "reason": "main line track runs 18 m through building 1304930234 (kind 0, 7 m, bottom +1.7 m vs rail)"
+  },
+  {
+   "osm": 1387417377,
+   "e": -785.0,
+   "n": 3860.2,
+   "reason": "streetcar track runs 16 m through building 1387417377 (kind 0, 3 m, bottom +0.8 m vs rail)"
+  },
+  {
+   "osm": 1387417379,
+   "e": -785.0,
+   "n": 3860.2,
+   "reason": "streetcar track runs 16 m through building 1387417379 (kind 0, 7 m, bottom +4.4 m vs rail)"
+  },
+  {
+   "osm": 1387417380,
+   "e": -794.3,
+   "n": 3877.3,
+   "reason": "streetcar track runs 26 m through building 1387417380 (kind 0, 3 m, bottom +2.1 m vs rail)"
+  },
+  {
+   "osm": 1389942803,
+   "e": -9247.3,
+   "n": 20518.7,
+   "reason": "main line track runs 20 m through building 1389942803 (kind 0, 8 m, bottom -13.8 m vs rail)"
+  },
+  {
+   "osm": 1486241049,
+   "e": -9355.4,
+   "n": -4198.6,
+   "reason": "siding track runs 9 m through building 1486241049 (kind 0, 4 m, bottom -0.0 m vs rail)"
+  },
+  {
+   "osm": 1486241050,
+   "e": -9361.5,
+   "n": -4203.5,
+   "reason": "siding track runs 9 m through building 1486241050 (kind 0, 4 m, bottom +0.1 m vs rail)"
+  },
+  {
+   "osm": 1549520057,
+   "e": 1983.7,
+   "n": 2633.4,
+   "reason": "streetcar track runs 17 m through building 1549520057 (kind 0, 3 m, bottom -0.1 m vs rail)"
   }
  ]
 }

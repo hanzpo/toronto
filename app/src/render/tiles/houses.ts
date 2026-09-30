@@ -179,8 +179,8 @@ export function houseGeometry(type: number): THREE.BufferGeometry {
       walls(g, 0.4, 0.18, 0.5, -0.3, 0.5, -0.25, P_WALL, P_GARAGE); hip(g, 0.4, 0.6, 0.18, 0.5, -0.3, 0.5, 0.03, 0.15);
       break;
     }
-    case 5: // garage / shed
-      g.doorX = -9;
+    case 5: // garage / shed (mode 9: laneway garage, may carry graffiti)
+      g.doorX = -9; g.mode = 9;
       walls(g, 0.9, -0.5, 0.5, -0.5, 0.5, -0.25, P_WALL, P_GARAGE); flatRoof(g, 0.9); break;
     case 6: // Annex house: big hip + front gable dormer
       g.doorX = -0.26; g.mode = 0;
@@ -293,7 +293,8 @@ export function houseLowGeometry(type: number): THREE.BufferGeometry {
 const BRICK = [0xa65d45, 0x9b4f3c, 0xb36b4f, 0x8c4a3a, 0xc9ad80, 0xd2b98e, 0x7f4535, 0xb98a74];
 const OTHER = [0xe8e3d8, 0xc8cdcf, 0xaab3b8, 0xddd4c6, 0xebe1cc, 0xcfc1ac, 0xb6bdaf, 0xd9d6cf, 0x8c9a8f, 0x6f7d8c, 0xe2d9c9, 0xc2a189];
 // shingles, trim, doors, garage doors (sRGB) — packed as rows of a 16×4 palette texture
-const ROOF_P = [0x4a4a4a, 0x3a3b3d, 0x5a4636, 0x6b6660, 0x6b3b2f, 0x3f4a3d, 0x4d5660, 0x2c2c2e, 0x55504a, 0x5e5a55, 0x3c3530, 0x6a6a6a, 0x444c52, 0x5b4a3e, 0x383838, 0x4f463f];
+// asphalt shingles weather to mid greys / browns in sun — nothing below ~0x4a (the shingle courses darken them further)
+const ROOF_P = [0x5a5a5a, 0x505254, 0x5e4a3a, 0x6b6660, 0x6b3b2f, 0x55604f, 0x57606a, 0x4c4c4f, 0x5c5750, 0x5e5a55, 0x57504a, 0x6a6a6a, 0x4f585e, 0x5b4a3e, 0x535353, 0x5a5048];
 const TRIM_P = [0xf2efe6, 0xf4f1ea, 0xe8e2d2, 0x2a2a2a, 0x2f4538, 0xf0ece0, 0x6b2d2a, 0xe9e4d8, 0x3a3f44, 0xf5f2ea, 0xd9cfb8, 0x1f2a36, 0xefe9dc, 0x584538, 0xf3f0e8, 0x8a8a84];
 const DOOR_P = [0x7a1f1f, 0x1c1c1c, 0x1d2f55, 0x2e4d34, 0x5a3a24, 0xe8e4da, 0x8b5a2b, 0x2f3b45, 0x6a1b3a, 0x3d2a1e, 0x1f3a2b, 0x9a2a1a, 0x4a4a4a, 0x2a2a2a, 0x6d4c2f, 0x14324a];
 const GAR_P = [0xf0eee8, 0xe6e2d8, 0xd8d2c4, 0x8a8680, 0x5a5550, 0xf2f0ea, 0xcfc8b8, 0x3a3a3a, 0xece9e0, 0xbfb8a8, 0xf4f2ec, 0x6b5a48, 0xe0dbd0, 0x9a9690, 0xf0ede4, 0x7a5a3c];
@@ -408,6 +409,17 @@ function houseMaterial(name: string) {
   const garWall = wallC;
   col = mix(col, garWall, is(P_GARAGE));
   col = mix(col, garC.mul(float(1).sub(grooves.mul(0.25))), gd);
+  // laneway garages (shed archetype): tasteful graffiti on ~1 in 6 doors — bubbly fills, dark outline
+  {
+    const gsd = fract(seed.mul(0.1373)).mul(40);
+    const gu = u.sub(Lf.mul(0.5)).mul(1.1), gv = h.mul(1.25);
+    const gf = sin(gu.mul(2.6).add(sin(gv.mul(3.3).add(gsd)).mul(1.2)).add(gsd.mul(0.7))).mul(sin(gv.mul(4.6).add(sin(gu.mul(2.1).add(gsd.mul(1.3))).mul(1.4))));
+    const band = box1(h, float(0.35), float(1.75), wh).mul(box1(u, float(0.6), Lf.sub(0.6), wu));
+    const on = gd.mul(band).mul(step(8.5, mode)).mul(step(fract(seed.mul(0.618)), 0.16)).mul(float(1).sub(far));
+    const gc = mix(lin(1.0, 0.31, 0.64), mix(lin(0.16, 0.78, 0.85), lin(0.6, 0.9, 0.23), step(0.5, fract(gsd))), step(0.5, fract(gu.mul(0.35).add(gv.mul(0.2)))));
+    col = mix(col, gc, step(0.18, gf).mul(on));
+    col = mix(col, lin(0.03, 0.03, 0.035), step(0.08, gf).mul(step(gf, 0.18)).mul(on));
+  }
   // shingles
   const sh = box1(fract(h.div(0.19)), float(0.0), float(0.1), fwidth(h.div(0.19))).mul(float(1).sub(smoothstep(0.2, 0.45, fwidth(h.div(0.19)))));
   const shTone = hash2(floor(positionWorld.x.div(0.9)), floor(h.div(0.19))).sub(0.5).mul(0.1);

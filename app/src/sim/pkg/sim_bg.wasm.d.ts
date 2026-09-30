@@ -24,6 +24,7 @@ export const sim_has_tile: (a: number, b: number, c: number) => number;
 export const sim_major_ratios: (a: number, b: number, c: number) => [number, number];
 export const sim_measured: (a: number) => [number, number];
 export const sim_new: (a: number, b: number, c: number) => number;
+export const sim_overlap_counts: (a: number) => [number, number];
 export const sim_ped_count: (a: number) => number;
 export const sim_ped_ptr: (a: number) => number;
 export const sim_player_state: (a: number) => [number, number];
@@ -31,6 +32,8 @@ export const sim_player_step: (a: number, b: number, c: number, d: number, e: nu
 export const sim_rail_add_feed: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number, a1: number, b1: number, c1: number, d1: number, e1: number, f1: number, g1: number, h1: number) => void;
 export const sim_rail_clear_feeds: (a: number) => void;
 export const sim_rail_count: (a: number) => number;
+export const sim_rail_crossing_changes: (a: number) => [number, number];
+export const sim_rail_crossings: (a: number, b: number, c: number) => void;
 export const sim_rail_has_player: (a: number) => number;
 export const sim_rail_network: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number, a1: number, b1: number, c1: number) => void;
 export const sim_rail_path_len: (a: number) => number;
@@ -62,6 +65,7 @@ export const sim_spawn_player: (a: number, b: number, c: number, d: number) => n
 export const sim_stats: (a: number) => [number, number];
 export const sim_step: (a: number, b: number) => void;
 export const sim_take_over: (a: number, b: number) => number;
+export const sim_take_prof: (a: number) => [number, number];
 export const sim_tile_count: (a: number) => number;
 export const sim_write_output: (a: number, b: number, c: number) => void;
 export const __wbindgen_externrefs: WebAssembly.Table;

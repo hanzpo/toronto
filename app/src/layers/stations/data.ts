@@ -2,6 +2,7 @@
 // `pipeline: uv run python -m tpipe.stations build` from
 // pipeline/curated/stations.json — see docs/STATIONS.md). World E/N metres.
 import type { Mode, StationMeta, TransitIndex } from '../../transit';
+import type { StructureSpec } from './allen';
 
 export type RailMode = 'subway' | 'lrt' | 'commuter_rail' | 'airport_rail' | 'intercity_rail';
 export const RAIL_MODES: RailMode[] = ['subway', 'lrt', 'commuter_rail', 'airport_rail', 'intercity_rail'];
@@ -16,6 +17,8 @@ export interface PlatRec {
   /** compass bearing of the platform axis (deg, 0–180) */
   b: number;
   len: number;
+  /** full curated length (len = straight part fitted to the track, for QA) */
+  lenFull?: number;
   w: number;
 }
 
@@ -39,6 +42,8 @@ export interface LevelRec {
   canopy_len?: number;
   /** platforms/canopies modelled by this landmark instead (e.g. union_station) */
   landmark?: string;
+  /** Allen Road median station structure (enclosure, roof, concourse), see ./allen.ts */
+  structure?: StructureSpec;
   plats: PlatRec[];
 }
 

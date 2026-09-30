@@ -408,11 +408,18 @@ class Block:
 
 @functools.lru_cache(maxsize=1)
 def suppressed() -> frozenset:
-    """OSM building ids the client skips because a landmark model replaces them."""
+    """OSM building ids the client skips (landmark models, station clearance)."""
+    out: set = set()
     p = geo.OUT / "landmarks.json"
-    if not p.exists():
-        return frozenset()
-    return frozenset(int(o) for L in json.loads(p.read_text()) for o in L.get("suppress", []))
+    if p.exists():
+        out |= {int(o) for L in json.loads(p.read_text()) for o in L.get("suppress", [])}
+    # buildings clipping tracks / platforms, skipped by the client too (stations.json suppress)
+    s = geo.OUT / "stations.json"
+    if s.exists():
+        d = json.loads(s.read_text())
+        if isinstance(d, dict):
+            out |= {int(o) for o in d.get("suppress", [])}
+    return frozenset(out)
 
 
 @functools.lru_cache(maxsize=1)

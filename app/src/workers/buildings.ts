@@ -10,6 +10,8 @@
 import earcut from 'earcut';
 import type { TypedArray } from '../data/tbn';
 import type { MeshBuf } from './meshing';
+import { parapetHeight, pitchedDetail, roofTop, type RoofIn } from './rooftops';
+import { SegIndex, alleyFront, alleySegs, rnd as urnd, towerInProgress } from './urban';
 
 // facade styles (must match facadeMaterial.ts STYLE table)
 export const ST = {
@@ -48,7 +50,7 @@ function tame(rgb: number): number {
   return (f(r) << 16) | (f(g) << 8) | f(b);
 }
 
-function ringArea(xy: ArrayLike<number>, a: number, b: number): number {
+export function ringArea(xy: ArrayLike<number>, a: number, b: number): number {
   let s = 0;
   for (let i = a; i < b; i++) {
     const j = i + 1 < b ? i + 1 : a;
@@ -57,10 +59,10 @@ function ringArea(xy: ArrayLike<number>, a: number, b: number): number {
   return s / 2;
 }
 
-interface OBB { cx: number; cy: number; ux: number; uy: number; L: number; W: number }
+export interface OBB { cx: number; cy: number; ux: number; uy: number; L: number; W: number }
 
 /** min-area oriented rectangle using ring edge directions; u = long axis */
-function obb(xy: ArrayLike<number>, a: number, b: number): OBB {
+export function obb(xy: ArrayLike<number>, a: number, b: number): OBB {
   let best: OBB | null = null;
   let bestA = Infinity;
   for (let i = a; i < b; i++) {
@@ -119,9 +121,9 @@ function insetOuterRings(xy: Float32Array, ringOff: Uint32Array, vertOff: Uint32
 
 // --------------------------------------------------------------------------- builder with facade attributes
 
-type RGB = [number, number, number];
+export type RGB = [number, number, number];
 
-class FBuilder {
+export class FBuilder {
   pos: Float32Array; nrm: Int8Array; col: Uint8Array; fac: Float32Array; fcd: Float32Array; idx: Uint32Array;
   nv = 0; ni = 0;
   // current facade record applied to new vertices
@@ -162,7 +164,7 @@ class FBuilder {
 }
 
 /** vertical quad (x0,n0)->(x1,n1) in E,N; outward normal to the right of travel (CCW ring) */
-function wall(b: FBuilder, x0: number, n0: number, x1: number, n1: number, y0a: number, y1a: number, y0b: number, y1b: number, c: RGB) {
+export function wall(b: FBuilder, x0: number, n0: number, x1: number, n1: number, y0a: number, y1a: number, y0b: number, y1b: number, c: RGB) {
   const dx = x1 - x0, dn = n1 - n0;
   const l = Math.hypot(dx, dn);
   if (l < 1e-4) return;
@@ -188,7 +190,7 @@ function tri(b: FBuilder, p: number[][], c: RGB, u: [number, number, number] = [
 }
 
 /** quad of 4 three-space points, oriented so its normal faces `face` (three-space); u per vertex */
-function quadFacing(b: FBuilder, P: number[][], face: [number, number, number], c: RGB, u: number[]) {
+export function quadFacing(b: FBuilder, P: number[][], face: [number, number, number], c: RGB, u: number[]) {
   const ax = P[1][0] - P[0][0], ay = P[1][1] - P[0][1], az = P[1][2] - P[0][2];
   const bx = P[2][0] - P[0][0], by = P[2][1] - P[0][1], bz = P[2][2] - P[0][2];
   let nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
@@ -354,10 +356,15 @@ export function frontage(g: SegGrid, mx: number, my: number, nx: number, ny: num
 
 // --------------------------------------------------------------------------- main
 
+/**
+ * Extrude a tile's buildings. Level 0 also returns rooftop / construction
+ * placements (`items`, workers/urban.ts records) for the urban layer.
+ */
 export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<number>, level: number, originE = 0, originN = 0,
-  terr?: { at(e: number, n: number): number }): { mesh: MeshBuf | null; count: number } {
+  terr?: { at(e: number, n: number): number }, names?: string[]): { mesh: MeshBuf | null; count: number; items: number[] } {
+  const items: number[] = [];
   const ringOff = a.b_ring_off as Uint32Array | undefined;
-  if (!ringOff || ringOff.length < 2) return { mesh: null, count: 0 };
+  if (!ringOff || ringOff.length < 2) return { mesh: null, count: 0, items };
   const vertOff = a.b_vert_off as Uint32Array, xy0 = a.b_xy as Float32Array;
   // Anti z-fighting: every outer ring is inset by a tiny height-ranked amount plus a per-building hash term.
   const xy = insetOuterRings(xy0, ringOff, vertOff, a.b_height as Float32Array, a.b_osm as Float64Array);
@@ -368,6 +375,8 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
   const nB = ringOff.length - 1;
   const S = level === 0 ? 1024 : level === 1 ? 4096 : 16384;
   const roads = level === 0 ? roadGrid(a) : null;
+  // laneways: garage doors on the walls of garages / sheds that face one
+  const alleys = level === 0 ? new SegIndex(alleySegs(a, originE, originN, names), 8) : null;
   const b = new FBuilder(nB * 24, nB * 48);
   let count = 0;
   const flat: number[] = [];
@@ -382,10 +391,22 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
     if (r1 <= r0) continue;
     count++;
     const base = BASE[i];
-    const height = Math.max(H[i], 2.5);
-    const minH = Math.min(MIN ? MIN[i] : 0, height - 0.5);
+    let height = Math.max(H[i], 2.5);
     const kind = KIND[i] ?? 0;
     const h = hash32(Math.abs(osm) || i);
+    // building=construction: a concrete frame part-way up (+ crane) at level 0; a stub from afar
+    if (kind === 16) {
+      const va0 = vertOff[r0], vb0 = vertOff[r0 + 1];
+      const consH = height * (0.18 + urnd(h, 500) * 0.72);
+      if (level === 0 && terr && vb0 - va0 >= 3) {
+        const o = obb(xy, va0, vb0);
+        towerInProgress(items, o.cx, o.cy, Math.atan2(o.uy, o.ux), Math.max(8, o.L - 1), Math.max(6, o.W - 1), base, consH, h, height > 25,
+          district(originE + o.cx, originN + o.cy).core);
+        continue;
+      }
+      height = Math.max(3, consH);
+    }
+    const minH = Math.min(MIN ? MIN[i] : 0, height - 0.5);
     const r = rnd(h, 1), r2 = rnd(h, 2);
     const va = vertOff[r0], vb = vertOff[r0 + 1];
     const nOuter = vb - va;
@@ -418,8 +439,18 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
     edgeFront.length = 0; edgeUnit.length = 0; edgeD.length = 0;
     const ccwOuter = ringArea(xy, va, vb) > 0;
     const wantShops = level === 0 && roads && minH < 0.5 && height >= 3.2 && kind !== 1 && kind !== 11 && kind !== 14 && kind !== 15;
+    const wantGarage = alleys && st.style === ST.BLANK && minH < 0.5 && height < 6 && area < 90;
     for (let k = va; k < vb; k++) {
       edgeFront.push(F_NONE); edgeUnit.push(0); edgeD.push(0);
+      if (wantGarage) {
+        const k2 = k + 1 < vb ? k + 1 : va;
+        let x0 = xy[k * 2], y0 = xy[k * 2 + 1], x1 = xy[k2 * 2], y1 = xy[k2 * 2 + 1];
+        if (!ccwOuter) { [x0, x1] = [x1, x0]; [y0, y1] = [y1, y0]; }
+        const L = Math.hypot(x1 - x0, y1 - y0);
+        const f = L >= 2.6 ? alleyFront(alleys!, (x0 + x1) / 2, (y0 + y1) / 2, (y1 - y0) / L, -(x1 - x0) / L, 3.5) : null;
+        // F_DOCK on a BLANK (garage) wall = residential garage door(s), see facadeMaterial
+        if (f !== null) { edgeFront[k - va] = F_DOCK; edgeUnit[k - va] = L > 5.8 ? L / 2 : L; edgeD[k - va] = f; continue; }
+      }
       if (!wantShops) continue;
       const k2 = k + 1 < vb ? k + 1 : va;
       let x0 = xy[k * 2], y0 = xy[k * 2 + 1], x1 = xy[k2 * 2], y1 = xy[k2 * 2 + 1];
@@ -492,6 +523,7 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
         tri(b, [[c00[0], eave, c00[1]], [rb[0], top, rb[1]], [ra[0], top, ra[1]]], rc);
         tri(b, [[c11[0], eave, c11[1]], [c01[0], eave, c01[1]], [ra[0], top, ra[1]]], rc);
         tri(b, [[c11[0], eave, c11[1]], [ra[0], top, ra[1]], [rb[0], top, rb[1]]], rc);
+        if (level === 0) pitchedDetail(items, o.cx, o.cy, ux, uy, hl, hw, eave, top, roofType, inset, h, old, kind, area);
         if (roofType === 1) {
           // gable ends: wall material (the attic window row reads as a half storey)
           b.code = codeOf(st.style, F_NONE);
@@ -517,7 +549,12 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
       const rh = Math.min(roofMode === 'dome' ? rad : rad * 0.6, (height - minH) * 0.6);
       wallTop = top - rh;
     }
-    b.H = wallTop - base;
+    // flat roofs: parapet walls rise above the roof deck (level 0), penthouses / equipment after the roof
+    const roofIn: RoofIn | null = roofMode === 'flat' && !(kind === 15) ? {
+      xy, vertOff, r0, r1, base, roofY: wallTop, H: height, kind, style: st.style, old, core, h, area, wc, seed, level,
+    } : null;
+    const par = roofIn ? parapetHeight(roofIn, minH) : 0;
+    b.H = wallTop + par - base;
     for (let rr = r0; rr < r1; rr++) {
       const s = vertOff[rr], e = vertOff[rr + 1];
       const ccw = ringArea(xy, s, e) > 0;
@@ -530,7 +567,7 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
         const fr = rr === r0 ? edgeFront[k - s] : F_NONE;
         b.unit = rr === r0 ? edgeUnit[k - s] : 0;
         b.code = codeOf(st.style, fr);
-        wall(b, x0, n0, x1, n1, bottom, wallTop, bottom, wallTop, wc);
+        wall(b, x0, n0, x1, n1, bottom, wallTop + par, bottom, wallTop + par, wc);
         // storefronts / lobbies meet the sidewalk: pave the frontage from the wall to the curb
         if ((fr === F_SHOP || fr === F_LOBBY) && terr && rr === r0) apron(b, x0, n0, x1, n1, Math.min(edgeD[k - s] - 0.2, 5), terr, seed);
         if (fr === F_SHOP && level === 0) shopFront(b, x0, n0, x1, n1, base, b.L, b.unit, h, st.style, old, kind, area, seed, shopDistrict(originE + cx0, originN + cy0) ? 0.65 : old ? 0.38 : 0.12);
@@ -551,6 +588,10 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
         const A = tris[k], B = tris[k + 1], C = tris[k + 2];
         const cr = (flat[B * 2] - flat[A * 2]) * (flat[C * 2 + 1] - flat[A * 2 + 1]) - (flat[B * 2 + 1] - flat[A * 2 + 1]) * (flat[C * 2] - flat[A * 2]);
         if (cr >= 0) b.t(baseV + A, baseV + B, baseV + C); else b.t(baseV + A, baseV + C, baseV + B);
+      }
+      if (roofIn && (level === 0 || height >= 45)) {
+        roofTop(b, roofIn, par, level === 0 ? items : null);
+        b.h0 = base; b.code = roofCode; b.H = wallTop - base;
       }
       if (minH > 0.5) {
         const baseU = b.nv;
@@ -583,7 +624,7 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
       }
     }
   }
-  return { mesh: b.finish(), count };
+  return { mesh: b.finish(), count, items };
 }
 
 const PAVING: RGB = [184, 180, 172];

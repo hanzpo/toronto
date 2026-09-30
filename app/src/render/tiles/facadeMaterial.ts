@@ -270,11 +270,27 @@ export function facadeMaterial(): THREE.MeshLambertNodeMaterial {
   col = mix(col, lobbyC, lobbyZone);
   col = mix(col, wallC.mul(0.8), isLobby.mul(isWall).mul(box(hh, lobbyH.sub(0.4), lobbyH, wh)));
 
-  // ---- loading doors (industrial)
-  const dockDoor = box(um, unitW.mul(0.5).sub(1.6), unitW.mul(0.5).add(1.6), wm).mul(step(hh, 3.7)).mul(step(rs, 0.65));
-  const ribs = sin(hh.div(0.16).mul(6.2832)).mul(0.08).mul(float(1).sub(smoothstep(0.3, 0.6, fwidth(hh.div(0.16)))));
-  const dockC = lin(0.55, 0.56, 0.56).mul(float(1).add(ribs));
-  const dockFrame = box(um, unitW.mul(0.5).sub(1.8), unitW.mul(0.5).add(1.8), wm).mul(step(hh, 3.9)).mul(step(rs, 0.65));
+  // ---- loading doors (industrial); on BLANK walls (laneway garages, workers/buildings.ts) residential garage doors
+  const isGar = step(9.5, style).mul(step(style, 10.5));
+  const dHalf = mix(float(1.6), min(unitW.mul(0.5).sub(0.35), float(1.25)), isGar);
+  const dTop = mix(float(3.7), float(2.15), isGar);
+  const dOn = max(step(rs, 0.65), isGar);
+  const dockDoor = box(um, unitW.mul(0.5).sub(dHalf), unitW.mul(0.5).add(dHalf), wm).mul(step(hh, dTop)).mul(dOn);
+  const ribP = mix(float(0.16), float(0.54), isGar);
+  const ribs = sin(hh.div(ribP).mul(6.2832)).mul(mix(float(0.08), float(0.12), isGar)).mul(float(1).sub(smoothstep(0.3, 0.6, fwidth(hh.div(ribP)))));
+  // garage door colours: white, cream, brown, grey, green, black
+  const garC = select(rs.lessThan(0.3), lin(0.86, 0.85, 0.82), select(rs.lessThan(0.45), lin(0.8, 0.74, 0.62), select(rs.lessThan(0.6), lin(0.36, 0.25, 0.17),
+    select(rs.lessThan(0.75), lin(0.52, 0.53, 0.53), select(rs.lessThan(0.87), lin(0.2, 0.3, 0.24), lin(0.12, 0.12, 0.13))))));
+  let dockC: N = mix(lin(0.55, 0.56, 0.56), garC, isGar).mul(float(1).add(ribs));
+  // tasteful graffiti on some laneway garage doors: bubbly letter fills with a dark outline
+  const gsd = rs2.mul(40);
+  const gu = um.sub(unitW.mul(0.5)).mul(1.1), gv = hh.mul(1.25);
+  const gf = sin(gu.mul(2.6).add(sin(gv.mul(3.3).add(gsd)).mul(1.2)).add(gsd.mul(0.7))).mul(sin(gv.mul(4.6).add(sin(gu.mul(2.1).add(gsd.mul(1.3))).mul(1.4))));
+  const gBand = box(hh, float(0.35), float(1.75), wh).mul(box(um, unitW.mul(0.5).sub(dHalf).add(0.2), unitW.mul(0.5).add(dHalf).sub(0.2), wm));
+  const gOn = isGar.mul(step(rs2, 0.16)).mul(float(1).sub(shopFar)).mul(gBand);
+  dockC = mix(dockC, mix(signC, pal(4, fract(rs2.mul(5.3))), step(0.5, fract(gu.mul(0.35).add(gv.mul(0.2))))), step(0.18, gf).mul(gOn));
+  dockC = mix(dockC, lin(0.03, 0.03, 0.035), step(0.08, gf).mul(step(gf, 0.18)).mul(gOn));
+  const dockFrame = box(um, unitW.mul(0.5).sub(dHalf.add(0.2)), unitW.mul(0.5).add(dHalf.add(0.2)), wm).mul(step(hh, dTop.add(0.2))).mul(dOn);
   const dockZone = isDock.mul(isWall);
   col = mix(col, lin(0.25, 0.25, 0.24), dockFrame.mul(dockZone));
   col = mix(col, dockC, dockDoor.mul(dockZone));
@@ -283,7 +299,23 @@ export function facadeMaterial(): THREE.MeshLambertNodeMaterial {
   const rp = vec2(positionWorld.x, positionWorld.z);
   const rn = hash2(floor(rp.x.div(1.7)), floor(rp.y.div(1.7))).sub(0.5).mul(0.1)
     .add(hash2(floor(rp.x.div(9.3)), floor(rp.y.div(9.3))).sub(0.5).mul(0.12));
+  // real roof decks (not paint / aprons, which carry H = 999): per-building finish from the seed —
+  // gravel ballast, single-ply membrane with seams on the street grid (≈ −16.7°), or dark modified bitumen
+  const deck = step(Ht, 900).mul(isRoof).mul(step(0.35, abs(normalLocal.y)));
+  const rt = fract(seed.mul(0.618));
+  const rq = vec2(rp.x.mul(0.958).sub(rp.y.mul(0.287)), rp.x.mul(0.287).add(rp.y.mul(0.958)));
+  const fineW = max(fwidth(rp.x), fwidth(rp.y));
+  const nearR = float(1).sub(smoothstep(0.05, 0.25, fineW));
+  const gravel = hash2(floor(rp.x.div(0.22)), floor(rp.y.div(0.22))).sub(0.5).mul(0.22).mul(nearR);
+  const sq = rq.x.div(3.05);
+  const seam = box(fract(sq), float(0), float(0.02), max(fwidth(sq), 0.001)).mul(float(1).sub(smoothstep(0.1, 0.4, fwidth(sq))));
+  const bq = rq.y.div(0.95);
+  const lap = box(fract(bq), float(0), float(0.05), max(fwidth(bq), 0.001)).mul(float(1).sub(smoothstep(0.15, 0.45, fwidth(bq))));
+  const stain = smoothstep(0.55, 0.9, hash2(floor(rq.x.div(6.1)), floor(rq.y.div(4.3)))).mul(0.14);
+  const isGravel = step(rt, 0.42), isMem = step(0.42, rt).mul(step(rt, 0.78)), isBit = step(0.78, rt);
+  const finish = float(1).add(gravel.mul(isGravel)).sub(seam.mul(0.12).mul(isMem)).sub(lap.mul(0.1).mul(isBit)).sub(stain.mul(isMem.add(isBit)));
   col = mix(col, base.mul(float(1).add(rn)), isRoof.mul(step(0.35, abs(normalLocal.y))));
+  col = mix(col, col.mul(finish).mul(mix(float(1), float(0.62), isBit)), deck);
 
   // ---- awnings (striped or solid fabric) and plaza canopies (sign fascia)
   const aw = fract(u.div(0.36));

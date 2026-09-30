@@ -3,6 +3,7 @@ import * as THREE from 'three/webgpu'
 import { Parts, prism, slab, lathe, cyl, box, beam, rect, P as P3 } from './kit'
 import type { BuildCtx } from './types'
 import { tower } from './financial'
+import { addParts, zOf } from './kit2'
 
 // Skylon Tower (160 m). Canonical frame = world (rotation 0): elevator rails
 // at -8°, 112°, 232° as in OSM. Three yellow "bug" elevators ride outside.
@@ -10,8 +11,23 @@ export function buildSkylon(ctx: BuildCtx) {
   const hi = ctx.detail === 'high'
   const P = new Parts()
   const seg = hi ? 40 : 14
-  const base = ctx.footprint(rect(30, 30))
-  tower(P, base, 0, 11, 'concreteWin', 'concrete')
+  // The tower rises out of its three-storey base complex (OSM building
+  // 241004751 and its parts, suppressed and drawn here); the tower itself
+  // stands on its own ground level (partZ.tower).
+  const zt = zOf(ctx, 'tower')
+  const TOWER = new Set([241004747, 241004754, 241004755, 241004758, 241004760, 241004763, 241004766, 241004767, 241004769,
+    241004770, 241004771, 241004772, 241004774, 241004776, 241004777, 241004779, 241004781, 241004783, 1012630009])
+  const baseP = new Parts()
+  addParts(baseP, ctx, (p) => (p.whole || TOWER.has(p.id) ? null : { wall: 'concreteWin', roof: 'roofLight' }))
+  if (ctx.entry?.osmParts?.some((p) => !TOWER.has(p.id) && !p.whole)) P.addParts(baseP)
+  else tower(P, ctx.footprint(rect(30, 30)), zt, zt + 11, 'concreteWin', 'concrete')
+  const T = new Parts()
+  buildSkylonTower(T, hi, seg)
+  P.addParts(T, zt ? new THREE.Matrix4().makeTranslation(0, zt, 0) : undefined)
+  return P.build('skylon_tower')
+}
+
+function buildSkylonTower(P: Parts, hi: boolean, seg: number) {
   P.add('concrete', cyl(4.6, 118, 0, hi ? 20 : 10, 4.0))
   const rails = [-8, 112, 232].map((d) => (d * Math.PI) / 180)
   rails.forEach((a, k) => {
@@ -36,7 +52,6 @@ export function buildSkylon(ctx: BuildCtx) {
   P.add('white', lathe([[6.4, 146], [4, 147.5], [1, 148.3]], seg))
   P.add('steelWhite', cyl(0.6, 12, 148, 8, 0.25))
   P.add('beacon', cyl(0.4, 0.8, 159.5, 8))
-  return P.build('skylon_tower')
 }
 
 // Rainbow Bridge (1941): 290 m steel deck-arch across the Niagara gorge.

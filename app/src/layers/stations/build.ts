@@ -9,6 +9,10 @@ import type { Mode } from '../../transit';
 import { SLOTS, type Slot } from './signs';
 import { HEAVY, type LevelRec, type PlatRec, type StationRec } from './data';
 import type { Poly, TrackIndex } from './tracks';
+import { buildAllen } from './allen';
+
+/** Allen Road station structures (./allen.ts); ?allen=0 turns them off (debug) */
+const ALLEN_ON = !(typeof location !== 'undefined' && /[?&]allen=0\b/.test(location.search));
 
 export type RGB = [number, number, number];
 type V3 = [number, number, number];
@@ -89,6 +93,8 @@ export interface Built {
   pending: boolean;
   /** label anchor elevation */
   labelH: number;
+  /** clearance QA: platforms built, track centrelines found inside a platform envelope (edge − E) */
+  qa: { platforms: number; intrusions: { lat: number; e: number; n: number }[]; columns?: [number, number][] };
 }
 
 /**
@@ -116,10 +122,12 @@ interface Sample { e: number; n: number; z: number; nx: number; ny: number; s: n
 
 export interface BuildEnv {
   tracks: TrackIndex;
+  /** every track of the rail network (sidings, freight, unused platforms' tracks) for clearance clipping */
+  allTracks: TrackIndex | null;
   heightAt(e: number, n: number): number;
   hasHeights(e: number, n: number): boolean;
   wall: number;
-  brand: 'ttc' | 'go' | 'up' | 'via';
+  brand: 'ttc' | 'go' | 'up' | 'via' | 'lrt';
 }
 
 const EDGE: Record<string, number> = { subway: 1.6, lrt: 1.45, commuter_rail: 1.65, airport_rail: 1.65, intercity_rail: 1.65 };
@@ -223,7 +231,7 @@ function planCurated(env: BuildEnv, _lv: LevelRec, p: PlatRec, ok: (p: Poly) => 
   // platform centre in the reference frame
   const lc = (p.c[0] - pt.x) * pt.nx + (p.c[1] - pt.y) * pt.ny;
   // the reference hit is the platform centre's projection onto the track
-  const [s0, s1] = clampS(pt.ref, pt.sRef, p.len);
+  const [s0, s1] = clampS(pt.ref, pt.sRef, Math.max(p.len, p.lenFull ?? 0));
   const lats = pt.lats;
   let left: number | null = null, right: number | null = null;
   for (const o of lats) {
@@ -257,6 +265,65 @@ function project(tr: TrackIndex, ref: number, p: { e: number; n: number }): { s:
   return { s, lat: (p.e - h.x) * -ty + (p.n - h.y) * tx };
 }
 
+/**
+ * Keep a platform clear of every other track (network tracks the trains of
+ * this level don't use: sidings, freight bypasses, other lines): edges stay
+ * ≥ E from any parallel track centreline except the ones it serves.
+ */
+function clipToTracks(env: BuildEnv, pl: PlatformPlan, E: number): PlatformPlan | null {
+  const all = env.allTracks;
+  if (!all) return pl;
+  const tr = env.tracks;
+  let { a, b } = pl;
+  for (const f of [0.05, 0.3, 0.5, 0.7, 0.95]) {
+    const s = pl.s0 + (pl.s1 - pl.s0) * f;
+    const p = tr.at(pl.ref, s);
+    const [tx, ty] = tr.tangent(pl.ref, s);
+    const nx = -ty, ny = tx;
+    for (const h of all.near(p.e, p.n, Math.max(Math.abs(a), Math.abs(b)) + E + 2, () => true)) {
+      const sh = all.arc(h.poly, h.seg, h.t);
+      const [qx, qy] = all.tangent(h.poly, sh, 4);
+      if (Math.abs(qx * tx + qy * ty) < 0.9) continue;
+      const lat = (h.x - p.e) * nx + (h.y - p.n) * ny;
+      if (Math.abs(lat - (a - E)) < 1.0 || Math.abs(lat - (b + E)) < 1.0) continue; // the tracks it serves
+      if (lat <= a - E || lat >= b + E) continue;
+      // a track inside the platform envelope: cut the platform back on that side
+      if (lat - a < b - lat) { a = lat + E; pl = { ...pl, trackA: true }; } else { b = lat - E; pl = { ...pl, trackB: true }; }
+    }
+  }
+  if (b - a < 1.8) return null;
+  return { ...pl, a, b };
+}
+
+function trackWithin(env: BuildEnv, e: number, n: number, r: number): boolean {
+  const all = env.allTracks;
+  return !!all && all.near(e, n, r, () => true).length > 0;
+}
+
+/** network track centrelines (any direction) closer than E − 0.15 m to the platform body */
+function intrusions(env: BuildEnv, pl: PlatformPlan, E: number): { lat: number; e: number; n: number; s: number }[] {
+  const all = env.allTracks;
+  if (!all) return [];
+  const tr = env.tracks;
+  const out: { lat: number; e: number; n: number; s: number }[] = [];
+  const n = Math.max(3, Math.ceil((pl.s1 - pl.s0) / 10));
+  for (let k = 0; k <= n; k++) {
+    const s = pl.s0 + ((pl.s1 - pl.s0) * k) / n;
+    const p = tr.at(pl.ref, s);
+    const [tx, ty] = tr.tangent(pl.ref, s);
+    const nx = -ty, ny = tx;
+    const a = pl.a, b = pl.b;
+    for (const h of all.near(p.e, p.n, Math.max(Math.abs(a), Math.abs(b)) + E, () => true)) {
+      const along = (h.x - p.e) * tx + (h.y - p.n) * ty;
+      if (Math.abs(along) > 5) continue;
+      const lat = (h.x - p.e) * nx + (h.y - p.n) * ny;
+      if (Math.abs(lat - (a - E)) < 1.0 || Math.abs(lat - (b + E)) < 1.0) continue;
+      if (lat > a - E + 0.15 && lat < b + E - 0.15) { out.push({ lat, e: h.x, n: h.y, s }); break; }
+    }
+  }
+  return out;
+}
+
 function samples(tr: TrackIndex, ref: number, s0: number, s1: number, step: number): Sample[] {
   const nSeg = Math.max(2, Math.ceil((s1 - s0) / step));
   const out: Sample[] = [];
@@ -284,10 +351,27 @@ export function buildStation(st: StationRec, env: BuildEnv, lineBullets: string[
   let labelH = -Infinity;
   const tr = env.tracks;
   const surfacePlatformsAt: { e: number; n: number }[] = [];
+  const qa: Built['qa'] = { platforms: 0, intrusions: [] };
 
   for (const lv of st.levels) {
     if (lv.landmark) continue;
-    const plans = planPlatforms(env, lv);
+    const plans = planPlatforms(env, lv).map((pl) => clipToTracks(env, pl, EDGE[lv.mode] ?? 1.6)).filter((pl): pl is PlatformPlan => !!pl);
+    for (let i = 0; i < plans.length; i++) {
+      // switches / crossovers at the platform ends: end the platform before them
+      let pl = plans[i];
+      for (let it = 0; it < 4; it++) {
+        const bad = intrusions(env, pl, EDGE[lv.mode] ?? 1.6);
+        if (!bad.length) break;
+        const L = pl.s1 - pl.s0;
+        const x = bad[0].s;
+        if (x - pl.s0 < 0.35 * L) pl = { ...pl, s0: x + 4 };
+        else if (pl.s1 - x < 0.35 * L) pl = { ...pl, s1: x - 4 };
+        else break;
+      }
+      plans[i] = pl;
+      qa.platforms++;
+      qa.intrusions.push(...intrusions(env, pl, EDGE[lv.mode] ?? 1.6));
+    }
     if (!plans.length) continue;
     const heavy = HEAVY.has(lv.mode);
     const E = EDGE[lv.mode] ?? 1.6;
@@ -357,11 +441,23 @@ export function buildStation(st: StationRec, env: BuildEnv, lineBullets: string[
         continue;
       }
       surfacePlatformsAt.push({ e: pm.e, n: pm.n });
+      // ---- Allen Road median stations: enclosure, roof, concourses (./allen.ts) replace the canopy
+      if (ALLEN_ON && lv.structure && pl.trackA && pl.trackB) {
+        const total = tr.length(pl.ref);
+        const SX = samples(tr, pl.ref, Math.max(0, pl.s0 - 45), Math.min(total, pl.s1 + 45), 4);
+        const res = buildAllen(lv.structure, {
+          g, S: SX, s0: pl.s0, s1: pl.s1, a: pl.a, b: pl.b, E, H, P,
+          heightAt: (e, n) => env.heightAt(e, n),
+          trackNear: (e, n, r) => trackWithin(env, e, n, r),
+        });
+        qa.columns = (qa.columns ?? []).concat(res.cols);
+      }
       // ---- canopy
       let canopyLen = 0;
       if (heavy) canopyLen = lv.canopy_len ?? Math.min(pl.s1 - pl.s0, lv.mode === 'airport_rail' ? 90 : lv.mode === 'intercity_rail' ? 40 : Math.max(60, (pl.s1 - pl.s0) * 0.4));
       else if (lv.mode === 'subway') canopyLen = pl.s1 - pl.s0; // Kipling, Davisville, Wilson…: covered platforms
       else if (lv.mode === 'lrt') canopyLen = Math.min(28, pl.s1 - pl.s0);
+      if (ALLEN_ON && lv.structure) canopyLen = 0;
       if (canopyLen > 0 && w >= 2.4) {
         const roofY = H + (heavy ? 3.9 : 3.3);
         const ca = pl.trackA ? pl.a + 0.35 : pl.a - 0.2, cb = pl.trackB ? pl.b - 0.35 : pl.b + 0.2;
@@ -378,7 +474,8 @@ export function buildStation(st: StationRec, env: BuildEnv, lineBullets: string[
           g.face(Q(i, cb, roofY), Q(i + 1, cb, roofY), Q(i + 1, cb, roofY + 0.28), Q(i, cb, roofY + 0.28), trim, [q.nx, 0, -q.ny]);
           if (S[i].s - lastPost >= (heavy ? 12 : 9)) {
             lastPost = S[i].s;
-            post(g, Q(i, postLat, H), 0.26, roofY - H, C.steel);
+            // never on or next to a track (crossovers, other lines): ≥ 2.2 m clearance
+            if (!trackWithin(env, q.e + q.nx * postLat, q.n + q.ny * postLat, 2.2)) post(g, Q(i, postLat, H), 0.26, roofY - H, C.steel);
           }
         }
         // canopy end caps
@@ -450,7 +547,7 @@ export function buildStation(st: StationRec, env: BuildEnv, lineBullets: string[
   // ---- surface entrances
   const lvC = st.levels.map((l) => l.c);
   for (const en of st.ents) {
-    if (en.k === 'underground' || en.k === 'path') continue;
+    if (en.k === 'underground' || en.k === 'path' || env.brand === 'lrt') continue;
     const [e, n] = en.p;
     if (!env.hasHeights(e, n)) { pending = true; continue; }
     const h = env.heightAt(e, n);
@@ -500,7 +597,7 @@ export function buildStation(st: StationRec, env: BuildEnv, lineBullets: string[
   }
   if (!Number.isFinite(labelH)) labelH = env.hasHeights(oe, on) ? env.heightAt(oe, on) : 0;
   void lineBullets; void surfacePlatformsAt;
-  return { id: st.id, oe, on, lit, under, signs, boxes, pending, labelH };
+  return { id: st.id, oe, on, lit, under, signs, boxes, pending, labelH, qa };
 }
 
 // --------------------------------------------------------------------------------- pieces

@@ -79,9 +79,6 @@ export class Sim {
         wasm.sim_add_tile(this.__wbg_ptr, tx, ty, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9, ptr10, len10, ptr11, len11, ptr12, len12, ptr13, len13, ptr14, len14);
     }
     /**
-     * advance the rail agents by `dt` s ending at time-of-day `tod` (independent of the
-     * road sim so trains keep up at high clock rates)
-     * cars stopped in junction boxes: [front past the stop line, rear in the exit box, inside a split junction]
      * @returns {Uint32Array}
      */
     box_detail() {
@@ -294,6 +291,17 @@ export class Sim {
         return this;
     }
     /**
+     * cars stopped in junction boxes: [front past the stop line, rear in the exit box, inside a split junction]
+     * QA: overlapping car bodies by cause (see World::overlap_causes)
+     * @returns {Uint32Array}
+     */
+    overlap_counts() {
+        const ret = wasm.sim_overlap_counts(this.__wbg_ptr);
+        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
      * @returns {number}
      */
     ped_count() {
@@ -392,6 +400,25 @@ export class Sim {
     rail_count() {
         const ret = wasm.sim_rail_count(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * crossings whose state changed: [osm id, state (0 idle, 1 warning, 2 gates down)]*
+     * @returns {Float64Array}
+     */
+    rail_crossing_changes() {
+        const ret = wasm.sim_rail_crossing_changes(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
+     * level crossings from the network header: [osm id, edge, s, E, N]*
+     * @param {Float64Array} data
+     */
+    rail_crossings(data) {
+        const ptr0 = passArrayF64ToWasm0(data, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.sim_rail_crossings(this.__wbg_ptr, ptr0, len0);
     }
     /**
      * is the player driving a train?
@@ -694,6 +721,19 @@ export class Sim {
         return ret !== 0;
     }
     /**
+     * advance the rail agents by `dt` s ending at time-of-day `tod` (independent of the
+     * road sim so trains keep up at high clock rates)
+     * accumulated ms per road-sim phase since the last call
+     * [validate, sort+paths, occupancy, car following, lane changes, advance, spawn, peds]
+     * @returns {Float64Array}
+     */
+    take_prof() {
+        const ret = wasm.sim_take_prof(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
      * @returns {number}
      */
     tile_count() {
@@ -715,6 +755,13 @@ function __wbg_get_imports() {
         __proto__: null,
         __wbg___wbindgen_throw_41e9ee4f547fc59a: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
+        },
+        __wbg_error_81547f947fe942eb: function(arg0, arg1) {
+            console.error(getStringFromWasm0(arg0, arg1));
+        },
+        __wbg_now_87dd8f93ffbfb263: function() {
+            const ret = performance.now();
+            return ret;
         },
         __wbindgen_init_externref_table: function() {
             const table = wasm.__wbindgen_externrefs;

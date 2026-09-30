@@ -2,39 +2,40 @@
 import * as THREE from 'three/webgpu';
 import {
   Fn, float, vec2, vec3, vec4, texture, uniform, positionLocal, positionGeometry, normalLocal,
-  modelWorldMatrix, cameraPosition, transformNormalToView, mix, smoothstep, sin, step, cos, length,
-  normalize, max, clamp, floor, fract, pow, luminance, vertexColor, positionWorld,
+  modelWorldMatrix, cameraPosition, transformNormalToView, mix, smoothstep, sin, step, length,
+  normalize, clamp, floor, fract, pow, luminance, vertexColor, positionWorld,
 } from 'three/tsl';
 import { U } from '../uniforms';
+import { waterSurface } from './groundMaterial';
 
 // ---------------------------------------------------------------------------- palette
 
 /** Land-cover class → colour (SPEC ground classes). Cartographic, slightly desaturated. */
 export const GROUND_PALETTE: Record<number, number> = {
-  0: 0xdcd8c8, // land
+  0: 0x9ea477, // land: rough grass / meadow (as the vector ground)
   1: 0x86a9c4, // water
-  2: 0xb5cf9a, // grass / park
-  3: 0x93b384, // forest
-  4: 0xe3ddcf, // residential
-  5: 0xe0d5c8, // commercial
-  6: 0xd6d1cb, // industrial
-  7: 0xe4dfb8, // farmland
-  8: 0xeadfbd, // sand / beach
+  2: 0x7f9c58, // grass / park
+  3: 0x5b6a3e, // forest
+  4: 0x839c5e, // residential: lawns (roofs come from class 22 / houses)
+  5: 0x8b8984, // commercial paving
+  6: 0x87837a, // industrial yard
+  7: 0xa19d66, // farmland
+  8: 0xd8c9a0, // sand / beach
   9: 0x6f6e6b, // road (asphalt: matches the textured road ribbons)
-  10: 0xc6bdb2, // rail
-  11: 0xcfcbc4, // parking
-  12: 0xc3d2b2, // cemetery
-  13: 0xbcd7a0, // golf
+  10: 0x857d72, // rail lands
+  11: 0x5d5c59, // parking
+  12: 0x7a9860, // cemetery
+  13: 0x71a04f, // golf
   14: 0xdad6d0, // aeroway
   15: 0x666562, // major road
-  16: 0xa9c2a8, // wetland
-  17: 0xe2d7c9, // institutional
-  18: 0xd9cfbd, // construction
-  19: 0xa9cf93, // sports pitch
+  16: 0x69774f, // wetland
+  17: 0x839f5c, // institutional grounds
+  18: 0x9a8a6d, // construction
+  19: 0x5c9644, // sports pitch
   20: 0x8a8985, // runway / taxiway
-  21: 0xd8d2c8, // platform / plaza
+  21: 0xb2ada3, // platform / plaza
   22: 0xcbc6be, // building footprint (L1/L2 far-view raster)
-  23: 0xbcd6a2, // airfield grass (mown, a touch lighter than parks; paving is the airport layer)
+  23: 0x8fad68, // airfield grass (mown; paving is the airport layer)
   255: 0xd4d3c8, // outside region
 };
 
@@ -155,9 +156,9 @@ function terrainMaterial(groundTex: THREE.DataArrayTexture): THREE.MeshStandardN
   const toCam = cameraPosition.sub(wp);
   const dist = length(toCam);
   const viewDir = toCam.div(dist);
-  const fres = pow(float(1).sub(max(viewDir.y, 0)), 4);
-  const waterCol = mix(vec3(0.33, 0.5, 0.64), U.skyHorizon, fres.mul(0.3));
-  const col = mix(c2, waterCol, wet);
+  const water = waterSurface(positionLocal.x, positionLocal.z.negate(), dist, viewDir, float(0), float(32), float(0), float(0.5));
+  const lake = wet.greaterThan(0.99).select(float(1), float(0)); // wetland (alpha 60) keeps land shading
+  const col = mix(c2, water.wcol.mul(float(1).sub(water.fres)), lake);
 
   // close-range micro texture: grass blades on green classes, concrete grain elsewhere
   // (luminance-only modulation, keeps the land-cover hue; world-space, 4 m / 2.5 m periods divide the tile size)
@@ -170,22 +171,9 @@ function terrainMaterial(groundTex: THREE.DataArrayTexture): THREE.MeshStandardN
   const colD = col.mul(mix(float(1), clamp(detail, 0.4, 1.6), closeK));
   m.colorNode = baseTone(colD);
 
-  // tile-periodic waves (all wavelengths divide 1024 m, so patterns are seamless across tiles)
-  const TAU = Math.PI * 2;
-  const x = positionLocal.x, z = positionLocal.z, t = U.time;
-  const k1 = TAU / (1024 / 48), k2 = TAU / (1024 / 80), k3 = TAU / (1024 / 128);
-  const dx = cos(x.mul(k1).add(z.mul(k1 * 0.5)).add(t.mul(0.9))).mul(k1)
-    .add(cos(x.mul(k2 * 0.3).sub(z.mul(k2)).add(t.mul(1.3))).mul(k2 * 0.3))
-    .add(cos(x.mul(k3).add(z.mul(k3)).sub(t.mul(1.7))).mul(k3));
-  const dz = cos(x.mul(k1).add(z.mul(k1 * 0.5)).add(t.mul(0.9))).mul(k1 * 0.5)
-    .sub(cos(x.mul(k2 * 0.3).sub(z.mul(k2)).add(t.mul(1.3))).mul(k2))
-    .add(cos(x.mul(k3).add(z.mul(k3)).sub(t.mul(1.7))).mul(k3));
-  // fade out well before the ripples get sub-pixel (otherwise distant water shows moiré rings)
-  const amp = float(0.03).mul(float(1).sub(smoothstep(120, 1100, dist))).mul(wet);
-  const wn = normalize(vec3(dx.mul(amp).negate(), 1, dz.mul(amp).negate()));
-  const baseN = normalize(mix(normalLocal, wn, wet));
-  m.normalNode = transformNormalToView(baseN);
-  m.roughnessNode = mix(float(0.97), float(0.28), wet);
+  (m as unknown as { emissiveNode: N }).emissiveNode = water.sky.mul(water.fres).mul(lake).mul(float(1).sub(U.analytics.mul(0.8))).mul(0.7);
+  m.normalNode = transformNormalToView(normalize(mix(normalLocal, water.wN, lake)));
+  m.roughnessNode = mix(float(0.97), float(0.07), lake);
   m.metalness = 0;
   void sin;
   return m;

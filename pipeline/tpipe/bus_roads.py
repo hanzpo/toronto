@@ -37,10 +37,17 @@ SAMPLE = 20.0
 class RoadNet:
     def __init__(self) -> None:
         src = geo.OUT / "graph"
-        if CACHE.exists() and CACHE.stat().st_mtime > max(p.stat().st_mtime for p in list(src.glob("*.bin.gz"))[:50]):
+        # keyed on the road graph's files (count, sizes, newest mtime): a regenerated graph rebuilds it
+        files = sorted(src.glob("*.bin.gz"))
+        sig = np.array([len(files), sum(p.stat().st_size for p in files), int(max((p.stat().st_mtime for p in files), default=0))], np.int64)
+        d = None
+        if CACHE.exists():
             d = dict(np.load(CACHE))
-        else:
+            if "sig" not in d or not np.array_equal(d["sig"], sig):
+                d = None
+        if d is None:
             d = self._load(src)
+            d["sig"] = sig
             np.savez(CACHE, **d)
         self.frm, self.to = d["frm"], d["to"]
         self.off, self.xy = d["off"], d["xy"]
@@ -125,7 +132,7 @@ class RoadNet:
                 width.append(float(a["e_width"][e]) if "e_width" in a else 0.0)
         print(f"road graph: {len(frm)} edges, {len(ids)} nodes ({time.time() - t0:.0f}s)")
         return dict(frm=np.array(frm, np.int32), to=np.array(to, np.int32), off=np.array(off, np.int64), xy=np.vstack(xy),
-                    lf=np.array(lf, np.int8), lb=np.array(lb, np.int8), cls=np.array(cls, np.int8), flags=np.array(fl, np.int8))
+                    lf=np.array(lf, np.int8), lb=np.array(lb, np.int8), cls=np.array(cls, np.int8), flags=np.array(fl, np.uint8))
 
     # ------------------------------------------------------------------ geometry
     def geom(self, e: int, d: int) -> np.ndarray:
@@ -162,6 +169,8 @@ class _Ctx:
             c = (net.S_t[a:b] * d * self.subt[idx]).sum(1)
             u = 1.0 + (np.minimum(dist, 300.0) / SIGMA) ** 2 + np.where(c < 0, 30.0, 0.0)
             v = float(u.mean() * net.len[e])
+            if net.flags[e] & 32:
+                v *= 2.0  # parking aisles / driveways (F_LOT): only where the shape really uses one (bus loops)
         self.cache[k] = v
         return v
 

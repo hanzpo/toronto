@@ -124,7 +124,7 @@ const GROUND = ['land', 'water', 'grass/park', 'forest', 'residential', 'commerc
 const ROAD = ['motorway', 'trunk', 'primary', 'secondary', 'tertiary', 'residential', 'service', 'pedestrian', 'footway/path', 'track'];
 const RAIL = ['rail', 'siding/yard', 'subway', 'light rail', 'tram', 'other'];
 const KIND = ['generic', 'house', 'apartments', 'office/commercial', 'retail', 'industrial', 'civic', 'education', 'religious',
-  'transport', 'hospital', 'garage/shed', 'stadium', 'hotel', 'parking', 'roof/canopy'];
+  'transport', 'hospital', 'garage/shed', 'stadium', 'hotel', 'parking', 'roof/canopy', 'construction'];
 
 function distToPolyline(px: number, py: number, xyz: TypedArray, a: number, b: number) {
   let best = Infinity;

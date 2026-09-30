@@ -59,6 +59,62 @@ Terrain / ground
   areas, the aerodrome area itself, bare land and grass; the paved surfaces are
   drawn by the airport layer, docs/AIR.md; no trees/lamps are scattered on it).
   Classes 14 and 20 are no longer produced by the pipeline.
+  At level 0 the raster is kept for placement queries (trees, lamps, houses);
+  what is drawn is the vector ground below.
+
+Vector ground (level 0; `pipeline/tpipe/ground.py`, run after `tpipe.transit`,
+drawn by `app/src/workers/ground.ts` + `render/tiles/groundMaterial.ts`)
+- At level 0 `terrain_h` is also *shaped*: land within 1.5 grid cells of a shore
+  is raised to at least water level + the shore type's freeboard (below), and
+  open water sits at its water level.
+- `gp_off` u32 [nP+1] · `gp_xy` u16 [2·nV] (local metres × 65535/S, i.e.
+  1.6 cm steps; 0 and 65535 are the tile edges) · `gp_class` u8 [nP] — the land
+  cover as a planar partition: simple CCW rings, no holes, no overlaps, covering
+  the whole tile (minus open cuts, below). Rings are not closed. Painter order
+  when built: land use (4 5 6 7 10 17 18 23) < parks, woods, pitches, parking,
+  plazas… (smaller on top) < water < piers / breakwaters. Natural edges are
+  smoothed (capped corner cutting), everything simplified at 0.2 m; scraps
+  < 4 m² dropped. Classes as the raster, plus vector-only
+  `24 hard court (tennis, basketball, pickleball…) · 25 ball diamond ·
+  26 running track · 27 pier / quay deck · 28 breakwater / groyne (armour
+  stone) · 29 mown verge` (uncovered land within 45 m of a motorway / trunk:
+  medians, interchange infields, shoulders; and a 4 m landscaped band inside
+  commercial / industrial lots). Class 0 (anything unmapped) is drawn as rough
+  grass. **Parking lots are `gp_class == 11`** (amenity=parking, asphalt base;
+  stalls, islands, lamps and parked cars are drawn on top by the props layer).
+- `gf_poly` u32 [nF] · `gf` f32 [5·nF] — oriented frame of pitch-like polygons
+  (classes 19, 24, 25, 26): centre x, y (local), angle of the long axis (rad,
+  CCW from +E), half length, half width; for line markings.
+- `gw_poly` u32 [nW] · `gw_level` i16 [nW] — water surface level (dm, datum)
+  per water polygon (`gp_class == 1`), or −32768 = follows `gw_field`.
+  Lake Ontario −0.3 m (74.7 m ASL), Lake Erie 99.2; ponds / lakes: the 10th
+  percentile of the terrain's 90 m minimum along their shore; rivers (level
+  varies > 2 m along the shore) follow the field. Nothing is below Lake Ontario.
+- `gw_field` i16 [33·33] — river level field (dm), same layout as a 33×33
+  terrain grid; only present when a field-level water polygon exists.
+- `sh_off` u32 [nS+1] · `sh_xy` u16 [2·n] · `sh_z` i16 [n] (water level, dm) ·
+  `sh_type` u8 [nS] — shore polylines, water on the left:
+  `1 dockwall (vertical concrete, freeboard 1.6 m) · 2 revetment (armour stone,
+  1.1) · 3 beach (0.25) · 4 natural bank (0.35)`. Sand next to the water →
+  beach; piers → dockwall; breakwaters → revetment; `pipeline/curated/shores.json`
+  zones; great-lake / harbour water against paved or industrial land →
+  dockwall, else revetment; other water → natural bank.
+- Open cuts / tunnel portals: where track the trains run on (rail graph,
+  `tpipe.rail_graph`) is between 0.35 m and mouth height + 1.3 m below the
+  ground (mouth 7.0 m rail, 5.0 subway, 5.6 LRT / streetcar), the ground is cut
+  away: `pc_off` u32 · `pc_xy` u16 · `pc_type` u8 per ring vertex (edge to the
+  next vertex: `0 retaining wall · 1 portal (headwall + tunnel mouth) · 2 open`),
+  and the track runs inside: `pt_off` u32 · `pt_xyz` f32 (local x, y, rail level
+  datum) · `pt_kind` u8 (`0 rail · 1 subway · 2 LRT · 3 tram`). The client draws
+  the ballast floor 0.25 m below the rail level, walls, headwalls, mouths and
+  rails, and `TileManager.heightAt` returns the rail level inside a cut (so
+  surface-snapping vehicles follow the track down). Names, references and
+  overrides: `pipeline/curated/portals.json`.
+- Embankments are not in the data: the client fills under bridge decks
+  (`r_*` / `l_*` with flag 2) that are 0.5–5.5 m above the ground (never over
+  water) with 1:2 (road) / 1:1.5 (rail) grass slopes, ending in a concrete
+  abutment where the span begins — so they follow whatever deck profile the
+  road data carries.
 
 Buildings (extruded footprints)
 - `b_ring_off` u32 [nB+1] — building i owns rings `[b_ring_off[i], b_ring_off[i+1])`.
@@ -71,7 +127,9 @@ Buildings (extruded footprints)
 - `b_kind` u8 — `0 generic · 1 house · 2 apartments · 3 office/commercial ·
   4 retail · 5 industrial/warehouse · 6 civic/public · 7 education ·
   8 religious · 9 transport/station · 10 hospital · 11 garage/shed ·
-  12 stadium/sports · 13 hotel · 14 parking structure · 15 roof/canopy`.
+  12 stadium/sports · 13 hotel · 14 parking structure · 15 roof/canopy ·
+  16 under construction` (`building=construction`; the client draws a
+  concrete frame part-way up with a tower crane, workers/urban.ts).
 - `b_roof` u8 — `0 flat · 1 gabled · 2 hipped · 3 dome · 4 pyramidal · 5 skillion`.
 - `b_color` u32 — `0xRRGGBB` from `building:colour`, 0 = unset.
 - `b_osm` f64 — OSM id (ways positive, relations negative).
@@ -85,6 +143,16 @@ Houses (instanced archetypes, level 0 only)
   4 bungalow · 5 garage/shed`.
 
 Roads (level 0: all; higher levels: filtered + simplified)
+
+> Since the network model (docs/ROADS.md), road and rail pieces are smoothed
+> strokes from `pipeline/tpipe/roadnet.py` with solved elevations (`z` is
+> authoritative where `r_vf`/`l_vf` bit 2 "graded" is set), per-vertex
+> cross-sections (`r_el r_er r_pl r_pr r_lw`), marking bits (`r_mk`),
+> structure / sidewalk flags (`r_vf`, `r_sw`), height over terrain (`r_dz`,
+> `l_dz`) and stroke-continuous distance (`r_s`). Junction records gain `j_cl`
+> (intersection id); intersections add `js_* jw_* jc_* jt_* sg_*`, medians
+> `md_*`, hidden parking aisles / driveways `k_*`. Full list: docs/ROADS.md
+> "Tile arrays". The fields below keep their meaning.
 - `r_off` u32 [n+1] · `r_xyz` f32 [3·nV] (local x, local y, elevation datum),
   densified to ≤ 32 m spacing and draped on terrain (bridges/tunnels
   interpolated between their ends).
@@ -163,6 +231,13 @@ Rail
   Shapes are **absolute world** f32 (E, N, elevation datum). Full definition in
   `docs/TRANSIT.md` (owned by the transit module).
 
+## Rail network (`data/rail/network.bin.gz`)
+
+Switch-level track graph (TBN1) with draped, smoothed (`rail_geom.fillet`) edge
+geometry, speed limits, direction rules, movement rules at switches, platform extents;
+header lists passenger depots and level crossings. Rail timetable files reference it by
+hash. Full definition in `docs/RAIL.md`.
+
 ## Landmarks (`data/landmarks.json`)
 
 `[{ "id": "cn_tower", "name": "CN Tower", "pos": [E, N], "base": elev,
@@ -185,5 +260,16 @@ unified client-side by OSM id. Positions are tile-local like render tiles.
   bridge/tunnel profiles, first/last vertex = from/to node.
 - `e_len` f32 m · `e_class` u8 (road classes) · `e_lanes_fwd` / `e_lanes_bwd`
   u8 (bwd = 0 ⇒ one-way) · `e_speed` f32 m/s (maxspeed or class default) ·
-  `e_flags` u8 (road flags) · `e_name` u16 (header `names`) · `e_osm` f64 ·
+  `e_flags` u8 (road flags; `32` = parking aisle / driveway / drive-through, not drawn as a road) · `e_name` u16 (header `names`) · `e_osm` f64 ·
   `e_width` f32 m (as render `r_width`) · `e_side` u8 (as render `r_side`).
+
+## Urban detail (client-derived, no extra tile arrays)
+
+`workers/rooftops.ts` + `workers/urban.ts` derive, per level-0 tile and
+deterministically (OSM id / position seeded): parapets, penthouses and roof
+finishes (baked into the building mesh), rooftop equipment, construction sites
+(ground class 18 components; vector outline from `gp_*` class 18 when present)
+and laneway furniture (`r_svc` 3 = `service=alley`; without `r_svc`, named
+"Lane …" service roads or unnamed old-city service roads with houses along
+them). Records are `USTRIDE` = 9 floats: kind, x, n, z, angle, sx, sy, sz,
+variant (kinds in `UK`), rendered by `layers/UrbanLayer.ts`.

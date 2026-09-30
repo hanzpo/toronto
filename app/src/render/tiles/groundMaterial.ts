@@ -64,10 +64,11 @@ export const GROUND_LOOK: Record<number, ClassLook> = {
   32: { col: 0xd3c49c, rough: 0.95, b: [0, 1, 0, 0] }, // beach bank
   33: { col: 0x6f6448, rough: 0.97, a: [0.3, 0, 0, 0], b: [0.3, 0, 0.9, 0] }, // natural bank
   34: { col: 0x9d998f, rough: 0.9, a: [0, 0, 0.45, 0] }, // trench wall
-  35: { col: 0x746d63, rough: 0.95, a: [0, 0, 0, 1.2] }, // trench floor ballast
+  35: { col: 0x746d63, rough: 0.95, a: [0, 0, 0, 0.7] }, // trench floor ballast
   36: { col: 0x0d0d0e, rough: 1.0 }, // tunnel mouth
   37: { col: 0xa6a298, rough: 0.9, a: [0, 0, 0.5, 0] }, // portal headwall
   38: { col: 0x77736d, rough: 0.45 }, // rails in open cuts
+  39: { col: 0x7d9656, rough: 0.96, a: [1, 0, 0, 0], b: [0, 0, 0.3, 0], macro: 0.4 }, // embankment grass
 };
 
 function classTable(): THREE.DataTexture {
@@ -110,7 +111,6 @@ function makeGroundMaterial(): THREE.MeshStandardNodeMaterial {
   const table = classTable();
   const texA = streetTexture('ground_detail_a.webp', false);
   const texB = streetTexture('ground_detail_b.webp', false);
-  const waterN = streetTexture('water_normal.webp', false);
 
   const gd = attribute('gd', 'vec4');
   const cls = round(gd.x);
@@ -125,9 +125,10 @@ function makeGroundMaterial(): THREE.MeshStandardNodeMaterial {
   const dist = length(toCam);
   const viewDir = toCam.div(dist);
 
-  const banks = cls.greaterThan(29.5);
-  // vertical faces (banks, walls) use (along, height) texture coordinates
-  const uv = select(banks, vec2(gd.y, h), vec2(e, nN));
+  const banks = cls.greaterThan(29.5).and(cls.lessThan(37.5));
+  // banks and walls use (along, height) texture coordinates (floors, rails and fills use the plan)
+  const vert = banks.and(abs(cls.sub(35)).greaterThan(0.5));
+  const uv = select(vert, vec2(gd.y, h), vec2(e, nN));
   const uv1 = uv.div(4);
   const uv2 = vec2(e.mul(3).add(nN.mul(4)), e.mul(-4).add(nN.mul(3))).div(128); // rotated octave, 25.6 m
   const uvM = vec2(e.mul(5).sub(nN.mul(12)), e.mul(12).add(nN.mul(5))).div(1024); // macro, ~79 m
@@ -142,6 +143,10 @@ function makeGroundMaterial(): THREE.MeshStandardNodeMaterial {
   const macro = ext.r.mul(mac);
   let col: N = baseCol.mul(float(1).add(macro.mul(0.18))).add(vec3(0.02, 0.012, -0.01).mul(macro));
   col = col.mul(clamp(detail, 0.45, 1.6));
+  // steep natural ground (bluffs, ravine walls): bare clay / earth
+  const steep = smoothstep(0.86, 0.62, normalLocal.y).mul(f01(cls.lessThan(23.5).or(isCls(cls, 29).greaterThan(0.5))));
+  const clay = pow(vec3(0.66, 0.58, 0.46), vec3(2.2)).mul(clamp(float(1).add(tB.a.sub(0.5).mul(0.9)).add(tB2.a.sub(0.5).mul(0.5)), 0.5, 1.5));
+  col = mix(col, clay, steep.mul(float(1).sub(isCls(cls, 1))));
   // mowing stripes (golf, pitches): 5 m bands along the frame / east axis
   const isPitch = isCls(cls, 19).add(isCls(cls, 25));
   const mowCoord = select(isPitch.greaterThan(0.5), gd.y, e.add(nN.mul(0.5)));
@@ -196,38 +201,8 @@ function makeGroundMaterial(): THREE.MeshStandardNodeMaterial {
   // ---- water
   const isW = isCls(cls, 1);
   const shoreD = gd.y, shoreT = round(gd.z), kind = round(gd.w);
-  // ripples: a periodic normal map (32 m and 8 m layers, scrolled in different
-  // directions; periods divide the tile) + two long, low swells. Mipmapped and
-  // faded by the pixel footprint, so it never aliases into stripes.
-  const foot = dist.mul(0.0016).div(max(abs(viewDir.y), 0.12)); // metres per pixel along the surface
-  const t = U.time;
-  const n1 = texture(waterN, vec2(e, nN).div(32).add(vec2(t.mul(0.011), t.mul(0.007))));
-  const n2 = texture(waterN, vec2(nN, e.negate()).div(8).add(vec2(t.mul(-0.023), t.mul(0.017))));
-  const f1 = smoothstep(0.9, 0.05, foot), f2 = smoothstep(0.25, 0.02, foot);
-  const calm = mix(float(1), float(0.5), f01(kind.greaterThan(0.5))); // ponds / rivers calmer
-  const TAU = Math.PI * 2;
-  const sw1 = cos(e.mul(TAU * 13 / 1024).add(nN.mul(TAU * 9 / 1024)).add(t.mul(0.5))).mul(0.012).mul(smoothstep(40, 6, foot));
-  const sw2 = cos(e.mul(TAU * -7 / 1024).add(nN.mul(TAU * 16 / 1024)).add(t.mul(0.37))).mul(0.01).mul(smoothstep(40, 6, foot));
-  let sx: N = n1.r.sub(0.5).mul(2).mul(f1.mul(0.38)).add(n2.g.sub(0.5).mul(2).mul(f2.mul(0.22))).add(sw1.mul(0.82)).add(sw2.mul(-0.4));
-  let sz: N = n1.g.sub(0.5).mul(2).mul(f1.mul(0.38)).sub(n2.r.sub(0.5).mul(2).mul(f2.mul(0.22))).add(sw1.mul(0.57)).add(sw2.mul(0.92));
-  sx = sx.mul(calm); sz = sz.mul(calm);
-  // world normal (three axes: x = E, z = -N)
-  const wN = normalize(vec3(sx.negate(), 1, sz));
-  const shallow = smoothstep(14, 0, shoreD);
-  const deep = mix(vec3(0.06, 0.13, 0.16), vec3(0.06, 0.1, 0.08), f01(kind.greaterThan(0.5)));
-  const shal = mix(vec3(0.11, 0.2, 0.19), vec3(0.1, 0.13, 0.08), f01(kind.greaterThan(0.5)));
-  const beachy = f01(abs(shoreT.sub(3)).lessThan(0.5));
-  let wcol: N = mix(deep, mix(shal, vec3(0.2, 0.24, 0.18), beachy.mul(0.6)), shallow);
-  // foam line along the shore, broken up by the detail noise
-  const foamW = mix(float(0.9), float(2.8), beachy);
-  const lap = sin(U.time.mul(0.9).add(e.mul(0.05)).add(nN.mul(0.037))).mul(0.5).add(0.5);
-  const foam = smoothstep(foamW.mul(mix(0.7, 1.2, lap)), float(0), shoreD).mul(smoothstep(0.35, 0.6, tB.g.add(tA.r.mul(0.3)))).mul(f01(shoreT.greaterThan(0.5)));
-  wcol = mix(wcol, vec3(0.8, 0.82, 0.8), foam.mul(0.85));
-  // sky reflection (emissive) with Schlick fresnel
-  const cosT = max(dot(viewDir, wN), 0);
-  const fres = float(0.02).add(float(0.98).mul(pow(float(1).sub(cosT), 5))).mul(float(1).sub(foam));
-  const rdir = reflect(viewDir.negate(), wN);
-  const sky = mix(U.skyHorizon, U.skyZenith, pow(clamp(rdir.y, 0, 1), 0.5));
+  const WS = waterSurface(e, nN, dist, viewDir, kind, shoreD, shoreT, tB.g.add(tA.r.mul(0.3)));
+  const { wN, wcol, fres, sky, foam } = WS;
   col = mix(col, wcol.mul(float(1).sub(fres)), isW);
 
   m.colorNode = baseTone(col);
@@ -237,4 +212,45 @@ function makeGroundMaterial(): THREE.MeshStandardNodeMaterial {
   m.normalNode = transformNormalToView(normalize(mix(normalLocal, wN, isW)));
   void sin; void Fn;
   return m;
+}
+
+/**
+ * Water surface shading shared by the vector ground and the far raster terrain.
+ * Ripples: a periodic normal map (32 m and 8 m layers scrolled in different
+ * directions; periods divide every tile size) + two long, low swells, each faded
+ * by the pixel footprint (mipmapped as well), so it never aliases into stripes.
+ * Returns the world normal, body colour (before fresnel), fresnel, sky reflection
+ * colour and foam. `kind` 0 lake · 1 pond · 2 river; `shoreD` m; `shoreT` shore type.
+ */
+export function waterSurface(e: N, nN: N, dist: N, viewDir: N, kind: N, shoreD: N, shoreT: N, noise: N) {
+  const waterN = streetTexture('water_normal.webp', false);
+  const foot = dist.mul(0.0016).div(max(abs(viewDir.y), 0.12)); // metres per pixel along the surface
+  const t = U.time;
+  const n1 = texture(waterN, vec2(e, nN).div(32).add(vec2(t.mul(0.011), t.mul(0.007))));
+  const n2 = texture(waterN, vec2(nN, e.negate()).div(8).add(vec2(t.mul(-0.023), t.mul(0.017))));
+  const f1 = smoothstep(4.0, 0.2, foot), f2 = smoothstep(1.0, 0.05, foot);
+  const calm = mix(float(1), float(0.5), f01(kind.greaterThan(0.5))); // ponds / rivers calmer
+  const TAU = Math.PI * 2;
+  const sw1 = cos(e.mul(TAU * 13 / 1024).add(nN.mul(TAU * 9 / 1024)).add(t.mul(0.5))).mul(0.005).mul(smoothstep(12, 2, foot));
+  const sw2 = cos(e.mul(TAU * -7 / 1024).add(nN.mul(TAU * 16 / 1024)).add(t.mul(0.37))).mul(0.004).mul(smoothstep(12, 2, foot));
+  const sx = n1.r.sub(0.5).mul(2).mul(f1.mul(0.38)).add(n2.g.sub(0.5).mul(2).mul(f2.mul(0.22))).add(sw1.mul(0.82)).add(sw2.mul(-0.4)).mul(calm);
+  const sz = n1.g.sub(0.5).mul(2).mul(f1.mul(0.38)).sub(n2.r.sub(0.5).mul(2).mul(f2.mul(0.22))).add(sw1.mul(0.57)).add(sw2.mul(0.92)).mul(calm);
+  // world normal (three axes: x = E, z = -N)
+  const wN = normalize(vec3(sx.negate(), 1, sz));
+  const shallow = smoothstep(14, 0, shoreD);
+  const deep = mix(vec3(0.06, 0.13, 0.16), vec3(0.06, 0.1, 0.08), f01(kind.greaterThan(0.5)));
+  const shal = mix(vec3(0.11, 0.2, 0.19), vec3(0.1, 0.13, 0.08), f01(kind.greaterThan(0.5)));
+  const beachy = f01(abs(shoreT.sub(3)).lessThan(0.5));
+  let wcol: N = mix(deep, mix(shal, vec3(0.2, 0.24, 0.18), beachy.mul(0.6)), shallow);
+  // foam line along the shore, broken up by noise, lapping in time
+  const foamW = mix(mix(float(0.9), float(0.55), f01(abs(shoreT.sub(1)).lessThan(0.5))), float(2.8), beachy); // dockwalls: a thin line
+  const lap = sin(t.mul(0.9).add(e.mul(0.05)).add(nN.mul(0.037))).mul(0.5).add(0.5);
+  const foam = smoothstep(foamW.mul(mix(0.7, 1.2, lap)), float(0), shoreD).mul(smoothstep(0.35, 0.6, noise)).mul(f01(shoreT.greaterThan(0.5)));
+  wcol = mix(wcol, vec3(0.8, 0.82, 0.8), foam.mul(0.65));
+  // sky reflection (emission) with Schlick fresnel
+  const cosT = max(dot(viewDir, wN), 0);
+  const fres = float(0.02).add(float(0.98).mul(pow(float(1).sub(cosT), 5))).mul(float(1).sub(foam));
+  const rdir = reflect(viewDir.negate(), wN);
+  const sky = mix(U.skyHorizon, U.skyZenith, pow(clamp(rdir.y, 0, 1), 0.5));
+  return { wN, wcol, fres, sky, foam };
 }

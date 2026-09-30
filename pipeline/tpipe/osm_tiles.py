@@ -246,10 +246,13 @@ def prepare_lines(terrain):
     rail_xyz = rn["rail_xyz"]
     rail_s = np.zeros(len(rail_xyz), np.float32)
     ro = rn["rail_off"]
-    for i in range(nL):
-        a, b = ro[i], ro[i + 1]
-        p = rail_xyz[a:b, :2]
-        rail_s[a:b] = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(p, axis=0).T))])
+    if "rail_s" in rn:
+        rail_s = rn["rail_s"].astype(np.float32)
+    else:
+        for i in range(nL):
+            a, b = ro[i], ro[i + 1]
+            p = rail_xyz[a:b, :2]
+            rail_s[a:b] = np.concatenate([[0], np.cumsum(np.hypot(*np.diff(p, axis=0).T))])
     S_all = np.concatenate([rn["road_s"], rail_s])
     kind = np.concatenate([np.zeros(nR, np.uint8), np.ones(nL, np.uint8)])
     cls = np.concatenate([rn["road_cls"], rn["rail_cls"]])

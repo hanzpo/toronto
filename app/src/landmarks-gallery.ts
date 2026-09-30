@@ -9,6 +9,7 @@
 //   detail=high|low|auto
 //   webgl=1          force the WebGL2 backend
 //   labels=0         hide labels
+//   src=<url>        landmarks.json to load (default /data/landmarks.json)
 import * as THREE from 'three/webgpu'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { createLandmarks, buildLandmark, setNight, stats, LANDMARKS, type LandmarkEntry } from './landmarks'
@@ -52,7 +53,7 @@ async function main() {
   ground.receiveShadow = true
   scene.add(ground)
 
-  const json: LandmarkEntry[] = await (await fetch('/data/landmarks.json')).json()
+  const json: LandmarkEntry[] = await (await fetch(q.get('src') ?? '/data/landmarks.json')).json()
   const byId = new Map(json.map((e) => [e.id, e]))
   const mode = q.get('mode') ?? 'real'
   const focus = q.get('focus')

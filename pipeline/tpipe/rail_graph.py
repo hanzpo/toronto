@@ -47,6 +47,7 @@ from scipy.spatial import cKDTree
 
 from . import geo, tbn, terrain
 from .grade import profile as grade_profile
+from .rail_geom import RAIL_RADIUS, fillet
 
 KINDS = {"rail": 0, "subway": 1, "light_rail": 2, "tram": 3, "narrow_gauge": 0}
 KIND_NAMES = ["rail", "subway", "light_rail", "tram"]
@@ -120,6 +121,18 @@ DEPOTS = [
 FIXES: dict = {"join": [], "drop_ways": [], "oneway": {}}
 
 
+def _fillet_radius(kind: int, svc: int) -> float:
+    """rail_geom design radius for a track (render classes: 0 main, 1 siding/yard, 2 subway,
+    3 light rail, 4 tram)"""
+    if kind == 3:
+        return RAIL_RADIUS[4]
+    if kind == 2:
+        return RAIL_RADIUS[3]
+    if kind == 1:
+        return RAIL_RADIUS[2]
+    return RAIL_RADIUS[1] if svc else RAIL_RADIUS[0]
+
+
 # ----------------------------------------------------------------------------- OSM
 def extract() -> dict:
     """Rail ways, platforms and rail node tags from bbox.osm.pbf (cached)."""
@@ -138,7 +151,7 @@ def extract() -> dict:
             t = o.tags
             rw = t.get("railway")
             pt = t.get("public_transport")
-            if rw in ("stop", "buffer_stop", "switch", "railway_crossing", "level_crossing", "signal") or pt == "stop_position":
+            if rw in ("stop", "buffer_stop", "switch", "railway_crossing", "level_crossing", "crossing", "signal") or pt == "stop_position":
                 node_tags[o.id] = {k: v for k, v in t}
             continue
         if not o.is_way():
@@ -581,27 +594,43 @@ class RailGraph:
         cover_of = lambda e: COVER[int(self.e_kind[e])]  # noqa: E731
         W = self.ways
         for st in strokes:
-            pts, fl, owner = [], [], []
-            node_pos = []  # (index into pts, node)
+            # raw stroke polyline, flag per segment, graph nodes (input vertex index)
+            V, SF, RV, NI = [], [], [], []
             for e, fw in st:
                 xy = self.e_xy0[e] if fw else self.e_xy0[e][::-1]
                 wis = self.e_wis[e] if fw else self.e_wis[e][::-1]
-                # densify
-                seg_f = [W[wi]["flags"] for wi in wis]
-                if not pts:
-                    pts.append(xy[0])
-                    fl.append(seg_f[0])
-                    owner.append((e, 0))
-                node_pos.append((len(pts) - 1, int(self.e_from[e] if fw else self.e_to[e])))
+                rad = _fillet_radius(int(self.e_kind[e]), int(self.e_svc[e]))
+                if not V:
+                    V.append(xy[0])
+                    RV.append(rad)
+                NI.append((len(V) - 1, int(self.e_from[e] if fw else self.e_to[e])))
                 for i in range(len(xy) - 1):
-                    a, b = xy[i], xy[i + 1]
-                    L = float(np.hypot(*(b - a)))
-                    k = max(1, int(math.ceil(L / DENSE)))
-                    for j in range(1, k + 1):
-                        pts.append(a + (b - a) * (j / k))
-                        fl.append(seg_f[i])
-                        owner.append((e, i + 1 if j == k else -1))
-                node_pos.append((len(pts) - 1, int(self.e_to[e] if fw else self.e_from[e])))
+                    V.append(xy[i + 1])
+                    RV.append(rad)
+                    SF.append(W[wis[i]]["flags"])
+                NI.append((len(V) - 1, int(self.e_to[e] if fw else self.e_from[e])))
+            V = np.array(V)
+            # canonical smoothing (rail_geom.fillet, as the rendered track): graph nodes pinned
+            pinned = np.zeros(len(V), bool)
+            for vi, _ in NI:
+                pinned[vi] = True
+            Q, vmap = fillet(V, pinned, np.array(RV))
+            # densify the smoothed line; segment flags follow the source segment
+            seg_of = np.zeros(len(Q) - 1, dtype=np.int64)
+            for k in range(len(V) - 1):
+                seg_of[vmap[k] : max(vmap[k + 1], vmap[k] + 1)] = k
+            pts, fl = [Q[0]], [SF[0] if SF else 0]
+            qidx = np.zeros(len(Q), dtype=np.int64)
+            for q in range(len(Q) - 1):
+                a, b = Q[q], Q[q + 1]
+                L = float(np.hypot(*(b - a)))
+                k = max(1, int(math.ceil(L / DENSE)))
+                f = SF[int(seg_of[q])] if SF else 0
+                for jj in range(1, k + 1):
+                    pts.append(a + (b - a) * (jj / k))
+                    fl.append(f)
+                qidx[q + 1] = len(pts) - 1
+            node_pos = [(int(qidx[vmap[vi]]), n) for vi, n in NI]
             P = np.array(pts)
             F = np.array(fl)
             g = ter.sample(P[:, 0], P[:, 1])
@@ -935,6 +964,31 @@ class RailGraph:
         self.log.append("depots: " + ", ".join(f"{o['id']} {o['km']} km ({len(o['edges'])} tracks, {o['off']} m)" for o in out))
         return out
 
+    # ---------------------------------------------------------------- level crossings
+    def crossings(self) -> list[tuple]:
+        """railway=level_crossing / crossing (road and path) nodes on the graph: (osm id, edge, s along the edge, E, N)."""
+        tags = getattr(self, "node_tags", None) or {}
+        ids = [n for n, t in tags.items() if t.get("railway") in ("level_crossing", "crossing") and n in self.pos]
+        where: dict[int, int] = {}
+        for e, nodes in enumerate(self.e_nodes):
+            for n in nodes:
+                where.setdefault(n, e)
+        out = []
+        for n in ids:
+            e = where.get(n)
+            if e is None:
+                continue
+            x, y = self.pos[n]
+            P = self.geom[e][0][:, :2]
+            A, AB = P[:-1], P[1:] - P[:-1]
+            L2 = np.maximum((AB**2).sum(1), 1e-12)
+            t = np.clip(((np.array([x, y]) - A) * AB).sum(1) / L2, 0, 1)
+            d = np.hypot(*(A + AB * t[:, None] - (x, y)).T)
+            i = int(np.argmin(d))
+            cum = np.concatenate([[0.0], np.cumsum(np.sqrt(L2))])
+            out.append((int(n), int(e), float(cum[i] + t[i] * math.sqrt(L2[i])), float(x), float(y)))
+        return out
+
     # ---------------------------------------------------------------- output
     def write(self, used: np.ndarray | None = None) -> dict:
         """Write data/rail/network.bin.gz. `used` = bool mask of edges to keep (default all but yards)."""
@@ -946,6 +1000,7 @@ class RailGraph:
                 used[d["edges"]] = True  # ...except the passenger depots
             # keep the depots' tracks connected: main-line yard edges touching kept depot edges
         self.depot_list = dep
+        cross = self.crossings()
         keep = np.nonzero(used)[0]
         emap = np.full(nE, -1, dtype=np.int64)
         emap[keep] = np.arange(len(keep))
@@ -1000,7 +1055,9 @@ class RailGraph:
         self.out_map = emap
         h = self.hash()
         depots = [dict(id=d["id"], name=d["name"], group=d["group"], agencies=d["agencies"], edges=[int(emap[e]) for e in d["edges"] if emap[e] >= 0]) for d in dep]
-        size = tbn.write(OUT / "network.bin.gz", arrays, level=9, version=1, hash=h, kinds=KIND_NAMES, depots=depots)
+        crossings = [[c[0], int(emap[c[1]]), round(c[2], 2), round(c[3], 1), round(c[4], 1)] for c in cross if emap[c[1]] >= 0]
+        size = tbn.write(OUT / "network.bin.gz", arrays, level=9, version=1, hash=h, kinds=KIND_NAMES, depots=depots, crossings=crossings)
+        self.log.append(f"level crossings: {len(crossings)}")
         self.log.append(f"network.bin.gz: {size/1024:.0f} KiB, {len(keep)} edges, {len(nodes)} nodes, {len(np.vstack(xyz))} vertices")
         return {"file": "network.bin.gz", "bytes": size, "hash": h, "edges": int(len(keep))}
 
@@ -1021,6 +1078,7 @@ def load(rebuild: bool = False) -> RailGraph:
         return pickle.loads(CACHE_GRAPH.read_bytes())
     osm = extract()
     g = RailGraph()
+    g.node_tags = osm["node_tags"]
     g.build(osm)
     g.finish()
     g.platforms(osm)

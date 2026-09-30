@@ -51,7 +51,9 @@ cd pipeline && uv run python -m tpipe.transit [--download] [agency ...]
   inside the bbox. Where it is cut, a *virtual* stop (flag 1) is added at the point
   where the shape crosses the bbox, timed by distance interpolation. Vehicles pass
   through virtual stops at constant speed without dwelling (VIA to Montréal/Windsor/Sarnia/NY).
-- **Rail geometry** (`transit_rail.py`, HMM map matching): the GTFS shape is densified
+- **Rail geometry**: patterns are routed through the switch-level track graph
+  (`rail_graph.py`, `rail_routes.py`, docs/RAIL.md); the route geometry is the shape.
+  Fallback for patterns that cannot be routed — `transit_rail.py`, HMM map matching: the GTFS shape is densified
   (10 m; 20 m for main-line rail) and matched with Viterbi onto **one continuous path
   through the OSM track graph**. Candidates per point: compatible track within 50 m (all
   parallel tracks within +15 m of the nearest compete; steep-angle tracks are candidates
@@ -74,8 +76,9 @@ cd pipeline && uv run python -m tpipe.transit [--download] [agency ...]
   streetcar/LRT/subway lines 0 jumps and ≈0 % wrong-direction (before: 30–70 %), GO
   0–7 flagged runs per line (all at OSM topology gaps), VIA off-track only outside the
   OSM extract.
-- **Bus geometry**: GTFS shape simplified (1.5 m), densified to 60 m and draped on
-  terrain (3-D RDP, 1 m).
+- **Bus geometry**: matched onto the road graph in the curb lane (`bus_roads.py`,
+  unmatched stretches keep the GTFS shape and go to `work/bus_road_gaps.json`),
+  simplified (1.5 m), densified to 60 m and draped on terrain (3-D RDP, 1 m).
 - **Stop distances**: monotone projection of stops onto the pattern shape (Viterbi
   over local minima of the stop-to-line distance, so loops and out-and-back routes work).
 - **Times**: missing times are interpolated by distance. Runs of equal
@@ -139,6 +142,13 @@ Header extras: `version, agency, profile, date, kind, modes` (the MODES list),
 | `trip_start` | i32 | nTrips | s since service-day midnight (may be ≥ 86400); **sorted ascending** |
 | `trip_pattern` | idx | nTrips | pattern |
 | `trip_tp` | idx | nTrips | time profile |
+| `trip_next` | i32 | nTrips | next trip of the same GTFS vehicle block starting where this one ends (≤ 90 min later), −1 none |
+
+Rail files also carry the route through the track graph (`pat_len`, `pat_rflags`,
+`pat_rstart`, `pat_redge_off`, `pat_redge`, header `railNetwork`; docs/RAIL.md); their
+shapes **are** those routes (draped track geometry), and `pat_stop_dist` is the consist
+centre with its front at the platform stop point. Bus files have header `laneShapes`
+(shapes matched to the road graph in the curb lane, docs/RAIL.md).
 
 Trip i at stop k: `arr = trip_start[i] + tp_arr[tp_off[q]+k]`, `dep = arr + tp_dwell[…]`,
 with `q = trip_tp[i]`. A trip runs from `trip_start` (arrival at its first stop) to
@@ -195,15 +205,19 @@ Test: `node app/src/transit/transit.test.ts` (needs the generated data).
   low beyond). Farther away: one min-pixel-size marker per vehicle (`MarkerOverlay`).
 - Heights: pivot points within 2.5 m of the rendered terrain (`engine.heightAt`) sit on
   it (blended out to 3.5 m); bridges / tunnels keep the shape z. Pitch from the pivots.
-- Buses are offset 1.8 m right of the (centreline) GTFS shape (`LANE_OFFSET`).
-- Hold (`transit/hold.ts`): surface vehicles (bus, streetcar, LRT) within 1.4 km of the
-  focus look ahead (stopping distance + 25 m) for traffic-sim cars in their corridor
-  (`TrafficLayer.queryAhead` if present, else its car snapshot), red signals
-  (`signalAhead`, if present) and the transit vehicle ahead in the same lane. If blocked
-  the rendered distance is capped behind the obstacle with IDM-like braking; the delay
-  is recovered at ≤ +20 % of the scheduled speed; never ahead of the schedule, never a
-  jump. Off at high clock rates (> ~0.75 sim-s per frame) and far from the focus.
-- `transit.groundVehicles(out)` → surface transit vehicles near the focus
-  `{ e, n, heading, length, width, speed, trip }` (front-centre, rad CCW from +E) for
-  the traffic sim; `displayDist(trip, schedDist)` (held position), `vehicleLength(trip)`.
+- Bus shapes of files with `laneShapes: true` already follow the curb lane of the road
+  graph (`bus_roads.py`); older / unmatched shapes are offset 1.8 m right (`LANE_OFFSET`).
+- **Simulated vehicles** (docs/RAIL.md): trains, streetcars and LRT within the rail radius
+  (9 km) are agents of the rail sim, buses near the focus agents of the road sim. Their
+  trips are not drawn from the timetable; the TransitLayer draws them car by car along the
+  consist paths the sims publish (`railSnapshot` / `busSnapshot` of the TrafficLayer),
+  parked depot trains powered down. Trips the sims manage but have not placed, or that
+  finished there, are hidden. A train handed back to the timetable keeps its delay
+  (recovering 6 s/min). Timetable vehicles never pop in or out in plain view (within 2 km
+  in the view cone): a trip starting in view shows once unseen, one ending in view stands
+  until unseen.
+- `transit.groundVehicles(out)` → surface transit vehicles near the focus that the sims do
+  not drive, `{ e, n, heading, length, width, speed, trip, rail?, doorsOpen? }`
+  (front-centre), as road-traffic obstacles; `displayDist(trip, schedDist)` (agent position
+  when simulated), `agentInfo(trip)`, `drawnVehicle(trip)`, `findTrips(q)`, `pickSegs`.
 - Player trips: `overrides` entries with `pattern` + `dist` are drawn car by car too.

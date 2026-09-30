@@ -19,14 +19,21 @@ actually laid out instead of rasterising OSM lines into blocky pixels:
   runway holding position markings (OSM `aeroway=holding_position` where mapped,
   else computed at the TP 312 distance), stand lead-in lines + stop bars.
 - lights: runway edge / threshold / end, taxiway edge (instanced at night).
-- airside service roads: OSM roads lying on the aprons are listed in
-  airside_roads.json (the road mesh skips them) and painted as apron service
-  roads instead (white edges, dashed centre, zipper where aircraft cross).
-- stands: lead-in lines, stop bars, red safety envelopes, stand numbers, GSE
-  staged at the head of stand; OSM jet bridges (docked to the stand's door);
-  apron floodlight masts.
+- airside service roads / walkways: OSM roads and footways lying on the paved
+  airside are painted instead (white edges, dashed centre, zipper + stop lines
+  where aircraft cross; walkway zebras); airside.bin.gz holds the zone raster the
+  client uses to drop them from the tile road mesh and the traffic graph
+  (app/src/workers/airside.ts), airside_roads.json their OSM ids.
+- stands: lead-in lines, stop bars, red safety envelopes, hatched head-of-stand
+  areas, white GSE staging boxes, stand numbers, staged GSE; passenger boarding
+  bridges (OSM jet_bridge ways + synthesised for unserved contact stands; the
+  client docks them to the parked aircraft's door); apron floodlight masts;
+  service-road paths for moving GSE.
+- terminal massing: aeroway terminal / hangar footprints the tile buildings miss
+  (multipolygon terminals such as Pearson T3).
 
-Output: app/public/data/air/surfaces.bin.gz (TBN1, layout in docs/AIR.md).
+Output: app/public/data/air/{surfaces.bin.gz, airside.bin.gz, airside_roads.json}
+(TBN1, layout in docs/AIR.md).
 
     uv run python -m tpipe.airports        # after tpipe.air (reads airports.json for stands)
 """
@@ -36,6 +43,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import zlib
 from collections import defaultdict
 
 import mapbox_earcut as earcut
@@ -644,8 +652,10 @@ def add_ribbon(mesh, line_xy, drape, hw_geom, kind, line_hw, v0=0.0):
 # --------------------------------------------------------------------------- per airport
 
 MK_CENTRE, MK_EDGE, MK_HOLD, MK_LEAD, MK_BAR, MK_SVC, MK_ZIP, MK_RED = 0, 1, 2, 3, 4, 5, 6, 7
+MK_HATCH, MK_WHITE, MK_WSTOP, MK_WALK = 8, 9, 11, 12  # red hatched area, white line, white stop line, walkway
 BORDER = 16  # + kind: black border (yellow lines on light concrete, TP 312)
-GSE_TUG, GSE_CART, GSE_BELT = 0, 1, 2
+GSE_TUG, GSE_CART, GSE_BELT, GSE_FUEL, GSE_CATER, GSE_PUSH, GSE_GPU = 0, 1, 2, 3, 4, 5, 6
+MASK_CELL = 2.0  # airside zone raster (m)
 LT_EDGE, LT_THR, LT_END, LT_TAXI = 0, 1, 2, 3
 
 
@@ -657,7 +667,7 @@ def hold_distance(r):
     return 45.0
 
 
-def build_group(g, drape, stands_json, roads=None):
+def build_group(g, drape, stands_json, roads=None, tile_bld=None):
     icao = g.get("icao")
     rws = build_runways(icao, g["rw"])
     rws += runway_area_rects(g["rwa"], rws)
@@ -742,17 +752,26 @@ def build_group(g, drape, stands_json, roads=None):
 
     # ---- airside service roads: roads lying on the aprons / taxi pavement are removed from
     # the road mesh (airside_roads.json) and drawn here as apron service-road markings
-    svc = []  # (LineString, width, osm id)
+    # (the client drops road-mesh pieces inside the airside zone mask, see airside_mask(), and
+    # removes their traffic-graph edges; what lies on the pavement is painted here instead)
+    svc, walks = [], []  # (LineString, width, osm id)
     core = unary_union([taxi, aprons])
+    bld_all = unary_union([b["g"] for b in g["bl"]]) if g["bl"] else Polygon()
     if roads and g.get("poly") is not None and not core.is_empty:
-        zone = core.buffer(3.0)
-        poly = g["poly"].buffer(25)
-        for rid, xy, wd in roads:
+        zone = core.buffer(2.0).difference(bld_all)
+        poly = g["poly"].buffer(60)
+        for rid, xy, wd, cls in roads:
             ln = LineString(xy)
-            if ln.length < 4 or not poly.intersects(ln) or ln.intersection(poly).length < 0.9 * ln.length:
+            if ln.length < 4 or not poly.intersects(ln):
                 continue
-            if ln.intersection(zone).length >= 0.35 * ln.length:
-                svc.append((ln, float(min(max(wd, 6.0), 12.0)), rid))
+            part = ln.intersection(zone)
+            for pc in lines_of(linemerge(part) if isinstance(part, MultiLineString) else part):
+                if pc.length < 4:
+                    continue
+                if cls >= 7:
+                    walks.append((pc, float(min(max(wd, 2.5), 4.0)), rid))
+                else:
+                    svc.append((pc, float(min(max(wd, 6.0), 12.0)), rid))
     svc_pave = unary_union([ln.buffer(w / 2, cap_style="flat") for ln, w, _ in svc]) if svc else Polygon()
 
     # continuous pavement: close narrow gaps between aprons, taxiways, service roads and
@@ -793,6 +812,29 @@ def build_group(g, drape, stands_json, roads=None):
             for piece in lines_of(part):
                 if piece.length > 1.5:
                     add_ribbon(mk, np.asarray(piece.coords), drape, w / 2 + 0.4, kind, w / 2)
+                if kind == MK_ZIP and piece.length > 6:
+                    # white stop line across the road 2 m before the aircraft corridor, both ways
+                    xy = np.asarray(piece.coords)
+                    for a, b in ((xy[0], xy[1]), (xy[-1], xy[-2])):
+                        t = (b - a) / max(np.linalg.norm(b - a), 1e-6)
+                        q = a - t * 2.0
+                        nn = np.array([t[1], -t[0]])
+                        if not corridor.contains(Point(q)):
+                            add_ribbon(mk, np.array([q - nn * w / 2, q + nn * w / 2]), drape, 0.35, MK_WSTOP, 0.3)
+    # service-road centrelines for moving GSE (client: ApronFurniture): merged, >= 150 m
+    svc_paths = []
+    if svc:
+        merged = unary_union([ln.difference(rw_union.buffer(1.0)) for ln, _, _ in svc])
+        merged = linemerge(merged) if isinstance(merged, MultiLineString) else merged
+        for piece in lines_of(merged):
+            if piece.length >= 150:
+                svc_paths.append(densify(np.asarray(piece.simplify(0.5).coords), 6.0))
+    # apron walkways (passenger routes between terminal and remote stands): white edges + zebra bars
+    for ln, w, rid in walks:
+        airside_ids.append(rid)
+        for piece in lines_of(ln.difference(rw_union.buffer(1.0))):
+            if piece.length > 3:
+                add_ribbon(mk, np.asarray(piece.coords), drape, w / 2 + 0.2, MK_WALK, w / 2)
     # taxiway edge lines (double yellow) where the taxiway meets grass
     if not taxi_part.is_empty:
         inner = taxi_part.buffer(-0.9, join_style="mitre")
@@ -844,11 +886,43 @@ def build_group(g, drape, stands_json, roads=None):
                 if d[0] * (c - xy[0])[1] - d[1] * (c - xy[0])[0] < 0:  # runway must lie to the left
                     xy = xy[::-1]
                 add_ribbon(mk, xy, drape, 1.4, MK_HOLD, 0.15)
-    # stands: lead-in line, stop bar, stand safety envelope (red), stand number, GSE
+    # stands (docs/AIR.md "Apron"): lead-in line, stop bar, stand safety envelope (red) with
+    # the head-of-stand no-parking area hatched red, a white-outlined equipment staging box
+    # with GSE parked in it, stand numbers (entry + head of stand)
     labels, gse, bridges, masts = [], [], [], []
-    bld = unary_union([b["g"] for b in g["bl"]]) if g["bl"] else Polygon()
-    free = lambda q: not bld.contains(Point(q)) and apron_in.contains(Point(q))  # noqa: E731
-    for si, s in enumerate(stands_json or []):
+    bld = bld_all
+    st = stands_json or []
+    free_area = apron_in.difference(bld.buffer(1.0)) if not apron_in.is_empty else Polygon()
+    corr_k = corridor.buffer(4.0) if not corridor.is_empty else Polygon()
+
+    def base_ref(ref):
+        m = re.match(r"^([A-Z]?\d+)[A-Z]$", ref or "")
+        return m.group(1) if m else (ref or "")
+
+    group = defaultdict(list)
+    for si, s in enumerate(st):
+        group[base_ref(s.get("ref"))].append(si)
+    primary = {max(v, key=lambda i: st[i]["span"]) for v in group.values()}
+
+    def head_len(p, hd, reach=60.0):
+        """distance from the stop point to the terminal facade ahead of the nose"""
+        if bld.is_empty:
+            return reach
+        x = LineString([p, p + hd * reach]).intersection(bld)
+        if x.is_empty:
+            return reach
+        c = shapely.get_coordinates(x)
+        return float(((c - p) @ hd).min())
+
+    def frame_box(p, hd, rt, a0, a1, l0, l1):
+        return Polygon([p + hd * a0 + rt * l0, p + hd * a1 + rt * l0, p + hd * a1 + rt * l1, p + hd * a0 + rt * l1])
+
+    def outline(poly, kind, lh=0.1, hw=0.45):
+        xy = np.asarray(poly.exterior.coords)
+        add_ribbon(mk, xy, drape, hw, kind, lh)
+
+    heads = {}
+    for si, s in enumerate(st):
         p = np.array(s["pos"], float)
         lead = np.array(s["lead"], float)
         hd = np.array(s["hdg"], float)
@@ -858,68 +932,163 @@ def build_group(g, drape, stands_json, roads=None):
             add_ribbon(mk, np.array([lead, p]), drape, 0.6, MK_LEAD + bd, 0.15)
         add_ribbon(mk, np.array([p - rt * 2.5, p + rt * 2.5]), drape, 0.8, MK_BAR + bd, 0.3)
         span = float(s["span"])
-        if span < 22:
+        hl = head_len(p, hd)
+        heads[si] = hl
+        contact = hl < 40
+        if s.get("ref"):
+            if np.linalg.norm(p - lead) > 12:
+                q = lead + (p - lead) / np.linalg.norm(p - lead) * 7
+                labels.append((s["ref"], q[0], q[1], math.atan2(hd[0], hd[1])))
+            q = p + hd * 5.0
+            if (hl > 8 or not contact) and free_area.contains(Point(q)):
+                labels.append((s["ref"], q[0], q[1], math.atan2(hd[0], hd[1])))
+        if span < 22 or si not in primary:
             continue
         Lac = span * 1.05
         half = span / 2
+        # stand safety envelope: wing tips + tail (equipment restraint line)
         fl, fr = p + hd * 3 - rt * half, p + hd * 3 + rt * half
         bl_, br = p - hd * (Lac + 3) - rt * half, p - hd * (Lac + 3) + rt * half
         add_ribbon(mk, np.array([fl, bl_, br, fr, fl]), drape, 0.45, MK_RED, 0.1)
-        if s.get("ref"):
-            q = lead + (p - lead) / max(np.linalg.norm(p - lead), 1e-6) * 6 if np.linalg.norm(p - lead) > 12 else p - hd * (Lac + 8)
-            labels.append((s["ref"], q[0], q[1], math.atan2(hd[0], hd[1])))
-        # ground support equipment staged at the head of stand (outside the envelope)
-        head = p + hd * 8
-        for k, (off_r, ang_r, kind) in enumerate(((0.3, 0, GSE_TUG), (-0.05, 0, GSE_CART), (-0.2, 0, GSE_CART),
-                                                  (-0.35, 0, GSE_CART), (0.42, 1, GSE_BELT))):
-            q = head + rt * (off_r * span) + (hd * 3 if kind == GSE_BELT else 0)
-            if free(q):
-                ang = math.atan2(rt[1], rt[0]) if ang_r == 0 else math.atan2(-hd[1], -hd[0])
-                gse.append((q[0], q[1], ang, kind))
+        a_max = min(hl - 1.5, 16.0) if contact else 13.0
+        # head of stand: red hatched no-parking area where the tug hooks up / the bridge drives
+        if a_max - 3 > 3:
+            hz = frame_box(p, hd, rt, 3.0, a_max, -4.5, 4.5).intersection(free_area)
+            if hz.area > 25:
+                add_ribbon(mk, np.array([p + hd * 3.0, p + hd * a_max]), drape, 4.5, MK_HATCH, 4.5)
+                outline(frame_box(p, hd, rt, 3.0, a_max, -4.5, 4.5), MK_RED)
+        # equipment staging box on the service (right) side, beside the head of stand
+        placed = False
+        for (l0, l1) in ((6.5, 15.5), (-15.5, -6.5)) if not contact else ((6.5, 15.5),):
+            a1 = a_max if contact else 13.0
+            a0 = max(a1 - 14.0, -2.0)
+            if a1 - a0 < 8:
+                break
+            bx = frame_box(p, hd, rt, a0, a1, l0, l1)
+            if bx.difference(free_area).area > 2 or (not corr_k.is_empty and bx.intersects(corr_k)):
+                continue
+            outline(bx, MK_WHITE)
+            sg = 1 if l0 > 0 else -1
+            h = zlib.crc32(str(s.get("ref") or si).encode()) & 0xFFFF
+            yaw_in = math.atan2(hd[1], hd[0])
+            yaw_out = math.atan2(-hd[1], -hd[0])
+            lane = lambda k: rt * sg * (min(abs(l0), abs(l1)) + 1.5 + 3.0 * k)  # noqa: E731
+            # lane 0: baggage tug + cart train, lane 1: belt loader (+ GPU), lane 2: pushback tug
+            gse.append((*(p + hd * (a1 - 2.2) + lane(0)), yaw_in, GSE_TUG))
+            for c in range(1 + h % 3):
+                q = p + hd * (a1 - 6.0 - 3.6 * c) + lane(0)
+                if a0 + 1.5 < float((q - p) @ hd):
+                    gse.append((*q, yaw_in, GSE_CART))
+            gse.append((*(p + hd * (a1 - 4.5) + lane(1)), yaw_out, GSE_BELT))
+            if h % 2 == 0:
+                gse.append((*(p + hd * (a0 + 2.0) + lane(1)), yaw_in, GSE_GPU))
+            if span >= 30 and h % 3 != 1:
+                gse.append((*(p + hd * (a1 - 3.5) + lane(2)), yaw_in, GSE_PUSH))
+            placed = True
+            break
+        # a fuel / catering truck waits at some remote stands
+        if not placed:
+            continue
     if stands_json is None:
         for pp in g["pp"]:
             xy = np.asarray(pp["g"].coords)
             if LineString(xy).length > 5:
                 add_ribbon(mk, np.array(fillet(xy, 15.0)), drape, 0.6, MK_LEAD + BORDER, 0.15)
-    # jet bridges (OSM aeroway=jet_bridge): rotunda at the terminal end; the cab docks at
-    # the forward left door of the aircraft on the matched stand
-    st = stands_json or []
+
+    # jet bridges: OSM aeroway=jet_bridge ways (rotunda at the terminal end, cab end = parked
+    # position), matched to the stand they serve; contact stands with no mapped bridge get one.
+    # Rows: rotunda E N · parked cab E N · stand · door (0 L1, 1 L2) · facade E N (fixed link)
+    def facade(q):
+        if bld.is_empty:
+            return q
+        from shapely.ops import nearest_points
+        f = np.asarray(nearest_points(bld.boundary, Point(q))[0].coords[0])
+        return f if 2.5 < np.linalg.norm(f - q) < 25 else q
+
+    served = defaultdict(list)
     for jb in g["jb"]:
         xy = np.asarray(jb["g"].coords)
         e0, e1 = xy[0], xy[-1]
+        if bld.distance(Point(e1)) < bld.distance(Point(e0)):
+            e0, e1 = e1, e0  # rotunda = the end nearer the terminal
+        if np.linalg.norm(e1 - e0) < 6:
+            continue
         best = None
         for si, s in enumerate(st):
             p = np.array(s["pos"], float)
-            for rot, cab in ((e0, e1), (e1, e0)):
-                d = float(np.linalg.norm(cab - p))
-                if d < 45 and (best is None or d < best[0]):
-                    best = (d, si, rot, cab)
-        if best:
-            _, si, rot, cab = best
-            s = st[si]
-            p, hd = np.array(s["pos"], float), np.array(s["hdg"], float)
-            lf = np.array([-hd[1], hd[0]])
-            wide = s["span"] >= 42
-            door = p - hd * (8.5 if wide else 5.0) + lf * (3.6 if wide else 2.6)
-            if 8 < np.linalg.norm(door - rot) < 50:
-                cab = door
-        else:
-            si, rot, cab = -1, e0, e1
-            if np.linalg.norm(e1 - e0) < 6:
-                continue
-        bridges.append((rot[0], rot[1], cab[0], cab[1], si, 5.2 if (best and st[si]["span"] >= 42) else 4.2))
-    # apron floodlight masts along the apron edge, clear of taxi routes and buildings
+            d = float(np.linalg.norm(e1 - p))
+            if d < 45 and (best is None or d < best[0]):
+                best = (d, si)
+        si = best[1] if best else -1
+        served[si].append((e0, e1))
+    for si, s in enumerate(st):  # synthesised bridges for unserved contact stands
+        if si not in primary or s.get("zone") in ("remote", None) or s["span"] < 22 or heads.get(si, 99) > 30:
+            continue
+        sib = group[base_ref(s.get("ref"))]
+        if any(served.get(j) for j in sib):
+            continue
+        p, hd = np.array(s["pos"], float), np.array(s["hdg"], float)
+        lf = np.array([-hd[1], hd[0]])
+        wide = s["span"] >= 42
+        door = p - hd * (8.5 if wide else 5.0) + lf * (3.6 if wide else 2.6) + lf * 2.0
+        f = facade(door)
+        if f is door:
+            continue
+        dvec = door - f
+        L = np.linalg.norm(dvec)
+        if not 12 < L < 45:
+            continue
+        rot = f + dvec / L * 4.0
+        if bld.contains(Point(rot)) or not apron_in.contains(Point(rot)):
+            continue
+        served[si].append((rot, rot + dvec / L * (L - 4.0) * 0.8))
+    for si, lst in served.items():
+        if si >= 0:  # L1 = the rotunda nearer the nose
+            p, hd = np.array(st[si]["pos"], float), np.array(st[si]["hdg"], float)
+            lst.sort(key=lambda r: -float((r[0] - p) @ hd))
+        for k, (rot, cab) in enumerate(lst):
+            f = facade(rot)
+            bridges.append((rot[0], rot[1], cab[0], cab[1], si, min(k, 1) if si >= 0 else 0, f[0], f[1]))
+
+    # apron floodlight masts: along the apron edge and between contact stands (wing-tip gap at
+    # the head of stand), clear of taxi routes, stands and buildings
     if not apron_part.is_empty and apron_part.area > 30000:
-        keep_out = unary_union([corridor.buffer(12), bld.buffer(8), rw_union.buffer(60)])
+        keep_out = unary_union([corridor.buffer(12), bld.buffer(6), rw_union.buffer(60)])
+        cand = []
+        for si, s in enumerate(st):
+            if si in primary and heads.get(si, 99) < 40:
+                p, hd = np.array(s["pos"], float), np.array(s["hdg"], float)
+                rt = np.array([hd[1], -hd[0]])
+                cand.append((p + hd * min(heads[si] * 0.5, 8.0) + rt * (s["span"] / 2 + 3.5), 70))
         for poly in polys_of(apron_part):
             ring = poly.buffer(-5).exterior if not poly.buffer(-5).is_empty and isinstance(poly.buffer(-5), Polygon) else None
             if ring is None or ring.length < 200:
                 continue
             for k in range(int(ring.length // 160)):
                 q = ring.interpolate((k + 0.5) * ring.length / max(1, int(ring.length // 160)))
-                if keep_out.contains(q) or any(math.hypot(q.x - m[0], q.y - m[1]) < 90 for m in masts):
-                    continue
-                masts.append((q.x, q.y))
+                cand.append((np.array([q.x, q.y]), 90))
+        for q, sep in cand:
+            if keep_out.contains(Point(q)) or not apron_part.contains(Point(q)) or \
+                    any(math.hypot(q[0] - m[0], q[1] - m[1]) < sep for m in masts):
+                continue
+            masts.append((float(q[0]), float(q[1])))
+    # blue apron edge lights where the apron meets grass
+    if not apron_part.is_empty:
+        inner = apron_part.buffer(-1.0, join_style="mitre")
+        edge = unary_union([ln for p_ in polys_of(inner) for ln in [p_.exterior, *p_.interiors]]) if not inner.is_empty else None
+        if edge is not None and not edge.is_empty:
+            edge = edge.difference(unary_union([taxi_part.buffer(3.0), rw_union.buffer(3.0), bld.buffer(4.0), svc_pave.buffer(2.0)]))
+            for piece in lines_of(linemerge(edge) if isinstance(edge, MultiLineString) else edge):
+                n = int(piece.length // 55)
+                for k in range(n):
+                    q = piece.interpolate((k + 0.5) * piece.length / n)
+                    lights.append((q.x, q.y, LT_TAXI))
+
+    # airside zone for the client road / traffic filter: the paved airside (taxiways, aprons,
+    # painted service roads), minus buildings; only for aerodromes with painted roads
+    zone_mask_geom = None
+    if svc or walks:
+        zone_mask_geom = unary_union([pave, svc_pave]).buffer(0.5).difference(bld_all.buffer(-0.5))
 
     # ---- runway mesh + lights
     rwm = Mesh(12)
@@ -980,13 +1149,125 @@ def build_group(g, drape, stands_json, roads=None):
         return None
     b = allg.bounds
     origin = (math.floor((b[0] + b[2]) / 2 / 64) * 64, math.floor((b[1] + b[3]) / 2 / 64) * 64)
-    return dict(origin=origin, bbox=[round(v, 1) for v in b], rw=rwm, pv=pv, mk=mk, lights=lights,
+    # terminal / hangar massing the tile buildings don't cover (docs/AIR.md "Terminal massing")
+    tm = Mesh(4)
+    if tile_bld is not None:
+        for geom, kind, h in missing_buildings(g, tile_bld):
+            add_massing(tm, geom, drape, kind, h)
+    return dict(origin=origin, bbox=[round(v, 1) for v in b], rw=rwm, pv=pv, mk=mk, tm=tm, lights=lights,
                 labels=labels, gse=gse, bridges=bridges, masts=masts, airside=airside_ids,
+                zone=zone_mask_geom, svc_paths=svc_paths,
+                dbg=dict(pave=pave, apron=apron_part, taxi=taxi_part, svc=[s_[0] for s_ in svc], bld=bld, rw=rw_union),
                 runways=[dict(des="/".join(r["des"]), len=round(r["L"]), width=round(r["w"], 1),
                               disp=[round(d) for d in r["disp"]], kind=r["kind"]) for r in rws])
 
 
+# --------------------------------------------------------------------------- terminal massing
+# The tile pipeline keeps only the first outer ring of a building multipolygon, so large
+# terminals mapped as multipolygon relations (Pearson T3: relation 8883468, two outer rings)
+# come out as a fragment or not at all. Aeroway terminal / hangar footprints that the level-0
+# tile buildings (and landmark models) don't cover are extruded here instead.
+
+TERMINAL_H = {"terminal": 17.0, "hangar": 15.0}
+
+
+def osm_ref(area_id):
+    """osmium area id -> tile b_osm convention (ways positive, relations negative)"""
+    return area_id // 2 if area_id % 2 == 0 else -((area_id - 1) // 2)
+
+
+def load_tile_buildings(bbox):
+    """level-0 tile building footprints (world coords) overlapping bbox -> (polygons, osm ids)"""
+    x0, y0, x1, y1 = bbox
+    S = 1024
+    polys, ids = [], []
+    for tx in range(math.floor(x0 / S), math.floor(x1 / S) + 1):
+        for ty in range(math.floor(y0 / S), math.floor(y1 / S) + 1):
+            f = geo.OUT / "tiles" / "0" / f"{tx}_{ty}.bin.gz"
+            if not f.exists():
+                continue
+            a, _ = tbn.read(f)
+            if "b_ring_off" not in a:
+                continue
+            ro, vo, xy, osm = a["b_ring_off"], a["b_vert_off"], a["b_xy"].reshape(-1, 2), a["b_osm"]
+            for i in range(len(ro) - 1):
+                r = int(ro[i])
+                ring = xy[vo[r]:vo[r + 1]] + (tx * S, ty * S)
+                if len(ring) >= 3:
+                    p = shapely.make_valid(Polygon(ring))
+                    if not p.is_empty:
+                        polys.append(p)
+                        ids.append(int(osm[i]))
+    return polys, ids
+
+
+def missing_buildings(g, tile_bld):
+    polys, suppressed = tile_bld
+    tree = shapely.STRtree(polys) if polys else None
+    out = []
+    for b in g["bl"]:
+        if osm_ref(b["id"]) in suppressed:
+            continue  # drawn by a landmark model (Pearson T1)
+        geom = b["g"]
+        near = [polys[i] for i in tree.query(geom)] if tree is not None else []
+        cov = unary_union(near).buffer(1.0) if near else Polygon()
+        miss = geom.difference(cov).buffer(-2.0, join_style="mitre").buffer(2.0, join_style="mitre")
+        miss = unary_union([p for p in polys_of(miss) if p.area > 150])
+        if miss.is_empty or miss.area < 0.08 * geom.area:
+            continue
+        kind = "hangar" if b["tags"].get("aeroway") == "hangar" else "terminal"
+        h = _metres(b["tags"].get("height"))
+        lv = _metres(b["tags"].get("building:levels"))
+        if not (h == h and 4 < h < 60):
+            h = lv * 5.0 if lv == lv and 1 <= lv <= 8 else TERMINAL_H[kind]
+        out.append((miss.simplify(0.3), 0 if kind == "terminal" else 1, float(h)))
+    return out
+
+
+def add_massing(mesh, geom, drape, kind, h):
+    """flat-roofed extrusion; attr = (u along the facade m, v height m (-1 = roof), kind, height)"""
+    for poly in polys_of(geom):
+        ext = np.asarray(poly.exterior.coords)[:-1]
+        base = float(np.min(drape(ext[:, 0], ext[:, 1])))
+        top = base + h
+        for ring in [poly.exterior, *poly.interiors]:
+            xy = np.asarray(ring.coords)
+            if ring.is_ccw == (ring is not poly.exterior):
+                xy = xy[::-1]  # outer CCW, holes CW (walls face out)
+            u = 0.0
+            for a, c in zip(xy[:-1], xy[1:]):
+                L = float(np.linalg.norm(c - a))
+                if L < 0.05:
+                    continue
+                gh = drape(np.array([a[0], c[0]]), np.array([a[1], c[1]])) - 0.5
+                V = np.array([a, c, c, a])
+                H = np.array([gh[0], gh[1], top, top])
+                A = np.array([[u, gh[0] - base, kind, h], [u + L, gh[1] - base, kind, h], [u + L, h, kind, h], [u, h, kind, h]])
+                mesh.add(V, H, A, np.array([[0, 1, 2], [0, 2, 3]]))
+                u += L
+        V, T = triangulate(poly)
+        if V is not None and len(T):
+            A = np.column_stack([np.zeros(len(V)), np.full(len(V), -1.0), np.full(len(V), kind), np.full(len(V), h)])
+            mesh.add(V, np.full(len(V), top), A, T)
+
+
 # --------------------------------------------------------------------------- main
+
+def airside_mask(geom):
+    """rasterise the airside zone at MASK_CELL -> (x0, y0, w, h, packed bits, row-major from the SW,
+    bit i of byte k = cell 8k + i)"""
+    if geom is None or geom.is_empty:
+        return None
+    x0, y0, x1, y1 = geom.bounds
+    x0, y0 = math.floor(x0 / MASK_CELL) * MASK_CELL, math.floor(y0 / MASK_CELL) * MASK_CELL
+    w, h = int(math.ceil((x1 - x0) / MASK_CELL)), int(math.ceil((y1 - y0) / MASK_CELL))
+    shapely.prepare(geom)
+    xs = x0 + (np.arange(w) + 0.5) * MASK_CELL
+    inside = np.zeros((h, w), bool)
+    for j in range(h):
+        inside[j] = shapely.contains_xy(geom, xs, np.full(w, y0 + (j + 0.5) * MASK_CELL))
+    return float(x0), float(y0), w, h, np.packbits(inside.ravel(), bitorder="little")
+
 
 def stands_for(icao, air):
     ap = air.get(icao)
@@ -1000,11 +1281,11 @@ def stands_for(icao, air):
 
 
 def load_roads(groups):
-    """drivable roads (service / unclassified, not tunnels) near the aerodromes -> per group lists"""
+    """service / unclassified roads and footways (not bridges / tunnels) near the aerodromes -> per group lists"""
     d = np.load(geo.WORK / "osm_lines.npz", allow_pickle=True)
     off = np.concatenate([[0], np.cumsum(d["len"].astype(np.int64))])
     kind, cls, fl = d["kind"], d["cls"], d["flags"]
-    sel = np.nonzero((kind == 0) & np.isin(cls, [5, 6]) & ((fl & 4) == 0))[0]
+    sel = np.nonzero((kind == 0) & np.isin(cls, [5, 6, 7, 8]) & ((fl & 6) == 0))[0]
     # NpzFile members decompress on every access: read each array once
     xy, ids, width = d["xy"], d["id"], d["width"]
     first = xy[off[sel]]
@@ -1014,7 +1295,7 @@ def load_roads(groups):
             continue
         x0, y0, x1, y1 = g["poly"].bounds
         m = (first[:, 0] > x0 - 300) & (first[:, 0] < x1 + 300) & (first[:, 1] > y0 - 300) & (first[:, 1] < y1 + 300)
-        out[key] = [(int(ids[i]), xy[off[i]:off[i + 1]], float(width[i])) for i in sel[m]]
+        out[key] = [(int(ids[i]), xy[off[i]:off[i + 1]], float(width[i]), int(cls[i])) for i in sel[m]]
     return out
 
 
@@ -1034,9 +1315,18 @@ def main():
     arrays = defaultdict(list)
     cnt = defaultdict(int)
     meta = []
+    masks = []
+    try:
+        suppressed = {int(i) for lm in json.loads((geo.OUT / "landmarks.json").read_text()) for i in lm.get("suppress", [])}
+    except FileNotFoundError:
+        suppressed = set()
     for key, g in sorted(groups.items(), key=lambda kv: str(kv[0])):
         try:
-            res = build_group(g, drape, stands_for(g.get("icao"), air), roads.get(key))
+            tb = None
+            if g["bl"]:
+                x0_, y0_, x1_, y1_ = unary_union([b["g"] for b in g["bl"]]).bounds
+                tb = (load_tile_buildings((x0_ - 50, y0_ - 50, x1_ + 50, y1_ + 50))[0], suppressed)
+            res = build_group(g, drape, stands_for(g.get("icao"), air), roads.get(key), tb)
         except Exception as e:  # keep going: one broken aerodrome shouldn't sink the region
             print(f"  ! {key}: {e}")
             continue
@@ -1044,7 +1334,7 @@ def main():
             continue
         m = dict(key=key, icao=g.get("icao"), name=g.get("name"), origin=res["origin"], bbox=res["bbox"],
                  runways=res["runways"])
-        for tag, mesh in (("rw", res["rw"]), ("pv", res["pv"]), ("mk", res["mk"])):
+        for tag, mesh in (("rw", res["rw"]), ("pv", res["pv"]), ("mk", res["mk"]), ("tm", res["tm"])):
             P, A, I = mesh.arrays(res["origin"])
             m[tag] = [cnt[tag + "_v"], len(P), cnt[tag + "_i"], len(I)]
             arrays[tag + "_pos"].append(P.ravel())
@@ -1069,35 +1359,56 @@ def main():
             cnt[name] += len(rows)
             return rows
 
-        # jet bridges: rotunda (x, ground h, z), cab end (x, z), stand index, floor height
-        J = put("jb", res["bridges"], 6)
+        # jet bridges (9 floats): rotunda x, ground h, z · parked cab x, z · stand index · door (0 L1, 1 L2) ·
+        # facade x, z (fixed link start; = rotunda when there is none)
+        J = put("jb", res["bridges"], 8)
         if len(J):
             arrays["jb"].append(np.column_stack([J[:, 0] - ox, drape(J[:, 0], J[:, 1]), -(J[:, 1] - oy), J[:, 2] - ox,
-                                                 -(J[:, 3] - oy), J[:, 4], J[:, 5], drape(J[:, 2], J[:, 3])]).astype(np.float32).ravel())
+                                                 -(J[:, 3] - oy), J[:, 4], J[:, 5], J[:, 6] - ox, -(J[:, 7] - oy)]).astype(np.float32).ravel())
         G_ = put("gse", res["gse"], 4)
         if len(G_):
             arrays["gse"].append(np.column_stack([G_[:, 0] - ox, drape(G_[:, 0], G_[:, 1]), -(G_[:, 1] - oy), G_[:, 2], G_[:, 3]]).astype(np.float32).ravel())
+        # service-road paths for moving GSE: sr (path offsets into sr_xyz rows) + sr_xyz (x, h, z)
+        paths = res.get("svc_paths") or []
+        m["sr"] = [cnt["sr"], len(paths)]
+        for pth in paths:
+            arrays["sr_off"].append(np.array([cnt["sr_v"]], np.uint32))
+            arrays["sr_xyz"].append(np.column_stack([pth[:, 0] - ox, drape(pth[:, 0], pth[:, 1]), -(pth[:, 1] - oy)]).astype(np.float32).ravel())
+            cnt["sr_v"] += len(pth)
+            cnt["sr"] += 1
         M_ = put("mast", res["masts"], 2)
         if len(M_):
             arrays["mast"].append(np.column_stack([M_[:, 0] - ox, drape(M_[:, 0], M_[:, 1]), -(M_[:, 1] - oy)]).astype(np.float32).ravel())
         m["labels"] = [[ref, round(x - ox, 2), round(float(drape(np.array([x]), np.array([y]))[0]), 2), round(-(y - oy), 2), round(a, 4)]
                        for ref, x, y, a in res["labels"]]
         airside += res["airside"]
+        if res.get("zone") is not None:
+            zm = airside_mask(res["zone"])
+            if zm is not None:
+                zx0, zy0, zw, zh, bits = zm
+                masks.append(dict(key=key, x0=zx0, y0=zy0, w=zw, h=zh, cell=MASK_CELL, off=cnt["zm"]))
+                arrays["zm"].append(bits)
+                cnt["zm"] += len(bits)
         meta.append(m)
         rs = ", ".join(f"{r['des']} {r['len']}x{r['width']}" + (f" disp{r['disp']}" if any(r["disp"]) else "") +
                        (" turf" if r["kind"] == 2 else "") for r in res["runways"])
         print(f"  {key:>10} {g.get('name') or '':<45.45} rw {m['rw'][3] // 3:>5} pv {m['pv'][3] // 3:>6} "
-              f"mk {m['mk'][3] // 3:>6} lt {m['lt'][1]:>5}  {rs}")
+              f"mk {m['mk'][3] // 3:>6} tm {m['tm'][3] // 3:>5} lt {m['lt'][1]:>5}  {rs}")
     out = {k: np.concatenate(v) if v else np.zeros(0, np.float32) for k, v in arrays.items()}
-    for k in ("rw_pos", "rw_attr", "pv_pos", "mk_pos", "mk_attr", "lt_pos", "jb", "gse", "mast"):
+    for k in ("rw_pos", "rw_attr", "pv_pos", "mk_pos", "mk_attr", "tm_pos", "tm_attr", "lt_pos", "jb", "gse", "mast"):
         out.setdefault(k, np.zeros(0, np.float32))
         out[k] = out[k].astype(np.float32)
     out["pv_attr"] = out["pv_attr"].astype(np.uint8)
+    out["sr_off"] = np.concatenate([out.get("sr_off", np.zeros(0, np.uint32)), np.array([cnt["sr_v"]])]).astype(np.uint32)
+    out["sr_xyz"] = out.get("sr_xyz", np.zeros(0, np.float32)).astype(np.float32)
     out["lt_kind"] = out.get("lt_kind", np.zeros(0, np.uint8)).astype(np.uint8)
     n = tbn.write(OUT, out, version=2, airports=meta)
     ids = sorted(set(airside))
     (OUT.parent / "airside_roads.json").write_text(json.dumps(ids))
-    print(f"  airside_roads.json: {len(ids)} OSM road ways painted as apron service roads (road mesh skips them)")
+    zm = np.concatenate(arrays["zm"]) if arrays["zm"] else np.zeros(0, np.uint8)
+    nz = tbn.write(OUT.parent / "airside.bin.gz", {"zm": zm.astype(np.uint8)}, version=1, zones=masks)
+    print(f"  airside_roads.json: {len(ids)} OSM ways painted as apron service roads / walkways")
+    print(f"  airside.bin.gz: {nz / 1024:.0f} KB, {len(masks)} zone masks (tile roads + traffic graph skip these)")
     print(f"  {OUT.name}: {n / 1024:.0f} KB, {len(meta)} airports")
 
 

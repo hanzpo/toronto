@@ -25,6 +25,7 @@ import { buildStation, type Built, type StationBox } from './stations/build';
 import { fallbackStations, HEAVY, loadStations, RAIL_MODES, type StationRec } from './stations/data';
 import { makeAtlas, wallColour, type Bullet } from './stations/signs';
 import { TrackIndex } from './stations/tracks';
+import { fetchTbn } from '../data/tbn';
 
 export type { StationBox } from './stations/build';
 
@@ -80,6 +81,8 @@ export class StationsLayer implements Layer {
   private engine!: Engine;
   private system: TransitSystem;
   private tracks: TrackIndex | null = null;
+  /** every rail network track (clearance clipping), from data/rail/network.bin.gz */
+  private allTracks: TrackIndex | null = null;
   private curated: StationRec[] | null = null;
   private curatedLoaded = false;
   private stations: StationRec[] = [];
@@ -125,6 +128,19 @@ export class StationsLayer implements Layer {
     engine.renderer.domElement.parentElement?.appendChild(this.root);
     engine.scene.add(this.lit);
     engine.scene.add(this.under);
+    fetchTbn(`${engine.dataRoot}/rail/network.bin.gz`).then((t) => {
+      if (!t) return;
+      const a = t.arrays;
+      const off = a.e_off as Uint32Array, xyz = a.e_xyz as Float32Array, kind = a.e_kind as Uint8Array;
+      const idx = new TrackIndex();
+      for (let e = 0; e + 1 < off.length; e++) {
+        if (kind[e] === 3) continue; // street-running tram
+        idx.add(kind[e] === 1 ? 'subway' : kind[e] === 2 ? 'lrt' : 'commuter_rail', '', xyz.subarray(3 * off[e], 3 * off[e + 1]));
+      }
+      this.allTracks = idx;
+      this.built.clear();
+      this.buildCentre.set(Infinity, Infinity);
+    }).catch(() => {});
     loadStations(engine.dataRoot).then((s) => {
       this.curated = s;
       this.curatedLoaded = true;
@@ -188,9 +204,10 @@ export class StationsLayer implements Layer {
   }
 
   // ---------------------------------------------------------------- geometry
-  private brand(st: StationRec): 'ttc' | 'go' | 'up' | 'via' {
+  private brand(st: StationRec): 'ttc' | 'go' | 'up' | 'via' | 'lrt' {
     const m = new Set(st.levels.map((l) => l.mode));
-    if (m.has('subway') || m.has('lrt')) return 'ttc';
+    if (st.ids.some((i) => i.startsWith('ttc:'))) return 'ttc';
+    if (m.has('subway') || m.has('lrt')) return 'lrt';
     if (m.has('commuter_rail')) return 'go';
     if (m.has('airport_rail')) return 'up';
     return 'via';
@@ -207,6 +224,7 @@ export class StationsLayer implements Layer {
     if (b === undefined) {
       b = buildStation(st, {
         tracks: this.tracks!,
+        allTracks: this.allTracks,
         heightAt: (e, n) => this.engine.heightAt(e, n),
         hasHeights: (e, n) => this.hasHeights(e, n),
         wall: wallColour(cleanName(st.name), st.levels.find((l) => l.wall)?.wall),
@@ -216,6 +234,19 @@ export class StationsLayer implements Layer {
       this.built.set(st.id, b);
     }
     return b;
+  }
+
+  /** Clearance QA over every station (builds all of them): platforms and track intrusions per station. */
+  clearanceReport(): { stations: number; platforms: number; bad: { id: string; n: number; e: number; nn: number }[] } {
+    let platforms = 0;
+    const bad: { id: string; n: number; e: number; nn: number }[] = [];
+    for (const st of this.stations) {
+      const b = this.getBuilt(st);
+      if (!b) continue;
+      platforms += b.qa.platforms;
+      if (b.qa.intrusions.length) bad.push({ id: st.id, n: b.qa.intrusions.length, e: Math.round(b.qa.intrusions[0].e), nn: Math.round(b.qa.intrusions[0].n) });
+    }
+    return { stations: this.stations.length, platforms, bad };
   }
 
   boxesNear(e: number, n: number, r: number): StationBox[] {
@@ -359,8 +390,10 @@ export class StationsLayer implements Layer {
     const alt = ctx.altitude;
     let nVis = 0;
     // distance limits by importance, growing with altitude; minor stops drop out first
-    const altK = Math.min(12, 1 + alt / 250);
-    const base = [0, 450, 900, 1600];
+    // street level: LRT stops ≤ 300 m, stations ≤ 500 m, major interchanges ≤ 800 m
+    // (and only with a clear line of sight); the reach grows with altitude
+    const altK = Math.min(14, 1 + alt / 120);
+    const base = [0, 300, 500, 800];
     const altMax = [0, 1800, 5500, 12000];
     for (let i = 0; i < this.labels.length; i++) {
       const l = this.labels[i];

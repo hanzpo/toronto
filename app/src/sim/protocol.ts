@@ -19,6 +19,8 @@
 //     f64[30..44) RAILP     player train: see Sim.rail_player_state (sim/src/rail.rs)
 //     f64[44..47) RAILX     [pull-outs, pull-ins (totals), parked trains]
 //     f64[55..58) CARS, PEDS active agents · BOX_STOPPED cars stopped inside a junction box / on a crosswalk
+//     f64[58..63) PHASES   average ms per tick of the road sim: [validate+sort+paths+occupancy, car following, lane changes+advance, spawn, pedestrians]
+//     f64[63]     OUT_MS   average ms per tick of write_output (render records)
 //     f64[54]     RAIL_MS   exponential average of the rail step time per tick (ms)
 //     f64[48..54) BUSX      bus spawn results (totals): [placed, unknown pattern, no road, road too far, at link end, no room]
 //   then 3 snapshot slots of SLOT_BYTES each:
@@ -59,7 +61,7 @@ export const HEADER_BYTES = 512;
 export const MAX_RAIL = 1024;
 export const RAIL_STRIDE = 12;
 export const MAX_RAIL_PTS = 49152;
-export const RAIL_FLAG = { DWELL: 1, DOORS: 2, BRAKE: 4, PLAYER: 8, PENALTY: 16, HELD: 32, PENDING: 64 } as const;
+export const RAIL_FLAG = { DWELL: 1, DOORS: 2, BRAKE: 4, PLAYER: 8, PENALTY: 16, HELD: 32, PENDING: 64, HORN: 128 } as const;
 /** m around the focus within which rail trips run as signalled agents */
 export const RAIL_RADIUS = 9000;
 export const SLOT_HEADER = 64;
@@ -77,10 +79,13 @@ export const SLOT_BYTES = BUS_PATH_OFFSET + MAX_BUS_PTS * 3 * 4;
 export const SAB_BYTES = HEADER_BYTES + SLOTS * SLOT_BYTES;
 
 export const H = { SEQ: 0, SLOT: 1, BUSY: 2, TILES: 3, PENDING: 4, SUBSTEPS: 5, FAST: 6, ACK: 7 } as const;
-export const HF = { STEP_MS: 8, STEP_AVG: 9, TARGET_CARS: 10, TARGET_PEDS: 11, PLAYER: 12, RAIL: 26, RAILP: 30, RAILX: 44, BUSX: 48, RAIL_MS: 54, CARS: 55, PEDS: 56, BOX_STOPPED: 57 } as const;
+export const HF = { STEP_MS: 8, STEP_AVG: 9, TARGET_CARS: 10, TARGET_PEDS: 11, PLAYER: 12, RAIL: 26, RAILP: 30, RAILX: 44, BUSX: 48, RAIL_MS: 54, CARS: 55, PEDS: 56, BOX_STOPPED: 57, PHASES: 58, OUT_MS: 63 } as const;
 export const HF_COUNT = 64;
 /** RAILP fields */
 export const RAILP = { ACTIVE: 0, FEED: 1, TRIP: 2, CENTRE: 3, V: 4, A: 5, AHEAD: 6, ASPECT: 7, PENALTY: 8, LIMIT: 9, NEXT_LIMIT: 10, NEXT_LIMIT_DIST: 11, PATTERN: 12, WARN: 13 } as const;
+
+/** order of the counts in the 'overlaps' message (sim World::overlap_causes) */
+export const OVERLAP_CAUSES = ['spawn', 'laneChange', 'shortLink', 'junctionCrossing', 'sameLane', 'adjacentLanes', 'merge', 'other', 'junctionFollowing', 'structureVsStreet'] as const;
 
 export const CAR_FLAG = { BRAKE: 1, PLAYER: 2, LEFT: 4, RIGHT: 8 } as const;
 export const PED_STATE = { WALK: 0, WAIT: 1, CROSS: 2, IDLE: 3 } as const;
@@ -146,6 +151,10 @@ export type FromWorker =
   /** rail feeds loaded for agents: feed id = index, agency ids */
   | { type: 'railFeeds'; profile: string; agencies: string[] }
   | { type: 'railPlayer'; ok: boolean }
+  /** level crossings whose state changed: [osmNodeId, state (0 idle, 1 warning, 2 gates down)]* */
+  | { type: 'crossings'; data: Float64Array }
+  /** QA: overlapping car bodies by cause (OVERLAP_CAUSES order), every ~2 s */
+  | { type: 'overlaps'; counts: number[] }
   /** signal plans of the loaded graph: [osmId, e, n, offset, axis, greenA, greenB]* */
   | { type: 'plans'; plans: Float64Array };
 

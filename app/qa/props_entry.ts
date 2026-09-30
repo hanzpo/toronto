@@ -4,6 +4,9 @@
 import { decodeTbn } from '../src/data/tbn';
 import { buildRoads, TerrainSampler } from '../src/workers/meshing';
 import { buildStreet } from '../src/workers/street';
+import { applyStationZones, setStationZones } from '../src/workers/stationZones';
+
+export function setZones(z: number[][]) { setStationZones(z); }
 
 /**
  * Compact dump (little endian): u32 [nVeg, nLamp, nSig, 1] ·
@@ -12,6 +15,7 @@ import { buildStreet } from '../src/workers/street';
  */
 export function placeTile(buf: ArrayBuffer, tx: number, ty: number, size = 1024, grid = 33): Uint8Array {
   const { arrays: a } = decodeTbn(buf);
+  applyStationZones(a, tx * size, ty * size, size);
   const G = (a.terrain_h ? Math.round(Math.sqrt(a.terrain_h.length)) : grid) || grid;
   const hdm = a.terrain_h as Int16Array | undefined;
   const h = new Float32Array(G * G);

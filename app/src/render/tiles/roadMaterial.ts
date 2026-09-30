@@ -96,7 +96,7 @@ export function roadMaterial(name = 'roads'): THREE.MeshStandardNodeMaterial {
     const goreR = bit(mk, 12), goreL = bit(mk, 13), noEdgeR = bit(mk, 14), noEdgeL = bit(mk, 15);
     const contR = bit(mk, 16), contL = bit(mk, 17);
     const bikeR = field(mk, 18, 3), bikeL = field(mk, 21, 3);
-    const isLink = bit(fx, 0), rumble = bit(fx, 1), sharrow = bit(fx, 2), stairs = bit(fx, 3), cycle = bit(fx, 4);
+    const isLink = bit(fx, 0), rumble = bit(fx, 1), sharrow = bit(fx, 2), stairs = bit(fx, 3), cycle = bit(fx, 4), divided = bit(fx, 5);
     const u = rd.x, v = rd.y, eL = rd.z, eR = rd.w;
     const fu = max(fwidth(u), 0.0005), fv = max(fwidth(v), 0.0005);
     const tint = pow(vc.rgb, vec3(2.2));
@@ -176,7 +176,8 @@ export function roadMaterial(name = 'roads'): THREE.MeshStandardNodeMaterial {
     // edge lines: freeways / ramps / rural two-way highways; OTM: yellow left, white right on divided
     const edgeW = select(isLink.greaterThan(0.5), float(0.1), float(0.075));
     const rEdgeLine = band(u, eR.negate(), edgeW, fu).mul(f01(hwy)).mul(float(1).sub(noEdgeR));
-    const lEdgeLine = band(u, eL, edgeW, fu).mul(f01(hwy)).mul(float(1).sub(noEdgeL));
+    // divided streets: yellow left edge line along the median curb (OTM Book 11)
+    const lEdgeLine = band(u, eL.sub(select(hwy, float(0), float(0.25))), edgeW, fu).mul(f01(hwy).max(divided)).mul(float(1).sub(noEdgeL));
     const rEdge = rEdgeLine.mul(mix(float(1), cont, contR));
     const lEdge = lEdgeLine.mul(mix(float(1), cont, contL));
     // bike lanes: solid 15 cm line at the lane's inner edge (OTM Book 18), buffer hatched

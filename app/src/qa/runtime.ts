@@ -24,6 +24,9 @@
 //   vehicleDoubleRender far marker drawn within 12 m of a rendered consist car
 //                       (a vehicle shown by two representations in one frame)
 //   longFrames          frames > 40 ms since the last sample / reset (count, maxMs)
+//   extra.houseRoofSpike   house roofs rising > min(5 m, 0.6 × span) above the eaves (drawn L0 tiles;
+//   extra.houseTooTall     house ridges > 14 m;   registered by layers/UrbanLayer.ts from
+//   extra.houseInBuilding  house boxes inside an extruded footprint;   workers/houseFront.ts houseRoofQa)
 import type { Engine } from '../engine/Engine';
 import { fetchTbn } from '../data/tbn';
 import { CAR_LENGTH } from '../layers/traffic/models';

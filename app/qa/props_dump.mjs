@@ -64,7 +64,9 @@ if (isMainThread) {
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log(JSON.stringify({ tiles: tiles.length, placed: done, skipped: tiles.length - todo.length, errors, hash, s: (Date.now() - t0) / 1000 }));
 } else {
-  const { placeTile } = await import(pathToFileURL(workerData.bundle).href);
+  const { placeTile, setZones } = await import(pathToFileURL(workerData.bundle).href);
+  // station zones (paved, tree-free platforms / Union deck), as the client's tile worker gets them
+  try { setZones(JSON.parse(fs.readFileSync(path.join(ROOT, 'app/public/data/stations.json'), 'utf8')).zones ?? []); } catch { /* optional */ }
   for (const [tx, ty] of workerData.list) {
     try {
       const raw = zlib.gunzipSync(fs.readFileSync(path.join(TILES, `${tx}_${ty}.bin.gz`)));

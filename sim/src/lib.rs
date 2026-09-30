@@ -42,6 +42,11 @@ pub struct Sim {
 impl Sim {
     #[wasm_bindgen(constructor)]
     pub fn new(seed: u32, max_cars: u32, max_peds: u32) -> Sim {
+        #[cfg(target_arch = "wasm32")]
+        {
+            static HOOK: std::sync::Once = std::sync::Once::new();
+            HOOK.call_once(|| std::panic::set_hook(Box::new(|info| console_error(&format!("sim panic: {info}")))));
+        }
         Sim { w: World::new(seed as u64, max_cars as usize, max_peds as usize), majors: Majors::default(), rail: RailSim::default() }
     }
 
@@ -136,7 +141,20 @@ impl Sim {
 
     /// advance the rail agents by `dt` s ending at time-of-day `tod` (independent of the
     /// road sim so trains keep up at high clock rates)
+    /// accumulated ms per road-sim phase since the last call
+    /// [validate, sort+paths, occupancy, car following, lane changes, advance, spawn, peds]
+    pub fn take_prof(&mut self) -> Vec<f64> {
+        let p = self.w.prof.to_vec();
+        self.w.prof = [0.0; 8];
+        p
+    }
+
     /// cars stopped in junction boxes: [front past the stop line, rear in the exit box, inside a split junction]
+    /// QA: overlapping car bodies by cause (see World::overlap_causes)
+    pub fn overlap_counts(&mut self) -> Vec<u32> {
+        self.w.overlap_counts().to_vec()
+    }
+
     pub fn box_detail(&self) -> Vec<u32> {
         self.w.stopped_in_box_detail().to_vec()
     }
@@ -144,6 +162,25 @@ impl Sim {
     pub fn rail_step(&mut self, dt: f32, tod: f64) {
         self.tram_road(tod);
         self.rail.step(dt, tod);
+        // level crossing states for road traffic
+        if self.w.xings.len() == self.rail.crossings.len() {
+            for (w, c) in self.w.xings.iter_mut().zip(&self.rail.crossings) {
+                w.2 = c.state;
+            }
+        } else {
+            self.w.xings = self.rail.crossings.iter().map(|c| (c.x, c.y, c.state)).collect();
+        }
+    }
+
+    /// level crossings from the network header: [osm id, edge, s, E, N]*
+    pub fn rail_crossings(&mut self, data: &[f64]) {
+        self.rail.set_crossings(data);
+        self.w.xings = self.rail.crossings.iter().map(|c| (c.x, c.y, c.state)).collect();
+    }
+
+    /// crossings whose state changed: [osm id, state (0 idle, 1 warning, 2 gates down)]*
+    pub fn rail_crossing_changes(&mut self) -> Vec<f64> {
+        self.rail.crossing_changes()
     }
 
     /// is the player driving a train?
@@ -636,4 +673,78 @@ mod tests {
         assert!(front_y < car_rear_y - 0.5, "tram front {front_y} into car rear {car_rear_y}");
         assert!(front_y > car_rear_y - 8.0, "tram closed up: {front_y} vs {car_rear_y}");
     }
+
+    #[test]
+    fn crossing_gates_down_before_the_train_and_no_car_on_the_tracks() {
+        use crate::rail::{M_COMMUTER, K_RAIL};
+        let mut sim = Sim::new(5, 200, 10);
+        load_cross(&mut sim.w.g, 0, [2, 2, 2, 2]);
+        sim.w.g.refresh();
+        sim.w.focus = (512.0, 512.0);
+        sim.w.radius = 1000.0;
+        sim.w.max_cars = 0;
+        // main line east-west across the south arm of the cross, 100 m south of the junction
+        let y = 412.0f32;
+        let net = RailNet::load(&[-1500.0, y, 0.0, 2500.0, y, 0.0], &[0, 0], &[0], &[1], &[0, 2], &[-1500.0, y, 0.0, 2500.0, y, 0.0], &[60, 60], &[4000.0], &[K_RAIL], &[0], &[3], &[0], &[0, 0, 0], &[]);
+        sim.rail.set_net(net);
+        sim.rail.focus = (512.0, 512.0);
+        let len = 150.0;
+        let pat = PatSpec { edges: vec![0], start: 0.0, stops: vec![len / 2.0 + 20.0, 3900.0], len, mode: M_COMMUTER };
+        add_feed(&mut sim.rail, 1, &[pat], &[(0u32, 30000, vec![0u16, 400], vec![5u16, 0], -1)]);
+        // crossing where the track meets x = 512
+        sim.rail_crossings(&[99.0, 0.0, 2012.0, 512.0, y as f64]);
+        // cars coming north towards the crossing
+        let link = (0..sim.w.g.links.len() as u32).find(|&l| {
+            let lk = &sim.w.g.links[l as usize];
+            sim.w.g.nodes[lk.from as usize].osm == 5 && sim.w.g.nodes[lk.to as usize].osm == 1
+        }).unwrap();
+        let mut t = 29999.0;
+        let (mut t1, mut t2, mut arrive) = (None, None, None);
+        let mut spawned = 0;
+        for step in 0..6000 {
+            t += 0.1;
+            sim.w.tod = t;
+            if step % 60 == 0 && spawned < 12 {
+                if sim.w.spawn_car(link, 0, 12.0, 10.0, 0) < usize::MAX {
+                    spawned += 1;
+                }
+            }
+            sim.w.step(0.1);
+            sim.rail_step(0.1, t);
+            let st = sim.rail.crossings[0].state;
+            if st >= 1 && t1.is_none() {
+                t1 = Some(t);
+            }
+            if st == 2 && t2.is_none() {
+                t2 = Some(t);
+            }
+            if let Some(tr) = sim.rail.trains.first() {
+                if arrive.is_none() && tr.front >= 2012.0 {
+                    arrive = Some(t);
+                }
+                // a train on the crossing: no car on it
+                if tr.front >= 2012.0 && tr.front - tr.len <= 2012.0 {
+                    assert_eq!(sim.w.cars_on_closed_crossing(), 0, "car on the crossing while the train passes");
+                    for c in &sim.w.cars {
+                        if c.link == link {
+                            // road s of the crossing = 100 m from the south node
+                            assert!(!(c.s > 98.0 && c.s - c.len < 102.0), "car body on the tracks at s {}", c.s);
+                        }
+                    }
+                }
+            }
+        }
+        let (t1, t2, ta) = (t1.expect("warning"), t2.expect("gates down"), arrive.expect("train arrived"));
+        eprintln!("warning {:.1} s, gates {:.1} s before arrival; cars {}", ta - t1, ta - t2, sim.w.cars.len());
+        assert!(ta - t1 >= 20.0, "warning only {:.1} s before arrival", ta - t1);
+        assert!(ta - t2 >= 5.0, "gates down only {:.1} s before arrival", ta - t2);
+        assert!(spawned > 3);
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen::prelude::wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error(s: &str);
 }

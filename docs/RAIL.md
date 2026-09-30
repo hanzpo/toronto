@@ -91,7 +91,11 @@ missing from the graph (station bus loops, busways, …).
 ### `data/rail/network.bin.gz` (TBN1)
 
 Header: `version, hash, kinds ["rail","subway","light_rail","tram"],
-depots: [{id, name, group (0 rail, 1 subway, 2 LRT, 3 tram), agencies, edges}]`.
+depots: [{id, name, group (0 rail, 1 subway, 2 LRT, 3 tram), agencies, edges}],
+crossings: [[osm node id, edge, s along the edge, E, N], …]` (railway=level_crossing for roads and railway=crossing for paths; crossings on freight-only track, which is not in the network, stay idle).
+
+Edge geometry is smoothed with the canonical `rail_geom.fillet` (class design radius,
+graph nodes pinned) before draping, the same curve the rendered track uses.
 
 | array | type | meaning |
 |---|---|---|
@@ -167,6 +171,14 @@ bbox-edge points unchanged). Bus files also carry `trip_next`.
   (throttle / brake command); the interlocking still applies and ATP supervises the service
   braking curve to the authority and to speed limits: it warns for 3 s, then applies the
   penalty brake to a stop (released when stopped with the controller in brake).
+- **Level crossings**: from the trains' positions and speeds each crossing goes to
+  *warning* (lights, gates lowering; 32 s before the first train arrives) and *gates down*
+  (21 s before; Transport Canada GCS: warning ≥ 20 s, gates horizontal ≥ 5 s before
+  arrival), back to idle 4 s after the last car passed; trains sound the horn (`RF_HORN`)
+  within 20 s of a crossing. The worker drives `window.__street.setCrossing(osmId, state)`.
+  Road cars stop at the stop bar (5.4 m before the track) during the warning (if they can
+  stop comfortably) and whenever the gates are down, and never stop on the tracks
+  (keep clear when the queue ahead reaches back over them).
 - **Checks**: `RailSim::check` counts body overlaps (must be 0), `overruns` counts authority
   overruns (must be 0), `audit` checks the reservation tables.
 

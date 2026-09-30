@@ -10,11 +10,6 @@ export class Sim {
      */
     add_footprints(tx: number, ty: number, ring_off: Uint32Array, xy: Float32Array): void;
     add_tile(tx: number, ty: number, n_id: Float64Array, n_xyz: Float32Array, n_flags: Uint8Array, e_from: Uint32Array, e_to: Uint32Array, e_off: Uint32Array, e_xyz: Float32Array, e_class: Uint8Array, e_lanes_fwd: Uint8Array, e_lanes_bwd: Uint8Array, e_speed: Float32Array, e_flags: Uint8Array, bottleneck: Float32Array, e_width: Float32Array, e_side: Uint8Array): void;
-    /**
-     * advance the rail agents by `dt` s ending at time-of-day `tod` (independent of the
-     * road sim so trains keep up at high clock rates)
-     * cars stopped in junction boxes: [front past the stop line, rear in the exit box, inside a split junction]
-     */
     box_detail(): Uint32Array;
     bus_count(): number;
     /**
@@ -65,6 +60,11 @@ export class Sim {
      */
     measured(): Float32Array;
     constructor(seed: number, max_cars: number, max_peds: number);
+    /**
+     * cars stopped in junction boxes: [front past the stop line, rear in the exit box, inside a split junction]
+     * QA: overlapping car bodies by cause (see World::overlap_causes)
+     */
+    overlap_counts(): Uint32Array;
     ped_count(): number;
     ped_ptr(): number;
     /**
@@ -78,6 +78,14 @@ export class Sim {
     rail_add_feed(id: number, pat_mode: Uint8Array, pat_len: Float32Array, pat_rflags: Uint8Array, pat_rstart: Float32Array, pat_redge_off: Uint32Array, pat_redge: Uint32Array, pat_stop_off: Uint32Array, pat_stop_dist: Float32Array, pat_stop_flag: Uint8Array, tp_off: Uint32Array, tp_arr: Uint16Array, tp_dwell: Uint16Array, trip_start: Int32Array, trip_pattern: Uint32Array, trip_tp: Uint32Array, trip_next: Int32Array): void;
     rail_clear_feeds(): void;
     rail_count(): number;
+    /**
+     * crossings whose state changed: [osm id, state (0 idle, 1 warning, 2 gates down)]*
+     */
+    rail_crossing_changes(): Float64Array;
+    /**
+     * level crossings from the network header: [osm id, edge, s, E, N]*
+     */
+    rail_crossings(data: Float64Array): void;
     /**
      * is the player driving a train?
      */
@@ -157,6 +165,13 @@ export class Sim {
     stats(): Float32Array;
     step(dt: number): void;
     take_over(id: number): boolean;
+    /**
+     * advance the rail agents by `dt` s ending at time-of-day `tod` (independent of the
+     * road sim so trains keep up at high clock rates)
+     * accumulated ms per road-sim phase since the last call
+     * [validate, sort+paths, occupancy, car following, lane changes, advance, spawn, peds]
+     */
+    take_prof(): Float64Array;
     tile_count(): number;
     /**
      * write render records relative to (origin_e, origin_n)
@@ -191,6 +206,7 @@ export interface InitOutput {
     readonly sim_major_ratios: (a: number, b: number, c: number) => [number, number];
     readonly sim_measured: (a: number) => [number, number];
     readonly sim_new: (a: number, b: number, c: number) => number;
+    readonly sim_overlap_counts: (a: number) => [number, number];
     readonly sim_ped_count: (a: number) => number;
     readonly sim_ped_ptr: (a: number) => number;
     readonly sim_player_state: (a: number) => [number, number];
@@ -198,6 +214,8 @@ export interface InitOutput {
     readonly sim_rail_add_feed: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number, a1: number, b1: number, c1: number, d1: number, e1: number, f1: number, g1: number, h1: number) => void;
     readonly sim_rail_clear_feeds: (a: number) => void;
     readonly sim_rail_count: (a: number) => number;
+    readonly sim_rail_crossing_changes: (a: number) => [number, number];
+    readonly sim_rail_crossings: (a: number, b: number, c: number) => void;
     readonly sim_rail_has_player: (a: number) => number;
     readonly sim_rail_network: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number, a1: number, b1: number, c1: number) => void;
     readonly sim_rail_path_len: (a: number) => number;
@@ -229,6 +247,7 @@ export interface InitOutput {
     readonly sim_stats: (a: number) => [number, number];
     readonly sim_step: (a: number, b: number) => void;
     readonly sim_take_over: (a: number, b: number) => number;
+    readonly sim_take_prof: (a: number) => [number, number];
     readonly sim_tile_count: (a: number) => number;
     readonly sim_write_output: (a: number, b: number, c: number) => void;
     readonly __wbindgen_externrefs: WebAssembly.Table;

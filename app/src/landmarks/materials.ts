@@ -7,7 +7,7 @@
 // the size in metres one texture repeat covers; Parts.build() divides the
 // metre-UVs by it.
 import * as THREE from 'three/webgpu'
-import { floor, mod, texture, time, uv, vec2 } from 'three/tsl'
+import { floor, fract, mod, sin, smoothstep, texture, time, uv, vec2, float, color, mix } from 'three/tsl'
 
 export interface MatSpec {
   material: THREE.MeshStandardMaterial
@@ -193,6 +193,116 @@ export function screenUV(col: number): [number, number] {
   return [(c + 0.01) / SCREEN_COLS, (c + 0.99) / SCREEN_COLS]
 }
 
+// Granite paving: 0.6 × 1.2 m setts in two greys, darker 0.3 m bands every
+// 6 m (Yonge-Dundas / Sankofa Square, forecourts). Metre UVs, module 6 m.
+function paving(light: string, dark: string, band: string, seed: number): MatSpec {
+  const S = 512, c = document.createElement('canvas')
+  c.width = c.height = S
+  const g = c.getContext('2d')!
+  const r = rng(seed)
+  const px = S / 6 // pixels per metre
+  for (let y = 0; y < 6; y += 0.6) {
+    for (let x = 0; x < 6; x += 1.2) {
+      const off = (Math.round(y / 0.6) % 2) * 0.6
+      const t = r()
+      g.fillStyle = t < 0.5 ? light : t < 0.85 ? dark : '#9b978f'
+      g.fillRect((x + off) * px, y * px, 1.2 * px - 2, 0.6 * px - 2)
+      if (x + off + 1.2 > 6) g.fillRect((x + off - 6) * px, y * px, 1.2 * px - 2, 0.6 * px - 2)
+    }
+  }
+  g.fillStyle = band
+  g.fillRect(0, 0, S, 0.3 * px)
+  g.fillRect(0, 0, 0.3 * px, S)
+  const map = new THREE.CanvasTexture(c)
+  map.colorSpace = THREE.SRGBColorSpace
+  map.wrapS = map.wrapT = THREE.RepeatWrapping
+  map.anisotropy = 8
+  return { material: new THREE.MeshStandardMaterial({ color: '#ffffff', map, roughness: 0.8 }), module: [6, 6], castShadow: false }
+}
+
+// Distillery District lanes: old red clay pavers in herringbone with worn,
+// darker joints (3 m module).
+function brickPaving(): MatSpec {
+  const S = 512, c = document.createElement('canvas')
+  c.width = c.height = S
+  const g = c.getContext('2d')!
+  const r = rng(77)
+  const px = S / 3, bw = 0.2 * px, bh = 0.1 * px
+  g.fillStyle = '#5a3a2e'
+  g.fillRect(0, 0, S, S)
+  const cols = ['#9a4e3a', '#8c4533', '#a65a42', '#7e3d2f', '#b0664c']
+  // herringbone: 45° pairs of bricks
+  g.save()
+  g.translate(S / 2, S / 2)
+  g.rotate(Math.PI / 4)
+  for (let y = -S; y < S; y += bh * 2) {
+    for (let x = -S; x < S; x += bw + bh) {
+      const o = ((y / (bh * 2)) % 2) * bh
+      g.fillStyle = cols[Math.floor(r() * cols.length)]
+      g.fillRect(x + o, y, bw - 2, bh - 2)
+      g.fillStyle = cols[Math.floor(r() * cols.length)]
+      g.fillRect(x + o + bw, y - bh, bh - 2, bw - 2)
+    }
+  }
+  g.restore()
+  const map = new THREE.CanvasTexture(c)
+  map.colorSpace = THREE.SRGBColorSpace
+  map.wrapS = map.wrapT = THREE.RepeatWrapping
+  map.anisotropy = 8
+  return { material: new THREE.MeshStandardMaterial({ color: '#ffffff', map, roughness: 0.9 }), module: [3, 3], castShadow: false }
+}
+
+// Fountain jets (Yonge-Dundas Square): crossed vertical quads, one jet per
+// integer u (u = jet index + [0, 1]), v = 0 at the nozzle .. 1 at the jet's
+// maximum height. Each jet rises and falls on its own phase; streaks scroll up.
+function fountainJet(): MatSpec {
+  const m = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, side: THREE.DoubleSide })
+  const u = uv()
+  const id = floor(u.x)
+  const lx = fract(u.x)
+  const phase = fract(sin(id.mul(12.9898)).mul(43758.5453))
+  const h = sin(time.mul(0.9).add(phase.mul(6.283))).mul(0.4).add(0.6) // current jet height (fraction of max)
+  const core = smoothstep(0.5, 0.15, lx.sub(0.5).abs())
+  const top = smoothstep(h, h.sub(0.12), u.y)
+  const streak = fract(u.y.mul(5).sub(time.mul(2.2)).add(phase))
+  m.colorNode = mix(color(0xcfe6f2), color(0xffffff), streak.pow(4))
+  m.opacityNode = core.mul(top).mul(float(0.55).add(streak.mul(0.35)))
+  return { material: m as unknown as THREE.MeshStandardMaterial, castShadow: false }
+}
+
+// Scrolling news ticker (the CityNews crawl on 33 Dundas East): emissive text
+// band; u in metres along the band, scrolls with time.
+function ticker(): MatSpec {
+  const W = 2048, H = 64
+  const c = document.createElement('canvas')
+  c.width = W
+  c.height = H
+  const g = c.getContext('2d')!
+  g.fillStyle = '#0a1a3a'
+  g.fillRect(0, 0, W, H)
+  g.fillStyle = '#ffd200'
+  g.font = '700 40px Arial, sans-serif'
+  g.textBaseline = 'middle'
+  const items = ['CITY NEWS', 'TTC: LINE 1 SERVICE NORMAL', 'LEAFS WIN 4-2', 'WEATHER 18°C SUNNY', 'GARDINER EXPRESSWAY: LANE CLOSURES',
+    'TORONTO', 'YONGE-DUNDAS']
+  let x = 10
+  for (const t of items) {
+    g.fillStyle = '#ffd200'
+    g.fillText('\u25B6', x, H / 2)
+    g.fillStyle = '#ffffff'
+    g.fillText(t, x + 44, H / 2)
+    x += 44 + g.measureText(t).width + 40
+  }
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.wrapS = THREE.RepeatWrapping
+  const m = new THREE.MeshStandardNodeMaterial({ color: '#050608', roughness: 0.4 })
+  const u = uv()
+  // 1 texture repeat = 60 m of band; crawl at 6 m/s
+  m.emissiveNode = texture(tex, vec2(u.x.div(60).add(time.mul(0.1)), u.y)).mul(1.3)
+  return { material: m as unknown as THREE.MeshStandardMaterial, castShadow: false }
+}
+
 function grass(): MatSpec {
   const material = new THREE.MeshStandardMaterial({ color: '#5f8a3e', roughness: 1, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })
   return { material, castShadow: false }
@@ -254,6 +364,12 @@ function build() {
     zinc: plain('#8c9396', 0.5, 0.5),
     grass: grass(),
     ledScreen: ledScreen(),
+    plazaPaving: paving('#c9c5bd', '#b3aea5', '#5d5f63', 41),
+    forecourt: paving('#bdb8ae', '#a9a499', '#8b8781', 42),
+    fountainJet: fountainJet(),
+    seatRed: plain('#a3262a', 0.8),
+    brickPaving: brickPaving(),
+    ticker: ticker(),
     signRed: glow('#ff3b2f', '#9a1d16', 0.35, 3),
     signWarm: glow('#ffd68a', '#d9c7a0', 0.15, 3),
     bronzeGlass: facade({ cols: 8, rows: 8, bay: 1.5, floor: 3.8, frame: '#4a3d33', glass: '#6a5646', glass2: '#7a6552', mullion: 0.14, spandrel: 0.3 }, 0.3, 0.3, 1.0, 31),

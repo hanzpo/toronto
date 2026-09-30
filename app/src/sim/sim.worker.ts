@@ -3,6 +3,7 @@
 // snapshots into a SharedArrayBuffer (see protocol.ts for the layout).
 import init, { Sim } from './pkg/sim.js';
 import { decodeTbn, type Tbn } from '../data/tbn';
+import { dropAirsideGraph } from '../workers/airside';
 import {
   bottleneckOf, CAR_STRIDE, H, HEADER_BYTES, HF, HF_COUNT, MAX_CARS, MAX_PEDS, MAX_RAIL, MAX_RAIL_PTS, MAX_SIGNALS, PED_STRIDE, RAIL_OFFSET, RAIL_PATH_OFFSET,
   RAIL_STRIDE, SIG_OFFSET, SIG_STRIDE, SLOT_BYTES, SLOT_HEADER, SLOTS, MAX_BUS, MAX_BUS_PTS, BUS_OFFSET, BUS_PATH_OFFSET, BUS_STRIDE,
@@ -29,6 +30,7 @@ const loaded = new Map<string, { names: string[]; eName: Uint16Array }>();
 const pending = new Set<string>();
 const missing = new Set<string>();
 let stepAvg = 0;
+let lastOverlaps = 0;
 let plansVersion = -1;
 let plansAt = 0;
 // building footprints (player collisions): level-0 render tiles around the player
@@ -69,7 +71,7 @@ const u32 = (a: ArrayLike<number>) => (a instanceof Uint32Array ? a : Uint32Arra
 async function loadRailNet(): Promise<boolean> {
   const buf = await fetchBin(`${dataRoot}/rail/network.bin.gz`);
   if (!buf || !sim) return false;
-  const t = decodeTbn<{ depots?: typeof railDepots }>(buf);
+  const t = decodeTbn<{ depots?: typeof railDepots; crossings?: number[][] }>(buf);
   const a = t.arrays;
   railDepots = t.header.depots ?? [];
   sim.rail_network(
@@ -77,6 +79,9 @@ async function loadRailNet(): Promise<boolean> {
     a.e_vlim as Uint8Array, a.e_len as Float32Array, a.e_kind as Uint8Array, a.e_service as Uint8Array, a.e_dir as Uint8Array,
     a.e_flags as Uint8Array, u32(a.c_off), u32(a.c_to),
   );
+  // level crossings [osm id, edge, s, E, N]
+  const xs = t.header.crossings ?? [];
+  sim.rail_crossings(Float64Array.from(xs.flat()));
   return true;
 }
 
@@ -134,6 +139,7 @@ async function loadTile(tx: number, ty: number) {
     if (!buf) { missing.add(k); return; }
     const t: Tbn<GraphHeader> = decodeTbn<GraphHeader>(buf);
     const a = t.arrays;
+    await dropAirsideGraph(a, dataRoot, tx * TILE, ty * TILE, TILE); // no traffic on aprons (workers/airside.ts)
     const names = t.header.names ?? [];
     const eName = a.e_name as Uint16Array;
     const bn = new Float32Array(eName.length);
@@ -305,13 +311,25 @@ function tick(m: TickMsg) {
       if (rrem > 1 && !sim.rail_has_player()) sim.rail_reset();
       const rms = performance.now() - tr0;
       hf[HF.RAIL_MS] = hf[HF.RAIL_MS] ? hf[HF.RAIL_MS] * 0.95 + rms * 0.05 : rms;
+      const to0 = performance.now();
       sim.write_output(m.originE, m.originN);
+      const outMs = performance.now() - to0;
+      const ph = sim.take_prof();
+      const phases = [ph[0] + ph[1] + ph[2], ph[3], ph[4] + ph[5], ph[6], ph[7]];
+      for (let i = 0; i < 5; i++) hf[HF.PHASES + i] = hf[HF.PHASES + i] * 0.95 + phases[i] * 0.05;
+      hf[HF.OUT_MS] = hf[HF.OUT_MS] * 0.95 + outMs * 0.05;
       const ms = performance.now() - t0;
       stepAvg = stepAvg ? stepAvg * 0.95 + ms * 0.05 : ms;
       hf[HF.STEP_MS] = ms;
       hf[HF.STEP_AVG] = stepAvg;
       Atomics.store(hdr, H.SUBSTEPS, k);
       Atomics.store(hdr, H.FAST, fast ? 1 : 0);
+      if (t0 - lastOverlaps > 2000) {
+        lastOverlaps = t0;
+        post({ type: 'overlaps', counts: Array.from(sim.overlap_counts()) });
+      }
+      const xc = sim.rail_crossing_changes();
+      if (xc.length) { const data = new Float64Array(xc); post({ type: 'crossings', data }, [data.buffer]); }
       const rs = sim.rail_stats();
       for (let i = 0; i < 4; i++) hf[HF.RAIL + i] = rs[i];
       for (let i = 4; i < 7; i++) hf[HF.RAILX + i - 4] = rs[i];

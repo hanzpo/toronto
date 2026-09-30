@@ -6,7 +6,7 @@ import { Parts, prism, slab, bbox, cyl, lathe, offsetPoly, ccw, cleanPoly, rect,
 import type { MatKey } from './materials'
 import type { BuildCtx, OsmPart } from './types'
 import {
-  addHeritage, partOf, zOf, faceEdge, edgeBox, panel, vault, gableWing, lift, hOf, block, along,
+  addHeritage, partOf, zOf, faceEdge, edgeBox, panel, vault, gableWing, lift, hOf, block, along, slabHoles,
 } from './kit2'
 
 const T = (z: number) => (z ? new THREE.Matrix4().makeTranslation(0, z, 0) : undefined)
@@ -48,6 +48,17 @@ export function buildStLawrenceMarket(ctx: BuildCtx) {
   P.add('limestone', edgeBox(a, b, 0.3, 0.7, 14.4, 15.2, 0.35))
   P.add('signWarm', edgeBox(a, b, 0.33, 0.67, 10.5, 12, 0.3, 0.1))
   P.add('storefront', panel(a, b, 0.05, 0.95, 0.5, 4.5, 0.06, [0, 1], true))
+  // Jarvis St and Market St sides: arched market doors / shop windows along
+  // the ground floor under a continuous green-painted steel awning
+  for (const tgt of [[sb.x1 + 200, sb.cy], [sb.x0 - 200, sb.cy]] as V2[]) {
+    const [c0, c1] = faceEdge(south, tgt, 30)
+    P.add('storefront', panel(c0, c1, 0.03, 0.97, 0.4, 4.2, 0.06, [0, 1], true))
+    P.add('copper', edgeBox(c0, c1, 0.03, 0.97, 4.3, 4.55, 1.8, 0.05))
+    if (hi) {
+      const L = Math.hypot(c1[0] - c0[0], c1[1] - c0[1])
+      for (let t = 6; t < L - 3; t += 12) P.add('signWarm', edgeBox(c0, c1, t / L - 0.02, t / L + 0.02, 4.55, 5.2, 0.12, 0.3))
+    }
+  }
   return P.build('st_lawrence_market')
 }
 
@@ -78,6 +89,29 @@ export function buildDistillery(ctx: BuildCtx) {
       if (hi) g.add(wall, prism(offsetPoly(poly, -0.2), h - 0.6, h + 0.9, { top: false, bottom: true }))
     }
     P.addParts(g, T(z))
+  }
+  // Brick-paved pedestrian lanes (Trinity St, Gristmill / Tank House / Case
+  // Goods lanes) between the blocks, and the iron catwalks bridging them
+  const lanes = (ctx.entry as unknown as { lanes?: { paving: { ring: V2[]; holes?: V2[][] }[]; catwalks: [V2, V2][] } } | null)?.lanes
+  for (const pv of lanes?.paving ?? []) {
+    const r = ccw(cleanPoly(pv.ring))
+    if (r.length < 3) continue
+    const hs = (pv.holes ?? []).map((h) => [...ccw(cleanPoly(h))].reverse())
+    P.add('brickPaving', hs.length ? slabHoles(r, hs, 0.14) : slab(r, 0.14))
+    P.add('granite', prism(r, -0.6, 0.14, { top: false }))
+  }
+  for (const [a, b] of lanes?.catwalks ?? []) {
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1])
+    if (L < 1) continue
+    const d: V2 = [(b[0] - a[0]) / L, (b[1] - a[1]) / L], n: V2 = [-d[1], d[0]]
+    const q = (t: number, s_: number): V2 => [a[0] + d[0] * t + n[0] * s_, a[1] + d[1] * t + n[1] * s_]
+    const deck = ccw([q(-0.5, -1), q(L + 0.5, -1), q(L + 0.5, 1), q(-0.5, 1)])
+    P.add('metalDark', prism(deck, 7.2, 7.5, { bottom: true }))
+    for (const s_ of [-1, 1]) {
+      const rail = ccw([q(-0.5, s_ * 1 - 0.05), q(L + 0.5, s_ * 1 - 0.05), q(L + 0.5, s_ * 1 + 0.05), q(-0.5, s_ * 1 + 0.05)])
+      P.add('metalDark', prism(rail, 8.4, 8.5, { bottom: true }))
+      if (hi) for (let t = 0; t <= L; t += 1.5) { const p0 = q(t, s_ * 1); P.add('metalDark', cyl(0.03, 0.9, 7.5, 4, 0.03, p0[0], p0[1])) }
+    }
   }
   // The Gooderham & Worts boiler-house chimney (~40 m)
   const bh = partOf(ctx, 'b', rect(39, 11, -11, 38))

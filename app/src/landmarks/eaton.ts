@@ -3,6 +3,7 @@
 // Yonge-Dundas Square with its LED screens, Massey Hall, and the Elgin &
 // Winter Garden Theatre Centre. All in the downtown grid frame (x ≈ along
 // Queen St, y ≈ up Yonge St) on the exact OSM footprints from landmarks.json.
+import * as THREE from 'three/webgpu'
 import { Parts, prism, slab, bbox, cyl, box, offsetPoly, rect, ccw, cleanPoly, beam, P as P3, type V2 } from './kit'
 import { screenUV, type MatKey } from './materials'
 import type { BuildCtx, OsmPart } from './types'
@@ -34,6 +35,10 @@ export function buildEatonCentre(ctx: BuildCtx) {
     if (BAY[p.id]) return null
     return { wall: 'ecPrecast', roof: 'roofLight' }
   })
+  // Yonge Street frontage (local x ≈ 50–57 is the building line, Yonge's
+  // centreline ≈ 64): shop fronts, entrance canopies and granite forecourts
+  // filling the setback between the precast walls and the sidewalk.
+  yongeFrontage(P, ctx, hi)
   // Hudson's Bay Queen Street (former Simpson's) + Simpson Tower on top of it
   for (const [id, [h, mat]] of Object.entries(BAY)) {
     const p = osmPart(ctx, +id)
@@ -100,19 +105,28 @@ export function buildYongeDundasSquare(ctx: BuildCtx) {
   // Plaza: irregular pentagon between Yonge, Dundas and Victoria
   const plaza: V2[] = ccw([[-19, 9.5], [80.5, 9.5], [81, 30], [61.5, 47.5], [-4.7, 78.5], [-19.5, 79]])
   P.add('granite', prism(plaza, 0, top, { top: false }))
-  P.add('granite', slab(plaza, top))
-  // Two rows of ten fountain grilles on the main east-west walkway
+  P.add('plazaPaving', slab(plaza, top))
+  // Two rows of ten fountain grilles on the main east-west walkway; three
+  // jets per grille rise and fall on their own phase (fountainJet material)
+  let jet = 0
   for (const fy of [27, 33]) {
     for (let i = 0; i < 10; i++) {
       const fx = 6 + i * 5.2
       P.add('metalDark', slab(rect(2.2, 2.2, fx, fy), top + 0.02))
-      if (hi) {
-        for (let k = -1; k <= 1; k++) {
-          const hgt = 1.2 + ((i * 7 + k * 3 + fy) % 5) * 0.45
-          P.add('vaultGlass', cyl(0.09, hgt, top, 5, 0.04, fx + k * 0.7, fy))
-        }
+      for (let k = -1; k <= (hi ? 1 : -1); k++) {
+        const hgt = 2.2 + ((i * 7 + k * 3 + fy) % 5) * 0.5
+        P.add('fountainJet', jetQuads(fx + k * 0.7, fy, top + 0.03, hgt, 0.5, jet++))
       }
     }
+  }
+  // TO TIX booth (half-price theatre tickets): small glazed pavilion
+  const kiosk = osmPart(ctx, YDS_KIOSK)
+  if (kiosk) {
+    const kp = ccw(cleanPoly(kiosk.poly))
+    P.add('glassGrey', prism(offsetPoly(kp, 0.2), top, top + 3, { top: false }))
+    P.add('metalDark', prism(offsetPoly(kp, -0.4), top + 3, top + 3.5, { bottom: true }))
+    const [a, b] = faceEdge(kp, [0, 0])
+    P.add('signWarm', panel(a, b, 0.15, 0.85, top + 3.55, top + 4.3, 0.1))
   }
   // Angled canopy on 11 concrete pillars along Dundas
   const canopy = partOf(ctx, 'canopy', [[-8.45, 68.9], [34.05, 55.43], [61.2, 42.14], [61.58, 47.31], [-0.89, 78.33], [-4.74, 78.08]])
@@ -136,7 +150,7 @@ export function buildYongeDundasSquare(ctx: BuildCtx) {
   // Buildings with the screens: 1 Dundas East (ex-Hard Rock), 33 Dundas East
   // (Citytv, curved screen), 10 Dundas East (The Tenor, billboard walls).
   addParts(P, ctx, (p) => {
-    if (p.id === 61014138 || p.id === 1105572886 || p.id === 127288086) return null
+    if (p.id === 61014138 || p.id === 1105572886 || p.id === 127288086 || p.id === YDS_KIOSK) return null
     if (p.id === 23447959) return { wall: 'glassGrey', roof: 'roofDark' }
     return { wall: p.id >= 975464622 ? 'ecPrecast' : 'glassGrey', roof: 'roofDark' }
   })
@@ -165,6 +179,13 @@ export function buildYongeDundasSquare(ctx: BuildCtx) {
       P.add('ledScreen', panel(pts[i], pts[i + 1], 0, 1, 3.5, 13, 0.8, [u0 + ((u1 - u0) * u) / L, u0 + ((u1 - u0) * (u + l)) / L]))
       u += l
     }
+    // CityNews crawl under the curved screen
+    u = 0
+    for (let i = 0; i < pts.length - 1; i++) {
+      const l = Math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
+      P.add('ticker', panel(pts[i], pts[i + 1], 0, 1, 2.3, 3.2, 0.85, [u, u + l]))
+      u += l
+    }
     const [a, b] = faceEdge(ct, [0, 5])
     P.add('ledScreen', panel(a, b, 0.05, 0.6, 9, 22, 0.5, screenUV(3)))
   }
@@ -188,6 +209,62 @@ export function buildYongeDundasSquare(ctx: BuildCtx) {
     P.add('ledScreen', panel([mt[0] - 3, mt[1] + 3], [mt[0] - 3, mt[1] - 3], 0, 1, zt + 14, zt + 42, 0.05, screenUV(3)))
   }
   return P.build('yonge_dundas_square')
+}
+
+const YDS_KIOSK = 1105572885
+
+/** Sidewalk back edge on Yonge in the Eaton Centre frame (local x). */
+const YONGE_BACK = 55.5
+
+function yongeFrontage(P: Parts, ctx: BuildCtx, hi: boolean) {
+  let k = 0
+  for (const p of ctx.entry?.osmParts ?? []) {
+    if (p.whole || p.minH > 1 || p.id === EC_GALLERIA) continue
+    const poly = ccw(cleanPoly(p.poly))
+    const z = lift(p)
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i], b = poly[(i + 1) % poly.length]
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1])
+      if (len < 4) continue
+      const nx = (b[1] - a[1]) / len, ny = -(b[0] - a[0]) / len
+      const mx = (a[0] + b[0]) / 2
+      if (nx < 0.85 || mx < 38 || mx > YONGE_BACK) continue
+      // shop fronts: lit glazing 0.3–5.2 m with a dark frieze above
+      P.add('storefront', panel(a, b, 0.02, 0.98, z + 0.3, z + 5.2, 0.12, [0, 1], true))
+      P.add('metalDark', edgeBox(a, b, 0.01, 0.99, z + 5.2, z + 6.0, 0.25, 0.05))
+      // entrance canopies every ~30 m
+      const n = Math.max(1, Math.round(len / 30))
+      for (let j = 0; j < n; j++) {
+        const t = (j + 0.5) / n
+        const w = Math.min(0.4, 7 / len)
+        P.add('steelWhite', edgeBox(a, b, t - w / 2, t + w / 2, z + 4.3, z + 4.6, 2.4, 0.1))
+        if (hi) P.add('signWarm', edgeBox(a, b, t - w / 3, t + w / 3, z + 4.6, z + 5.1, 0.12, 2.3))
+        k++
+      }
+      // forecourt paving out to the sidewalk (sits just under the sidewalk top where they meet)
+      const d = Math.min(9, (YONGE_BACK + 1 - mx) / nx)
+      if (d > 0.4) {
+        const f: V2[] = ccw([a, b, [b[0] + nx * d, b[1] + ny * d], [a[0] + nx * d, a[1] + ny * d]])
+        P.add('forecourt', prism(f, z - 0.3, z + 0.12))
+      }
+    }
+  }
+  return k
+}
+
+/** Two crossed vertical quads for one fountain jet; u = id + [0, 1], v = 0..1 up the jet. */
+function jetQuads(x: number, y: number, z: number, h: number, w: number, id: number): THREE.BufferGeometry {
+  const pos: number[] = [], uvs: number[] = []
+  for (const [dx, dy] of [[w / 2, 0], [0, w / 2]]) {
+    const a = [x - dx, -(y - dy)], b = [x + dx, -(y + dy)]
+    pos.push(a[0], z, a[1], b[0], z, b[1], b[0], z + h, b[1], a[0], z, a[1], b[0], z + h, b[1], a[0], z + h, a[1])
+    uvs.push(id, 0, id + 1, 0, id + 1, 1, id, 0, id + 1, 1, id, 1)
+  }
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
+  g.computeVertexNormals()
+  return g
 }
 
 // ---------------------------------------------------------------------------

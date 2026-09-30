@@ -23,6 +23,8 @@ function loadLayerModules() {
     landmarks: import('./layers/LandmarksLayer'),
     street: import('./layers/StreetLayer'),
     props: import('./layers/PropsLayer'),
+    urban: import('./layers/UrbanLayer'),
+    crossings: import('./layers/CrossingsLayer'),
     transit: import('./layers/TransitLayer'),
     interact: import('./interact/InteractLayer'),
     stations: import('./layers/StationsLayer'),
@@ -63,6 +65,8 @@ export default function App() {
         await yieldTask();
         await engine.addLayer(new (await mods.street).StreetLayer());
         await engine.addLayer(new (await mods.props).PropsLayer());
+        await engine.addLayer(new (await mods.urban).UrbanLayer());
+        await engine.addLayer(new (await mods.crossings).CrossingsLayer());
         const transit = new (await mods.transit).TransitLayer(engine.dataRoot);
         await engine.addLayer(transit);
         Object.assign(window as object, { __transit: transit });
@@ -78,6 +82,7 @@ export default function App() {
         await engine.addLayer(new (await mods.airport).AirportLayer());
         await yieldTask();
         { const air = new (await mods.air).AirLayer(engine.dataRoot); await engine.addLayer(air); Object.assign(window as object, { __air: air }); }
+        { const water = new (await import('./layers/WaterLifeLayer')).WaterLifeLayer(engine.dataRoot); await engine.addLayer(water); Object.assign(window as object, { __water: water }); }
         if (mods.debug) await engine.addLayer(new (await mods.debug).DebugOverlayLayer());
         setEngine(engine);
         Object.assign(window as object, { __engine: engine, __clock: clock, __app: useApp });

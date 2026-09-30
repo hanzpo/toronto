@@ -863,9 +863,6 @@ def solve_profile(S: Stroke, L: Lines, curated=None):
     ground - cover in tunnels (weak). lam = ell^4 gives vertical curves with a
     length scale ell per class; inequalities by an active set (a few passes).
     Duplicate (zero-length) vertices share one unknown."""
-    import scipy.sparse as sp
-    from scipy.sparse.linalg import spsolve
-
     s, g = S.s, S.g
     n0 = len(s)
     ws = [i for i, _ in S.ways]
@@ -948,46 +945,57 @@ def solve_profile(S: Stroke, L: Lines, curated=None):
         i = int(key[vi])
         # a clearance over a crossing beats a node / corridor pin
         EQ[i] = max(Z, LO[i]) if np.isfinite(LO[i]) and LO[i] > -1e8 and (br[first[i]] or LO[i] > g[first[i]] + 1) else Z
-    rows, cols, vals, rhs = [], [], [], []
-    r = 0
-    # data rows
-    for i in range(n):
-        if w[i] > 0:
-            wt = math.sqrt(w[i] * ds[i])
-            rows.append(r); cols.append(i); vals.append(wt); rhs.append(wt * t[i]); r += 1
-    # curvature rows
-    for i in range(1, n - 1):
-        h1, h2 = max(su[i] - su[i - 1], 0.2), max(su[i + 1] - su[i], 0.2)
-        lam = ell[i] ** 4
-        wt = math.sqrt(lam * (h1 + h2) / 2)
-        c0 = 2 / (h1 * (h1 + h2)); c1 = -2 / (h1 * h2); c2 = 2 / (h2 * (h1 + h2))
-        rows += [r, r, r]; cols += [i - 1, i, i + 1]; vals += [wt * c0, wt * c1, wt * c2]; rhs.append(0.0); r += 1
-    # slope rows (tension): no runaway linear extrapolation across free decks
-    for i in range(n - 1):
-        h = max(su[i + 1] - su[i], 0.2)
-        mu = ell[i] ** 2 * 0.25
-        wt = math.sqrt(mu / h)
-        rows += [r, r]; cols += [i, i + 1]; vals += [-wt, wt]; rhs.append(0.0); r += 1
-    # weak anchor so fully free strokes (all deck) stay determined
-    rows.append(r); cols.append(0); vals.append(1e-3); rhs.append(1e-3 * g[first[0]]); r += 1
-    base_r = r
-    A0 = sp.csr_matrix((vals, (rows, cols)), shape=(r, n))
-    b0 = np.array(rhs)
-    BIG = 3e3
+    # normal equations assembled directly in symmetric banded form (bandwidth 2), solved with
+    # a banded Cholesky; equality / active constraints only add to the diagonal
+    from scipy.linalg import solveh_banded
+
+    ab = np.zeros((3, n))            # ab[2 + i - j, j] = M[i, j] for i <= j (upper form)
+    rhs = np.zeros(n)
+
+    def add(i, j, v):                # symmetric contribution M[i,j] += v (i <= j), vectorised
+        np.add.at(ab, (2 + i - j, j), v)
+    wd = w * ds
+    add(np.arange(n), np.arange(n), wd)
+    rhs += wd * t
+    if n > 2:
+        i = np.arange(1, n - 1)
+        h1 = np.maximum(su[i] - su[i - 1], 0.2)
+        h2 = np.maximum(su[i + 1] - su[i], 0.2)
+        lam = ell[i] ** 4 * (h1 + h2) / 2
+        c = [2 / (h1 * (h1 + h2)), -2 / (h1 * h2), 2 / (h2 * (h1 + h2))]
+        idx = [i - 1, i, i + 1]
+        for p_ in range(3):
+            for q_ in range(p_, 3):
+                add(idx[p_], idx[q_], lam * c[p_] * c[q_])
+    if n > 1:
+        i = np.arange(n - 1)
+        h = np.maximum(su[i + 1] - su[i], 0.2)
+        mu = ell[i] ** 2 * 0.25 / h
+        add(i, i, mu)
+        add(i + 1, i + 1, mu)
+        add(i, i + 1, -mu)
+    add(np.array([0]), np.array([0]), np.array([1e-6]))
+    rhs[0] += 1e-6 * g[first[0]]
+    BIG = 3e3 ** 2
     active = dict(EQ)
     z = None
     for it in range(8):
-        er, ec, ev, eb = [], [], [], []
-        for k_, (i, Z) in enumerate(active.items()):
-            wt = BIG * math.sqrt(ds[i])
-            er.append(k_); ec.append(i); ev.append(wt); eb.append(wt * Z)
-        if er:
-            A = sp.vstack([A0, sp.csr_matrix((ev, (er, ec)), shape=(len(er), n))]).tocsr()
-            b = np.concatenate([b0, eb])
-        else:
-            A, b = A0, b0
-        AtA = (A.T @ A).tocsc()
-        z = spsolve(AtA, A.T @ b)
+        ab2 = ab.copy()
+        rhs2 = rhs.copy()
+        if active:
+            ii = np.fromiter(active.keys(), np.int64)
+            zz = np.fromiter(active.values(), np.float64)
+            ab2[2, ii] += BIG * ds[ii]
+            rhs2[ii] += BIG * ds[ii] * zz
+        try:
+            z = solveh_banded(ab2, rhs2, lower=False, check_finite=False)
+        except np.linalg.LinAlgError:
+            from scipy.linalg import solve_banded
+            full = np.zeros((5, n))
+            full[0:3] = ab2
+            full[3, :-1] = ab2[1, 1:]
+            full[4, :-2] = ab2[0, 2:]
+            z = solve_banded((2, 2), full, rhs2)
         viol = False
         for i in np.nonzero(z < LO - 0.05)[0]:
             if i not in EQ:
@@ -1066,11 +1074,19 @@ def _runs(mask):
 # ------------------------------------------------------------------ crossings
 
 
-def find_crossings(L: Lines, strokes: list[Stroke], way_stroke, report):
+def find_crossings(L: Lines, strokes: list[Stroke], way_stroke, report, subset=None):
     """Every intersection of road/rail centrelines that is not a shared node.
     Returns list of dict(a=way, b=way, p=(x, y))."""
     t0 = time.time()
-    cand = np.nonzero(((L.kind == 0) & ((L.flags & (F_LOT | F_DUP)) == 0) & (L.cls != 9)) | (L.kind == 1))[0]
+    m = ((L.kind == 0) & ((L.flags & (F_LOT | F_DUP)) == 0) & (L.cls != 9)) | (L.kind == 1)
+    if subset is not None:
+        sel = np.zeros(L.n, bool)
+        sel[subset] = True
+        m &= sel
+    cand = np.nonzero(m)[0]
+    if len(cand) < 2:
+        report["crossings_found"] = 0
+        return []
     geoms = _lines(L, cand)
     tree = shapely.STRtree(geoms)
     ia, ib = tree.query(geoms, predicate="crosses")
@@ -1102,7 +1118,7 @@ def find_crossings(L: Lines, strokes: list[Stroke], way_stroke, report):
                 continue
         out.append(dict(a=a, b=b, p=(float(p[0]), float(p[1]))))
     report["crossings_found"] = len(out)
-    print(f"  crossings: {len(out):,} from {len(ia):,} pairs ({time.time() - t0:.0f}s)", flush=True)
+
     return out
 
 
@@ -1135,12 +1151,16 @@ def decide_levels(L: Lines, X, dsm_sample, report):
         ka, kb = _kind_name(L, a), _kind_name(L, b)
         up = None
         how = "tags"
-        if ta != tb:
+        # OSM `layer` is the authority on stacking; bridge / tunnel only imply +1 / -1 when
+        # the layer is untagged (a Lake Shore bridge over a creek is not above the Gardiner)
+        ea = la if la != 0 else (1 if ba else -1 if ta else 0)
+        eb = lb if lb != 0 else (1 if bb else -1 if tb else 0)
+        if ea != eb:
+            up = a if ea > eb else b
+        elif ta != tb:
             up = b if ta else a
         elif ba != bb:
             up = a if ba else b
-        elif la != lb:
-            up = a if la > lb else b
         elif ta and tb:
             stats["both_tunnel_same_layer"] += 1
             continue
@@ -1400,7 +1420,12 @@ def _densify_solve(S: Stroke, terr, curated, si):
         curated[si] = (remap[idx], zt)
 
 
-def main(bbox=None):
+BLOCK = 16384.0      # processing block (m); lines within HALO of a block are processed with it
+HALO = 1500.0
+
+
+def prep(bbox=None) -> dict:
+    """Global, cheap pass: lines, classification, strokes, lane sanity, merge events."""
     t0 = time.time()
     report = {}
     L = Lines(bbox)
@@ -1411,8 +1436,68 @@ def main(bbox=None):
     raw_strokes, inc_of, events = build_strokes(L, grp, report)
     print(f"{len(raw_strokes):,} strokes, {len(events):,} merge/diverge events ({time.time() - t0:.0f}s)", flush=True)
     nF, nB, tot = way_lanes(L, raw_strokes, report)
+    # way bounding boxes (block selection)
+    lens = np.diff(L.off)
+    wid = np.repeat(np.arange(L.n), lens)
+    bx0 = np.full(L.n, np.inf); by0 = np.full(L.n, np.inf); bx1 = np.full(L.n, -np.inf); by1 = np.full(L.n, -np.inf)
+    np.minimum.at(bx0, wid, L.xy[:, 0]); np.minimum.at(by0, wid, L.xy[:, 1])
+    np.maximum.at(bx1, wid, L.xy[:, 0]); np.maximum.at(by1, wid, L.xy[:, 1])
+    ev_by_way = defaultdict(list)
+    for ev in events:
+        ev_by_way[ev["branch"]].append(ev)
+    stroke_of = np.full(L.n, -1, np.int64)
+    for si, st in enumerate(raw_strokes):
+        for i, _ in st:
+            stroke_of[i] = si
+    bd = building_density()
+    with np.load(geo.WORK / "osm_nodes.npz") as f:
+        nodes = {k: f[k] for k in ("kind", "xy", "id")}
+    print(f"prep done ({time.time() - t0:.0f}s, {memguard('prep'):.1f} GB)", flush=True)
+    return dict(L=L, grp=grp, raw=raw_strokes, inc=inc_of, events=events, nF=nF, nB=nB, report=report,
+                box=(bx0, by0, bx1, by1), stroke_of=stroke_of, bd=bd, nodes=nodes, t0=t0)
+
+
+def block_strokes(G, halo_box):
+    """Sub-strokes: contiguous runs of each stroke's ways that touch the halo box, with the
+    arclength of the preceding (dropped) ways so dash phase stays continuous."""
+    L = G["L"]
+    bx0, by0, bx1, by1 = G["box"]
+    x0, y0, x1, y1 = halo_box
+    hit = (bx1 >= x0) & (bx0 <= x1) & (by1 >= y0) & (by0 <= y1)
+    sids = np.unique(G["stroke_of"][np.nonzero(hit)[0]])
+    out = []
+    for si in sids:
+        if si < 0:
+            continue
+        st = G["raw"][si]
+        acc = 0.0
+        run, s0 = [], 0.0
+        for i, rev in st:
+            if hit[i]:
+                if not run:
+                    s0 = acc
+                run.append((i, rev))
+            elif run:
+                out.append((run, s0))
+                run = []
+            acc += float(L.len[i])
+        if run:
+            out.append((run, s0))
+    return out
+
+
+def run_block(G, core, halo):
+    t0 = G["t0"]
+    L, grp, inc_of = G["L"], G["grp"], G["inc"]
+    nF, nB = G["nF"], G["nB"]
     global nF_glob, nB_glob
     nF_glob, nB_glob = nF, nB
+    report = {}
+    subs = block_strokes(G, halo)
+    raw_strokes = [st for st, _ in subs]
+    s_off = [s0 for _, s0 in subs]
+    in_block = set(i for st in raw_strokes for i, _ in st)
+    events = [ev for ev in G["events"] if ev["branch"] in in_block]
     terr = get_terrain()
 
     # ---- geometry: assemble + fillet
@@ -1431,7 +1516,7 @@ def main(bbox=None):
         S.group = int(grp[i0])
         S.oneway = bool(L.flags[i0] & F_ONEWAY)
         S.xy = Q
-        S.s = cumlen(Q)
+        S.s = cumlen(Q) + s_off[si]
         # source way per new vertex: from the vertex map
         vw = np.zeros(len(Q), np.int64)
         vw[vmap] = VW
@@ -1452,7 +1537,7 @@ def main(bbox=None):
         for n, v in S.nodes.items():
             if inc_of.get(n, 0) >= 3 or v == 0 or v == len(Q) - 1:
                 node_pos[n].append((si, v))
-    print(f"filleted ({time.time() - t0:.0f}s, {memguard('fillet'):.1f} GB)", flush=True)
+    memguard("fillet")
 
     # ---- merge events located on their strokes
     evs_by_stroke = defaultdict(list)
@@ -1507,7 +1592,7 @@ def main(bbox=None):
                            mk=np.zeros(n, np.int64), lw=np.full(n, 3.6))
     # event s may have moved (vertex insertion keeps s of original vertices) -> fine
     apply_merges(strokes, ev_full, report)
-    print(f"lateral profiles + {report['merges_built']} merges ({time.time() - t0:.0f}s, {memguard('lateral'):.1f} GB)", flush=True)
+    memguard("lateral")
 
     # ---- vertical: densify (render spacing; structures get DENSE later), ground, flags
     for S in strokes:
@@ -1525,7 +1610,7 @@ def main(bbox=None):
         S.g = allg[o:o + len(S.s)]
         o += len(S.s)
     # ---- crossings
-    X = find_crossings(L, strokes, way_stroke, report)
+    X = find_crossings(L, strokes, way_stroke, report, np.nonzero(way_stroke >= 0)[0])
     ups = decide_levels(L, X, make_dsm_sampler(terr), report)
     geoms = {}
 
@@ -1533,7 +1618,8 @@ def main(bbox=None):
         g = geoms.get(si)
         if g is None:
             g = geoms[si] = shapely.linestrings(strokes[si].xy)
-        return float(shapely.line_locate_point(g, shapely.points(p)))
+        # stroke s starts at the arclength of the dropped ways (block sub-strokes): offset it
+        return float(shapely.line_locate_point(g, shapely.points(p))) + float(strokes[si].s[0])
 
     keep = []
     for u in ups:
@@ -1544,6 +1630,27 @@ def main(bbox=None):
         keep.append(u)
     report["crossings_over_tunnels_skipped"] = len(ups) - len(keep)
     ups = keep
+    # a line that joins the other within 150 m of the crossing (a ramp meeting its deck, a
+    # split carriageway) is not grade-separated from it there: OSM draws the join slightly off
+    joined = []
+    for u in ups:
+        iu, il = int(way_stroke[u["up"]]), int(way_stroke[u["lo"]])
+        if iu < 0 or il < 0:
+            joined.append(u)
+            continue
+        U, Lo = strokes[iu], strokes[il]
+        common = set(U.node_s) & set(Lo.node_s)
+        near = False
+        if common:
+            su = sloc(iu, u["p"])
+            for n in common:
+                if abs(U.node_s[n] - su) < 150.0:
+                    near = True
+                    break
+        if not near:
+            joined.append(u)
+    report["crossings_skipped_joined"] = len(ups) - len(joined)
+    ups = joined
     for u in ups:
         u["iu"], u["il"] = int(way_stroke[u["up"]]), int(way_stroke[u["lo"]])
         u["su"] = sloc(u["iu"], u["p"])
@@ -1576,7 +1683,8 @@ def main(bbox=None):
     for S in strokes:
         S.z = S.g.copy()
         S.pins = {}
-    for it in range(8):
+
+    def requirements():
         for S in strokes:
             S.req_lo = []
         for u in ups:
@@ -1588,15 +1696,26 @@ def main(bbox=None):
             deck = DECK["rail"] if ku == "rail" else DECK["path"] if ku == "path" else (
                 DECK["motorway"] if L.cls[u["up"]] <= 1 else DECK["road"])
             U.req_lo.append((u["su"], zl + clr + deck, max(u["hl"] - 1.0, 3.0)))
-        for si in sorted(need):
+
+    def solve(ids):
+        for si in sorted(ids):
             S = strokes[si]
             if not getattr(S, "dense", False):
                 _densify_solve(S, terr, curated, si)
             solve_profile(S, L, curated.get(si))
-        if DEBUG_PINS:
-            worst = max(((float(np.max(np.abs(strokes[si].z - strokes[si].g))), si) for si in need), default=(0, -1))
-            print("   worst dev", worst, [int(L.id[i]) for i, _ in strokes[worst[1]].ways[:3]] if worst[1] >= 0 else None)
-        changed = 0
+
+    # 1. every structured stroke on its own constraints (twice: lower lines settle first)
+    for it in range(2):
+        requirements()
+        solve(need)
+    # 2. node consistency without ratcheting: at every node the most constrained stroke (largest
+    #    departure from the ground; rail at level crossings) sets the elevation and the others
+    #    follow it. Pins are recomputed from scratch each round (never accumulated) and only
+    #    two rounds propagate, so a raised approach can lift the streets meeting it but a
+    #    chain of streets can never lift itself.
+    own_dev = {si: None for si in range(len(strokes))}
+    for rnd in range(2):
+        new_pins = defaultdict(dict)
         for n, lst in node_pos.items():
             if len(lst) < 2:
                 continue
@@ -1605,42 +1724,38 @@ def main(bbox=None):
                 S = strokes[si]
                 k = min(int(np.searchsorted(S.s, S.node_s[n] - 1e-6)), len(S.s) - 1)
                 zs.append((si, k, float(S.z[k]), float(S.z[k] - S.g[k])))
-            # paths agree among themselves (footbridge + its stairs) but neither pull nor follow roads
             paths = [x for x in zs if strokes[x[0]].kind == 0 and strokes[x[0]].cls >= 7]
             zs = paths if len(paths) >= 2 and len(paths) == len(zs) else [x for x in zs if x not in paths]
             if len(zs) < 2:
                 continue
             rails = [x for x in zs if strokes[x[0]].kind == 1]
             if rails and len(rails) < len(zs):
-                # level crossing: the track keeps its profile, the road meets it
-                Zr = float(np.mean([z for _, _, z, _ in rails]))
-                for si, k, z, d in zs:
-                    old = strokes[si].pins.get(k)
-                    if strokes[si].kind == 0 and abs(z - Zr) > 0.05 and (old is None or abs(old - Zr) > 0.1):
-                        strokes[si].pins[k] = Zr
-                        need.add(si)
-                        changed += 1
+                src = max(rails, key=lambda x: abs(x[3]))
+                targets = [x for x in zs if strokes[x[0]].kind == 0]
+            else:
+                src = max(zs, key=lambda x: abs(x[3]))
+                targets = [x for x in zs if x is not src]
+            if abs(src[3]) < 0.3 and max(abs(x[2] - src[2]) for x in targets) < 0.3:
                 continue
-            dev = [d for *_, d in zs]
-            if max(dev) - min(dev) < 0.25:
-                continue
-            if it < 2:
-                Z = max(z for _, _, z, _ in zs) if max(dev) >= 0.3 else min(z for _, _, z, _ in zs)
-            else:  # later passes average (the max rule can ratchet two decks up against each other)
-                Z = float(np.mean([z for _, _, z, _ in zs]))
-            for si, k, z, d in zs:
-                old = strokes[si].pins.get(k)
-                if DEBUG_PINS and it >= 5 and abs(z - Z) > 0.05 and (old is None or abs(old - Z) > 0.1):
-                    print("   pin", n, si, k, len(strokes[si].s), round(z, 2), round(Z, 2), old,
-                          [(a_, k_, round(b_, 2), round(d_, 2)) for a_, k_, b_, d_ in zs])
-                if abs(z - Z) > 0.05 and (old is None or abs(old - Z) > (0.1 if it < 2 else 0.3)):
-                    strokes[si].pins[k] = Z
-                    need.add(si)
-                    changed += 1
-        print(f"  solve pass {it}: {len(need):,} strokes, {changed:,} node pins ({time.time() - t0:.0f}s, "
-              f"{memguard('solve'):.1f} GB)", flush=True)
-        if not changed:
+            for si, k, z, d in targets:
+                T = strokes[si]
+                # never drag a surface street into a tunnel's depth (portal nodes, bad tags)
+                if src[2] < T.g[k] - 1.0 and not (T.vf[k] & V_TUNNEL):
+                    continue
+                if abs(z - src[2]) > 0.05:
+                    new_pins[si][k] = src[2]
+        changed = 0
+        touched = set(new_pins) | set(si for si, S in enumerate(strokes) if S.pins)
+        for si in touched:
+            strokes[si].pins = dict(new_pins.get(si, {}))
+            changed += len(strokes[si].pins)
+        if not touched:
             break
+        need |= touched
+        # requirements stay as computed from the unpinned solution: pins must not feed back
+        # into clearances (a ramp pinned to its deck would otherwise lift the deck, and so on)
+        solve(touched)
+        memguard("solve")
     for S in strokes:
         if S.kind == 0 and S.cls >= 7 and S.attrs is not None:
             m = (S.vf & V_BRIDGE) != 0
@@ -1649,13 +1764,13 @@ def main(bbox=None):
         dz = np.abs(S.z - S.g)
         S.vf[dz > 0.15] |= V_GRADED
         S.vf[(S.vf & (V_BRIDGE | V_TUNNEL)) != 0] |= V_GRADED
-    return L, strokes, report, ups, ev_full, curated, t0
+    return strokes, report, ups, ev_full, curated
 
 
 
 # ------------------------------------------------------------------ sidewalks, boulevards, pavers
 
-SW_L, SW_R, BLVD_L, BLVD_R, PAVERS = 1, 2, 4, 8, 16
+SW_L, SW_R, BLVD_L, BLVD_R, PAVERS, MEDIAN_L = 1, 2, 4, 8, 16, 32
 SIDE_TAG = {2: SW_L, 3: SW_R, 4: SW_L | SW_R}
 
 
@@ -1671,12 +1786,45 @@ def building_density():
     return cKDTree(first), house, comm
 
 
-def sidewalks(L: Lines, strokes: list[Stroke], report):
+def sidewalks(L: Lines, strokes: list[Stroke], report, bd=None):
     """Per-vertex sidewalk bits for streets (classes 2-5, not links / tunnels):
     OSM sidewalk tags, else both sides where the street is built up. Bridges keep
     their sidewalks (a deck sidewalk behind the parapet)."""
-    tree, house, comm = building_density()
+    tree, house, comm = bd if bd is not None else building_density()
     cnt = defaultdict(int)
+    # divided roads: a one-way carriageway with its same-name twin (opposite direction) on its
+    # left has a median there, not a sidewalk
+    twins = defaultdict(list)
+    for si, S in enumerate(strokes):
+        if S.kind == 0 and S.group == 0 and S.oneway and 1 <= S.cls <= 5:
+            twins[str(L.name[S.ways[0][0]])].append(si)
+    tw_tree = {}
+    for nm, lst in twins.items():
+        if nm and len(lst) >= 2:
+            P = np.vstack([strokes[k].xy for k in lst])
+            T = np.vstack([np.gradient(strokes[k].xy, axis=0) for k in lst])
+            O = np.concatenate([np.full(len(strokes[k].xy), k) for k in lst])
+            tw_tree[nm] = (cKDTree(P), T, O, P)
+
+    def median_left(S, idxs):
+        nm = str(L.name[S.ways[0][0]])
+        if nm not in tw_tree:
+            return False
+        tr, T, O, P = tw_tree[nm]
+        hits = 0
+        for k in idxs:
+            p = S.xy[k]
+            t = S.xy[min(k + 1, len(S.xy) - 1)] - S.xy[max(k - 1, 0)]
+            tl = math.hypot(*t) or 1
+            nl = np.array([-t[1], t[0]]) / tl
+            for q in tr.query_ball_point(p, 45.0):
+                if strokes[O[q]] is S:
+                    continue
+                if np.dot(T[q], t) < 0 and np.dot(P[q] - p, nl) > 0:
+                    hits += 1
+                    break
+        return hits * 2 >= len(idxs)
+
     for S in strokes:
         S.sw = np.zeros(len(S.s), np.int64)
         if S.kind != 0 or S.group != 0:
@@ -1706,6 +1854,9 @@ def sidewalks(L: Lines, strokes: list[Stroke], report):
                     bits = SW_L if bits == SW_R else SW_R
             elif side in (0, 5) and built:
                 bits = SW_L | SW_R
+                vi_ = np.nonzero(m)[0]
+                if S.oneway and median_left(S, [vi_[0], vi_[len(vi_) // 2], vi_[-1]]):
+                    bits = SW_R | MEDIAN_L
             if bits:
                 if fc >= 0.3 and L.cls[i] <= 4:
                     bits |= PAVERS
@@ -1723,12 +1874,14 @@ def sidewalks(L: Lines, strokes: list[Stroke], report):
 CLUSTER_D = 32.0     # junction nodes joined by a road piece shorter than this form one intersection
 
 
-def junction_clusters(L: Lines, strokes: list[Stroke], inc_of, report):
+def junction_clusters(L: Lines, strokes: list[Stroke], inc_of, report, nodes=None):
     """Logical intersections: at-grade junction nodes of streets (>= 3 arms, classes <= 6,
     at least two non-link street arms), clustered across dual carriageways / median
     right-of-ways. Per member node the arm radii put every approach's crosswalk and
     stop bar on one line across the whole cross-section."""
-    nodes = np.load(geo.WORK / "osm_nodes.npz")
+    if nodes is None:
+        with np.load(geo.WORK / "osm_nodes.npz") as f:
+            nodes = {k: f[k] for k in ("kind", "xy", "id")}
     nk, nxy, nnid = nodes["kind"], nodes["xy"], nodes["id"]
     sig_ids = set(nnid[nk == 0].tolist())
     sig_tree = cKDTree(nxy[nk == 0]) if (nk == 0).any() else None
@@ -2001,7 +2154,7 @@ def junction_surfaces(clusters, strokes: list[Stroke], report):
                 if opp is not g_ and math.cos(opp["ang"] - g_["ang"]) < -0.7:
                     far = opp["R"] + 2.2
                 else:  # T-junction stem: the far curb of the cross street
-                    far = max(max(r["hw"] for r in h["arms"]) for h in C["legs"] if h is not g_) + 2.5
+                    far = max((max(r["hw"] for r in h["arms"]) for h in C["legs"] if h is not g_), default=g_["R"]) + 2.5
                 # travel direction -a; beyond the box = -a * far; right of travel = +nrm... (for travel t=-a, right = (t_y, -t_x) = (-a_y, a_x) = nrm)
                 ext = hi if hi > 0 else abs(lo)
                 p_far = c - a * far + nrm * (max(hi, 2.5) + 1.0)
@@ -2223,89 +2376,272 @@ def _tri(geom):
     return np.vstack(xs), np.vstack(ts)
 
 
-def build(bbox=None, out_path=None):
-    L, strokes, report, ups, evs, curated, t0 = main(bbox)
-    sidewalks(L, strokes, report)
-    inc_of = {}
-    nid = L.nid
-    w = np.full(len(nid), 2, np.int64)
-    w[L.off[:-1]] = 1
-    w[L.off[1:] - 1] = 1
-    uq, inv = np.unique(nid, return_inverse=True)
-    inc_of = dict(zip(uq.tolist(), np.bincount(inv, weights=w).astype(np.int64).tolist()))
-    clusters, jrec = junction_clusters(L, strokes, inc_of, report)
+def _block(args):
+    """Process one block (errors are reported, not fatal: the block is retried without detail)."""
+    try:
+        return _block_inner(args)
+    except MemoryError:
+        raise
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        print(f"  block {args} FAILED: {e!r}\n{traceback.format_exc()}", flush=True)
+        return None
+
+
+def _block_inner(args):
+    """Process one block; returns its core output (lists) and report."""
+    core = args
+    G = _G
+    x0, y0, x1, y1 = core
+    halo = (x0 - HALO, y0 - HALO, x1 + HALO, y1 + HALO)
+    strokes, report, ups, evs, curated = run_block(G, core, halo)
+    if not strokes:
+        return None
+    L = G["L"]
+    sidewalks(L, strokes, report, G["bd"])
+    clusters, jrec = junction_clusters(L, strokes, G["inc"], report, G["nodes"])
     surf, walks, curbs, pads, poles = junction_surfaces(clusters, strokes, report)
     med = medians(L, strokes, clusters, report)
     embed_rail(strokes, surf, report)
     grass_track(strokes, med, report)
-    print(f"street detail ({time.time() - t0:.0f}s, {memguard('detail'):.1f} GB)", flush=True)
-    A = {}
-    # ---- road pieces (render): strokes split at class changes; hidden groups separately
-    R = dict(off=[0], xyz=[], el=[], er=[], pl=[], pr=[], mk=[], vf=[], sw=[], s=[], lw=[],
-             cls=[], flags=[], osm=[], name=[], layer=[], side=[], lanes=[], width=[], svc=[], sub=[], surf=[], cyc=[])
-    LOT = dict(off=[0], xyz=[], osm=[], svc=[])
-    RL = dict(off=[0], xyz=[], vf=[], cls=[], flags=[], osm_off=[0], osm=[])
-    W = dict(id=[], off=[0], xyz=[], s=[], nF=[], nB=[], width=[], flags=[], node_off=[0], node=[], node_s=[])
-    for si, S in enumerate(strokes):
+    out = emit(L, strokes, clusters, jrec, surf, walks, curbs, pads, poles, med, core)
+    inside = lambda x, y: x0 <= x < x1 and y0 <= y < y1
+    report["suspicious"] = [q for q in report.get("suspicious", []) if inside(*geo.project(q["lon"], q["lat"]))]
+    report["lane_fixes"] = []
+    memguard("block")
+    return out, report
+
+
+_G = None
+
+
+def _worker_start():
+    import os
+
+    print(f"  roadnet worker {os.getpid()} up ({memguard('worker'):.1f} GB)", flush=True)
+
+
+def build(bbox=None, out_path=None, workers=2, only=None):
+    global _G
+    t0 = time.time()
+    G = prep(bbox)
+    _G = G
+    L = G["L"]
+    x0, y0 = L.xy.min(0)
+    x1, y1 = L.xy.max(0)
+    cores = []
+    for j in range(math.floor(y0 / BLOCK), math.floor(y1 / BLOCK) + 1):
+        for i in range(math.floor(x0 / BLOCK), math.floor(x1 / BLOCK) + 1):
+            c = (i * BLOCK, j * BLOCK, (i + 1) * BLOCK, (j + 1) * BLOCK)
+            if only and (i, j) not in only:
+                continue
+            cores.append(c)
+    # biggest first
+    bx0, by0, bx1, by1 = G["box"]
+    cx = (bx0 + bx1) / 2
+    cy = (by0 + by1) / 2
+    cnt = {c: int(((cx >= c[0]) & (cx < c[2]) & (cy >= c[1]) & (cy < c[3])).sum()) for c in cores}
+    cores = sorted([c for c in cores if cnt[c]], key=lambda c: -cnt[c])
+    print(f"{len(cores)} blocks", flush=True)
+    parts = []
+    reports = []
+    if workers > 1 and len(cores) > 1:
+        # ProcessPoolExecutor: a worker that dies (OOM kill, crash at start) raises
+        # BrokenProcessPool here instead of the silent respawn loop of multiprocessing.Pool
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from concurrent.futures.process import BrokenProcessPool
+
+        try:
+            with ProcessPoolExecutor(workers, mp_context=mp.get_context("fork"), initializer=_worker_start) as ex:
+                futs = [ex.submit(_block, c) for c in cores]
+                for k, f in enumerate(as_completed(futs), 1):
+                    res = f.result()
+                    if res:
+                        parts.append(res[0])
+                        reports.append(res[1])
+                    if k % 10 == 0 or k == len(cores):
+                        print(f"  {k}/{len(cores)} blocks ({time.time() - t0:.0f}s)", flush=True)
+        except BrokenProcessPool as e:
+            raise SystemExit(f"roadnet: a worker process died ({e}); memory watchdog / fork problem? "
+                             f"re-run with --workers 1") from e
+    else:
+        for k, c in enumerate(cores, 1):
+            res = _block(c)
+            if res:
+                parts.append(res[0])
+                reports.append(res[1])
+            print(f"  {k}/{len(cores)} blocks ({time.time() - t0:.0f}s, {memguard('main'):.1f} GB)", flush=True)
+    A = merge_parts(parts)
+    report = dict(G["report"])
+    for r in reports:
+        for k, v in r.items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                report[k] = report.get(k, 0) + v
+            elif isinstance(v, dict):
+                d = report.setdefault(k, {})
+                for kk, vv in v.items():
+                    if isinstance(vv, (int, float)):
+                        d[kk] = d.get(kk, 0) + vv
+            elif isinstance(v, list) and k in ("suspicious", "curated"):
+                report.setdefault(k, []).extend(v)
+    path = out_path or (geo.WORK / "roadnet.npz")
+    np.savez(path, **A)
+    write_crossings(G)
+    (geo.WORK / "roadnet_report.json").write_text(json.dumps(report, indent=1, default=str))
+    print(f"wrote {path} ({time.time() - t0:.0f}s): {len(A['road_off']) - 1:,} road pieces, "
+          f"{len(A['rail_off']) - 1:,} rail pieces, {len(A['jn_osm']):,} junction nodes, "
+          f"{len(A['js_off']) - 1:,} surfaces, {len(A['md_off']) - 1:,} medians", flush=True)
+    return A
+
+
+def write_crossings(G, path=None):
+    """Railway level crossings for the client (layers/CrossingsLayer.ts) and the sims:
+    data/crossings.json = {crossings: [{id, e, n, kind (5 road / 6 path), gates, lights,
+    roads: [way ids], tracks: [way ids], approaches: [{heading, mast: [e, n], yaw, arm, cant}]}]}.
+    heading = travel direction toward the crossing (rad, CCW from +E); the mast stands on the
+    right of that approach 5.5 m before the node; the gate arm points `yaw` across `arm` metres
+    of lanes; `cant` = cantilever flasher over the lanes (wide roads)."""
+    L = G["L"]
+    nd = G["nodes"]
+    sel = np.nonzero(np.isin(nd["kind"], [5, 6]))[0]
+    with np.load(geo.WORK / "osm_nodes.npz") as f:
+        var = f["var"] if "var" in f.files else np.zeros(len(f["kind"]), np.uint8)
+    order = np.argsort(L.nid)
+    snid = L.nid[order]
+    way_of_v = np.repeat(np.arange(L.n), np.diff(L.off))
+    out = []
+    for q in sel:
+        nid = int(nd["id"][q])
+        a = np.searchsorted(snid, nid)
+        b = np.searchsorted(snid, nid, side="right")
+        vs = order[a:b]
+        if not len(vs):
+            continue
+        roads, tracks, tcls = [], [], []
+        appr = []
+        for v in vs:
+            w = int(way_of_v[v])
+            if L.kind[w] == 1:
+                tracks.append(float(L.id[w]))
+                tcls.append(int(L.cls[w]))
+                continue
+            if L.kind[w] != 0 or (L.flags[w] & (F_LOT | F_DUP)) and nd["kind"][q] == 5:
+                continue
+            roads.append(float(L.id[w]))
+            p = L.pts(w)
+            k = v - L.off[w]
+            hw = max(float(L.width[w]) / 2, 1.0)
+            for d in (-1, 1):
+                j = k + d
+                if not (0 <= j < len(p)):
+                    continue
+                t = p[k] - p[j]                       # travel toward the node from this side
+                tl = math.hypot(*t)
+                if tl < 1e-6:
+                    continue
+                t /= tl
+                right = np.array([t[1], -t[0]])
+                pos = p[k] - t * 5.5 + right * (hw + 1.3)
+                appr.append(dict(heading=round(math.atan2(t[1], t[0]), 4), mast=[round(float(pos[0]), 2), round(float(pos[1]), 2)],
+                                 yaw=round(math.atan2(-right[1], -right[0]), 4), arm=round(hw + 0.6 if nd["kind"][q] == 5 else hw + 0.3, 2),
+                                 cant=bool(hw > 7.5)))
+        if not tracks or not roads:
+            continue
+        vv = int(var[q]) if q < len(var) else 0
+        # untagged road crossings of main-line / freight track are gated in practice (Transport Canada
+        # GCS: gates where train speed / traffic warrant); streetcar-road crossings have neither
+        if nd["kind"][q] == 5 and tcls and min(tcls) <= 1 and not (vv & 3):
+            vv |= 3
+        if tcls and min(tcls) == 4:
+            vv = 0
+        out.append(dict(id=nid, e=round(float(nd["xy"][q][0]), 2), n=round(float(nd["xy"][q][1]), 2), kind=int(nd["kind"][q]),
+                        gates=bool(vv & 1), lights=bool(vv & 2) or bool(vv & 1), roads=roads, tracks=tracks, approaches=appr))
+    if path is None:
+        # debug extracts (TPIPE_WORK=work/test_*) must not overwrite the real data's crossings file
+        path = (geo.OUT / "crossings.json") if geo.WORK.resolve() == (geo.PIPE / "work").resolve() else (geo.WORK / "crossings.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(version=1, crossings=out), separators=(",", ":")))
+    print(f"wrote {path}: {len(out):,} level crossings ({sum(1 for c in out if c['gates']):,} gated)", flush=True)
+
+
+def emit(L: Lines, strokes, clusters, jrec, surf, walks, curbs, pads, poles, med, core):
+    """Core-block output (merged over blocks by merge_parts). Pieces keep only the segments
+    whose midpoint lies in the core, so neighbouring blocks share their boundary vertices."""
+    x0, y0, x1, y1 = core
+    inside = lambda x, y: (x >= x0) & (x < x1) & (y >= y0) & (y < y1)  # noqa: E731
+    nF, nB = nF_glob, nB_glob
+
+    def seg_runs(S):
+        if len(S.s) < 2:
+            return []
+        mid = (S.xy[1:] + S.xy[:-1]) / 2
+        return [(a, b + 2) for a, b in _runs(inside(mid[:, 0], mid[:, 1]))]   # vertex slices [a, b)
+
+    O = defaultdict(list)
+    for S in strokes:
         z = S.z if S.z is not None else S.g
         ws = [i for i, _ in S.ways]
+        runs_ = seg_runs(S)
         if S.kind == 1:
-            RL["xyz"].append(np.column_stack([S.xy, z]))
-            RL["vf"].append(S.vf)
-            RL["off"].append(RL["off"][-1] + len(S.s))
-            RL["cls"].append(S.cls if S.cls != 1 else int(L.cls[ws[0]]))
-            RL["flags"].append(int(np.bitwise_or.reduce(L.flags[ws])))
-            RL["osm"] += [float(L.id[i]) for i in ws]
-            RL["osm_off"].append(len(RL["osm"]))
-            continue
-        if S.group == 2:
-            LOT["xyz"].append(np.column_stack([S.xy, z]))
-            LOT["off"].append(LOT["off"][-1] + len(S.s))
-            LOT["osm"].append(float(L.id[ws[0]]))
-            LOT["svc"].append(int(L.svc[ws[0]]))
-        if S.group in (0, 1):
-            wc = np.array([int(L.cls[ws[k]]) for k in S.vway])
-            # split at class changes and where a structure (bridge / tunnel) starts or ends, so
-            # per-piece class / flags stay meaningful (share the boundary vertex)
-            key = wc * 4 + (S.vf & (V_BRIDGE | V_TUNNEL))
+            # rail pieces split where a bridge / tunnel starts or ends (piece flags stay meaningful)
+            split = []
+            for a, b in runs_:
+                key = S.vf[a:b] & (V_BRIDGE | V_TUNNEL)
+                cuts = [0] + [k for k in range(1, b - a) if key[k] != key[k - 1]] + [b - a]
+                for c0, c1 in zip(cuts[:-1], cuts[1:]):
+                    p0 = a + max(c0 - 1, 0) if c0 > 0 else a
+                    if a + c1 - p0 >= 2:
+                        split.append((p0, a + c1))
+            runs_ = split
+        for a, b in runs_:
+            if S.kind == 1:
+                sw_ = [ws[k] for k in sorted(set(S.vway[a:b].tolist()))]
+                O["rail"].append(dict(xyz=np.column_stack([S.xy[a:b], z[a:b]]), vf=S.vf[a:b], s=S.s[a:b],
+                                      cls=S.cls if S.cls != 1 else int(L.cls[ws[0]]),
+                                      flags=int(np.bitwise_or.reduce(L.flags[sw_])) & ~(F_BRIDGE | F_TUNNEL) |
+                                      (F_BRIDGE if (S.vf[a + 1:b] & V_BRIDGE).all() else 0) |
+                                      (F_TUNNEL if (S.vf[a + 1:b] & V_TUNNEL).all() else 0),
+                                      osm=[float(L.id[i]) for i in sw_]))
+                continue
+            if S.group == 2:
+                O["lot"].append(dict(xyz=np.column_stack([S.xy[a:b], z[a:b]]), osm=float(L.id[ws[0]]), svc=int(L.svc[ws[0]])))
+                continue
+            if S.group not in (0, 1):
+                continue
+            wc = np.array([int(L.cls[ws[k]]) for k in S.vway[a:b]])
+            key = wc * 4 + (S.vf[a:b] & (V_BRIDGE | V_TUNNEL))
             cuts = [0] + [k for k in range(1, len(wc)) if key[k] != key[k - 1]] + [len(wc)]
-            for a, b in zip(cuts[:-1], cuts[1:]):
-                a0 = max(a - 1, 0) if a > 0 else 0
-                sl = slice(a0, b)
-                if b - a0 < 2:
+            for c0, c1 in zip(cuts[:-1], cuts[1:]):
+                p0 = a + max(c0 - 1, 0) if c0 > 0 else a
+                p1 = a + c1
+                if p1 - p0 < 2:
                     continue
-                i0 = ws[S.vway[a]]
-                R["xyz"].append(np.column_stack([S.xy[sl], z[sl]]))
-                for key in ("el", "er", "pl", "pr", "mk", "lw"):
-                    src = {"el": "eL", "er": "eR", "pl": "pL", "pr": "pR"}.get(key, key)
-                    R[key].append(S.attrs[src][sl])
-                R["vf"].append(S.vf[sl])
-                R["sw"].append(S.sw[sl] if S.sw is not None else np.zeros(b - a0, np.int64))
-                R["s"].append(S.s[sl])
-                R["off"].append(R["off"][-1] + (b - a0))
+                sl = slice(p0, p1)
+                inner = S.vf[a + c0:p1]
+                i0 = ws[S.vway[a + c0]]
                 wsel = sorted(set(ws[k] for k in S.vway[sl]))
                 fl = int(np.bitwise_or.reduce(L.flags[wsel])) & ~(F_BRIDGE | F_TUNNEL)
-                inner = S.vf[a:b]
                 if (inner & V_BRIDGE).all():
                     fl |= F_BRIDGE
                 if (inner & V_TUNNEL).all():
                     fl |= F_TUNNEL
-                R["cls"].append(int(L.cls[i0]))
-                R["flags"].append(fl & 0xFF)
-                R["osm"].append(float(L.id[i0]))
-                R["name"].append(str(L.name[i0]))
-                R["layer"].append(int(L.layer[i0]))
-                R["side"].append(int(L.side[i0]))
-                mkp = S.attrs["mk"][a:b]
-                R["lanes"].append(int(np.median((mkp & 15) + ((mkp >> 4) & 15))))
-                R["width"].append(float(np.median(S.attrs["pL"][a:b] + S.attrs["pR"][a:b])))
-                R["svc"].append(int(L.svc[i0]))
-                R["sub"].append(int(L.sub[i0]))
-                R["surf"].append(int(L.surf[i0]))
-                R["cyc"].append(int(L.cyc[i0]))
-        # ---- per-way geometry for the traffic graph (drivable)
-        if S.group == 0 or S.group == 2:
+                mkp = S.attrs["mk"][a + c0:p1]
+                O["road"].append(dict(
+                    xyz=np.column_stack([S.xy[sl], z[sl]]), el=S.attrs["eL"][sl], er=S.attrs["eR"][sl],
+                    pl=S.attrs["pL"][sl], pr=S.attrs["pR"][sl], mk=S.attrs["mk"][sl], lw=S.attrs["lw"][sl],
+                    vf=S.vf[sl], sw=S.sw[sl] if S.sw is not None else np.zeros(p1 - p0, np.int64), s=S.s[sl],
+                    cls=int(L.cls[i0]), flags=fl & 0xFF, osm=float(L.id[i0]), name=str(L.name[i0]),
+                    layer=int(L.layer[i0]), side=int(L.side[i0]),
+                    lanes=int(np.median((mkp & 15) + ((mkp >> 4) & 15))),
+                    width=float(np.median(S.attrs["pL"][a + c0:p1] + S.attrs["pR"][a + c0:p1])),
+                    svc=int(L.svc[i0]), sub=int(L.sub[i0]), surf=int(L.surf[i0]), cyc=int(L.cyc[i0])))
+        # ---- per-way geometry for the traffic graph (drivable): ways whose first vertex is in the core
+        if S.kind == 0 and S.group in (0, 2):
             for k, (i, rev) in enumerate(S.ways):
+                p0 = L.pts(i)[0]
+                if not inside(p0[0], p0[1]):
+                    continue
                 idx = np.nonzero(S.vway == k)[0]
                 if not len(idx):
                     continue
@@ -2314,131 +2650,178 @@ def build(bbox=None, out_path=None):
                 xyz = np.column_stack([S.xy[sl], z[sl]])
                 ss = S.s[sl] - S.s[sl[0]]
                 ns = L.nids(i)
-                nss = np.array([S.node_s.get(int(n), np.nan) for n in ns]) - S.s[sl[0]]
                 if rev:
                     xyz = xyz[::-1]
                     ss = ss[-1] - ss[::-1]
-                    nss = (S.s[sl[-1]] - S.s[sl[0]]) - nss
+                # node stations: project the OSM nodes (in way order) onto the way's own polyline,
+                # monotonically (a stroke may pass the same node twice, so no id lookup)
+                q = L.pts(i)
+                nss = np.empty(len(q))
+                seg_a, seg_b = xyz[:-1, :2], xyz[1:, :2]
+                dd = seg_b - seg_a
+                ll = np.maximum((dd * dd).sum(1), 1e-12)
+                lo_s = 0.0
+                for t_, p_ in enumerate(q):
+                    tt = np.clip(((p_ - seg_a) * dd).sum(1) / ll, 0, 1)
+                    cpt = seg_a + dd * tt[:, None]
+                    dist = np.hypot(*(cpt - p_).T)
+                    sv = ss[:-1] + tt * np.diff(ss)
+                    dist = np.where(sv >= lo_s - 0.5, dist, np.inf)
+                    k_ = int(np.argmin(dist))
+                    nss[t_] = max(sv[k_], lo_s)
+                    lo_s = nss[t_]
+                nss[0], nss[-1] = 0.0, ss[-1]
                 mid = sl[len(sl) // 2]
-                W["id"].append(float(L.id[i]))
-                W["xyz"].append(xyz)
-                W["s"].append(ss)
-                W["off"].append(W["off"][-1] + len(sl))
-                W["nF"].append(int(nF_glob[i]))
-                W["nB"].append(int(nB_glob[i]))
-                W["width"].append(float(S.attrs["pL"][mid] + S.attrs["pR"][mid]))
                 fl = int(L.flags[i])
                 if (S.vf[sl] & V_BRIDGE).any():
                     fl |= F_BRIDGE
-                W["flags"].append(fl)
-                W["node"].append(ns.astype(np.int64))
-                W["node_s"].append(nss)
-                W["node_off"].append(W["node_off"][-1] + len(ns))
+                O["way"].append(dict(id=float(L.id[i]), xyz=xyz, s=ss, nF=int(nF[i]), nB=int(nB[i]),
+                                     width=float(S.attrs["pL"][mid] + S.attrs["pR"][mid]), flags=fl,
+                                     node=ns.astype(np.int64), node_s=nss))
+    # ---- junctions (member-node records of clusters whose centre is in the core)
+    ao = jrec["arm_off"]
+    rec_i = 0
+    for ci, C in enumerate(clusters):
+        n_mem = len(C["mem"])
+        inc = inside(C["c"][0], C["c"][1])
+        for m_ in range(n_mem):
+            k = rec_i + m_
+            if inc:
+                O["jn"].append(dict(xy=jrec["xy"][k], osm=jrec["osm"][k], cl=jrec["cl"][k], flags=jrec["flags"][k],
+                                    ang=jrec["arm_ang"][ao[k]:ao[k + 1]], r=jrec["arm_r"][ao[k]:ao[k + 1]],
+                                    hw=jrec["arm_hw"][ao[k]:ao[k + 1]], af=jrec["arm_flags"][ao[k]:ao[k + 1]]))
+        rec_i += n_mem
+    for key, lst in (("js", surf), ("jw", walks)):
+        for ci, g_ in lst:
+            c = clusters[ci]["c"]
+            if not inside(c[0], c[1]):
+                continue
+            v, t = _tri(g_)
+            if len(t):
+                O[key].append(dict(xy=v, tri=t, c=c))
+    for ci, g_ in curbs:
+        c = clusters[ci]["c"]
+        if not inside(c[0], c[1]):
+            continue
+        g2 = shapely.line_merge(g_) if g_.geom_type in ("MultiLineString", "LineString") else g_
+        road = next((g for c_, g in surf if c_ == ci), None)
+        for part in shapely.get_parts(g2):
+            if part.geom_type == "LineString" and part.length >= 0.5:
+                q = np.asarray(part.coords)
+                # orient with the road surface on the left (the client faces curbs that way)
+                if road is not None and len(q) >= 2:
+                    m_ = (q[0] + q[1]) / 2
+                    d_ = q[1] - q[0]
+                    nl = np.array([-d_[1], d_[0]]) / max(np.hypot(*d_), 1e-9)
+                    if not road.buffer(0.3).contains(shapely.Point(m_ + nl * 0.4)):
+                        q = q[::-1]
+                O["jc"].append(q)
+    for ci, p_, ang, w_ in pads:
+        if inside(p_[0], p_[1]):
+            O["jt"].append((p_, ang, w_))
+    for ci, p_, ang, mast, kind in poles:
+        if inside(clusters[ci]["c"][0], clusters[ci]["c"][1]):
+            O["sg"].append((p_, ang, mast, kind, clusters[ci]["root"]))
+    for run in med:
+        P = np.array([[p[0], p[1], z_] for p, _, _, z_ in run])
+        W_ = np.array([g for _, g, _, _ in run])
+        kd = int(np.bincount([k for _, _, k, _ in run]).argmax())
+        mid = (P[1:, :2] + P[:-1, :2]) / 2
+        for a, b in _runs(inside(mid[:, 0], mid[:, 1])):
+            O["md"].append(dict(xyz=P[a:b + 2], w=W_[a:b + 2], kind=kd))
+    return dict(O)
+
+
+def merge_parts(parts) -> dict:
+    """Concatenate block outputs into the roadnet.npz arrays (docs/ROADS.md)."""
+    def items(k):
+        return [x for p in parts for x in p.get(k, [])]
 
     def cat(lst, dt, cols=None):
         if not lst:
             return np.zeros((0, cols) if cols else 0, dt)
-        return np.concatenate(lst).astype(dt) if cols is None else np.vstack(lst).astype(dt)
-    A["road_off"] = np.array(R["off"], np.int64)
-    A["road_xyz"] = cat(R["xyz"], np.float64, 3)
+        return (np.vstack(lst) if cols else np.concatenate(lst)).astype(dt)
+
+    def offs(lens):
+        return np.concatenate([[0], np.cumsum(lens)]).astype(np.int64)
+    A = {}
+    R = items("road")
+    A["road_off"] = offs([len(r["xyz"]) for r in R])
+    A["road_xyz"] = cat([r["xyz"] for r in R], np.float64, 3)
     for key, dt in (("el", np.float32), ("er", np.float32), ("pl", np.float32), ("pr", np.float32), ("mk", np.uint32),
                     ("vf", np.uint8), ("sw", np.uint8), ("s", np.float32), ("lw", np.float32)):
-        A[f"road_{key}"] = cat(R[key], dt)
+        A[f"road_{key}"] = cat([r[key] for r in R], dt)
     for key, dt in (("cls", np.uint8), ("flags", np.uint8), ("osm", np.float64), ("layer", np.int8), ("side", np.uint8),
                     ("lanes", np.uint8), ("width", np.float32), ("svc", np.uint8), ("sub", np.uint8), ("surf", np.uint8),
                     ("cyc", np.uint8)):
-        A[f"road_{key}"] = np.array(R[key], dt)
-    A["road_name"] = np.array(R["name"], dtype=object)
-    A["lot_off"] = np.array(LOT["off"], np.int64)
-    A["lot_xyz"] = cat(LOT["xyz"], np.float64, 3)
-    A["lot_osm"] = np.array(LOT["osm"], np.float64)
-    A["lot_svc"] = np.array(LOT["svc"], np.uint8)
-    A["rail_off"] = np.array(RL["off"], np.int64)
-    A["rail_xyz"] = cat(RL["xyz"], np.float64, 3)
-    A["rail_vf"] = cat(RL["vf"], np.uint8)
-    A["rail_cls"] = np.array(RL["cls"], np.uint8)
-    A["rail_flags"] = np.array(RL["flags"], np.uint8)
-    A["rail_osm_off"] = np.array(RL["osm_off"], np.int64)
-    A["rail_osm"] = np.array(RL["osm"], np.float64)
-    A["way_id"] = np.array(W["id"], np.float64)
-    A["way_off"] = np.array(W["off"], np.int64)
-    A["way_xyz"] = cat(W["xyz"], np.float64, 3)
-    A["way_s"] = cat(W["s"], np.float64)
-    A["way_nF"] = np.array(W["nF"], np.uint8)
-    A["way_nB"] = np.array(W["nB"], np.uint8)
-    A["way_width"] = np.array(W["width"], np.float32)
-    A["way_flags"] = np.array(W["flags"], np.uint8)
-    A["way_node_off"] = np.array(W["node_off"], np.int64)
-    A["way_node"] = cat(W["node"], np.int64)
-    A["way_node_s"] = cat(W["node_s"], np.float64)
-    # ---- junctions (member-node records)
-    A["jn_xy"] = np.array(jrec["xy"], np.float64).reshape(-1, 2)
-    A["jn_osm"] = np.array(jrec["osm"], np.float64)
-    A["jn_cl"] = np.array(jrec["cl"], np.float64)
-    A["jn_flags"] = np.array(jrec["flags"], np.uint8)
-    A["jn_arm_off"] = np.array(jrec["arm_off"], np.int64)
-    A["jn_arm_ang"] = np.array(jrec["arm_ang"], np.float32)
-    A["jn_arm_r"] = np.array(jrec["arm_r"], np.float32)
-    A["jn_arm_hw"] = np.array(jrec["arm_hw"], np.float32)
-    A["jn_arm_flags"] = np.array(jrec["arm_flags"], np.uint8)
-    # ---- junction surfaces / corner sidewalks (triangles, z from ground at the centre)
-    for key, lst in (("js", surf), ("jw", walks)):
-        xs, ts, off, cx, cz = [], [], [0], [], []
-        base = 0
-        for ci, g in lst:
-            v, t = _tri(g)
-            if not len(t):
-                continue
-            xs.append(v)
-            ts.append(t + base)
-            base += len(v)
-            off.append(off[-1] + len(t))
-            cx.append(clusters[ci]["c"])
-        A[f"{key}_xy"] = cat(xs, np.float64, 2)
-        A[f"{key}_tri"] = cat(ts, np.int64, 3)
-        A[f"{key}_off"] = np.array(off, np.int64)
-        A[f"{key}_c"] = np.array(cx, np.float64).reshape(-1, 2)
-    cl_xy, cl_off = [], [0]
-    for ci, g in curbs:
-        for part in shapely.get_parts(shapely.line_merge(shapely.union_all([g]).boundary if g.geom_type.endswith("Polygon") else g)):
-            if part.geom_type != "LineString" or part.length < 0.5:
-                continue
-            q = np.asarray(part.coords)
-            cl_xy.append(q)
-            cl_off.append(cl_off[-1] + len(q))
-    A["jc_xy"] = cat(cl_xy, np.float64, 2)
-    A["jc_off"] = np.array(cl_off, np.int64)
-    A["jt_xy"] = np.array([p for _, p, _, _ in pads], np.float64).reshape(-1, 2)
-    A["jt_ang"] = np.array([a for _, _, a, _ in pads], np.float32)
-    A["jt_w"] = np.array([w for *_, w in pads], np.float32)
-    A["sg_xy"] = np.array([p for _, p, *_ in poles], np.float64).reshape(-1, 2)
-    A["sg_ang"] = np.array([a for _, _, a, _, _ in poles], np.float32)
-    A["sg_mast"] = np.array([m for _, _, _, m, _ in poles], np.float32)
-    A["sg_kind"] = np.array([k for *_, k in poles], np.uint8)
-    A["sg_cl"] = np.array([clusters[ci]["root"] for ci, *_ in poles], np.float64)
-    # ---- medians
-    m_off, m_xyz, m_w, m_k = [0], [], [], []
-    for run in med:
-        m_xyz.append(np.array([[p[0], p[1], z] for p, _, _, z in run]))
-        m_w.append(np.array([g for _, g, _, _ in run]))
-        m_k.append(int(np.bincount([k for _, _, k, _ in run]).argmax()))
-        m_off.append(m_off[-1] + len(run))
-    A["md_off"] = np.array(m_off, np.int64)
-    A["md_xyz"] = cat(m_xyz, np.float64, 3)
-    A["md_w"] = cat(m_w, np.float32)
-    A["md_kind"] = np.array(m_k, np.uint8)
-    path = out_path or (geo.WORK / "roadnet.npz")
-    np.savez(path, **A)
-    rep = {k: v for k, v in report.items()}
-    (geo.WORK / "roadnet_report.json").write_text(json.dumps(rep, indent=1, default=str))
-    print(f"wrote {path} ({time.time() - t0:.0f}s): {len(A['road_off']) - 1:,} road pieces, "
-          f"{len(A['rail_off']) - 1:,} rail strokes, {len(A['jn_osm']):,} junction nodes, "
-          f"{len(A['js_off']) - 1:,} surfaces, {len(A['md_off']) - 1:,} medians", flush=True)
+        A[f"road_{key}"] = np.array([r[key] for r in R], dt)
+    A["road_name"] = np.array([r["name"] for r in R], dtype=object)
+    T = items("lot")
+    A["lot_off"] = offs([len(r["xyz"]) for r in T])
+    A["lot_xyz"] = cat([r["xyz"] for r in T], np.float64, 3)
+    A["lot_osm"] = np.array([r["osm"] for r in T], np.float64)
+    A["lot_svc"] = np.array([r["svc"] for r in T], np.uint8)
+    RL = items("rail")
+    A["rail_off"] = offs([len(r["xyz"]) for r in RL])
+    A["rail_xyz"] = cat([r["xyz"] for r in RL], np.float64, 3)
+    A["rail_vf"] = cat([r["vf"] for r in RL], np.uint8)
+    A["rail_s"] = cat([r["s"] for r in RL], np.float32)
+    A["rail_cls"] = np.array([r["cls"] for r in RL], np.uint8)
+    A["rail_flags"] = np.array([r["flags"] for r in RL], np.uint8)
+    A["rail_osm_off"] = offs([len(r["osm"]) for r in RL])
+    A["rail_osm"] = np.array([x for r in RL for x in r["osm"]], np.float64)
+    W = items("way")
+    A["way_id"] = np.array([w["id"] for w in W], np.float64)
+    A["way_off"] = offs([len(w["xyz"]) for w in W])
+    A["way_xyz"] = cat([w["xyz"] for w in W], np.float64, 3)
+    A["way_s"] = cat([w["s"] for w in W], np.float64)
+    A["way_nF"] = np.array([w["nF"] for w in W], np.uint8)
+    A["way_nB"] = np.array([w["nB"] for w in W], np.uint8)
+    A["way_width"] = np.array([w["width"] for w in W], np.float32)
+    A["way_flags"] = np.array([w["flags"] for w in W], np.uint8)
+    A["way_node_off"] = offs([len(w["node"]) for w in W])
+    A["way_node"] = cat([w["node"] for w in W], np.int64)
+    A["way_node_s"] = cat([w["node_s"] for w in W], np.float64)
+    J = items("jn")
+    A["jn_xy"] = np.array([j["xy"] for j in J], np.float64).reshape(-1, 2)
+    A["jn_osm"] = np.array([j["osm"] for j in J], np.float64)
+    A["jn_cl"] = np.array([j["cl"] for j in J], np.float64)
+    A["jn_flags"] = np.array([j["flags"] for j in J], np.uint8)
+    A["jn_arm_off"] = offs([len(j["ang"]) for j in J])
+    A["jn_arm_ang"] = cat([np.asarray(j["ang"]) for j in J], np.float32)
+    A["jn_arm_r"] = cat([np.asarray(j["r"]) for j in J], np.float32)
+    A["jn_arm_hw"] = cat([np.asarray(j["hw"]) for j in J], np.float32)
+    A["jn_arm_flags"] = cat([np.asarray(j["af"]) for j in J], np.uint8)
+    for key in ("js", "jw"):
+        X = items(key)
+        base = np.concatenate([[0], np.cumsum([len(x["xy"]) for x in X])]).astype(np.int64)
+        A[f"{key}_xy"] = cat([x["xy"] for x in X], np.float64, 2)
+        A[f"{key}_tri"] = cat([x["tri"] + base[k] for k, x in enumerate(X)], np.int64, 3)
+        A[f"{key}_off"] = offs([len(x["tri"]) for x in X])
+        A[f"{key}_c"] = np.array([x["c"] for x in X], np.float64).reshape(-1, 2)
+    C = items("jc")
+    A["jc_off"] = offs([len(c) for c in C])
+    A["jc_xy"] = cat(C, np.float64, 2)
+    P = items("jt")
+    A["jt_xy"] = np.array([p for p, _, _ in P], np.float64).reshape(-1, 2)
+    A["jt_ang"] = np.array([a for _, a, _ in P], np.float32)
+    A["jt_w"] = np.array([w for _, _, w in P], np.float32)
+    Q = items("sg")
+    A["sg_xy"] = np.array([p for p, *_ in Q], np.float64).reshape(-1, 2)
+    A["sg_ang"] = np.array([q[1] for q in Q], np.float32)
+    A["sg_mast"] = np.array([q[2] for q in Q], np.float32)
+    A["sg_kind"] = np.array([q[3] for q in Q], np.uint8)
+    A["sg_cl"] = np.array([q[4] for q in Q], np.float64)
+    M = items("md")
+    A["md_off"] = offs([len(m["xyz"]) for m in M])
+    A["md_xyz"] = cat([m["xyz"] for m in M], np.float64, 3)
+    A["md_w"] = cat([m["w"] for m in M], np.float32)
+    A["md_kind"] = np.array([m["kind"] for m in M], np.uint8)
     return A
-
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--bbox", default=None)
+    ap.add_argument("--bbox", default=None, help="E0,N0,E1,N1 world metres (debug)")
+    ap.add_argument("--workers", type=int, default=2)
     a = ap.parse_args()
-    build(tuple(map(float, a.bbox.split(","))) if a.bbox else None)
+    build(tuple(map(float, a.bbox.split(","))) if a.bbox else None, workers=a.workers)

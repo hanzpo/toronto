@@ -19,6 +19,7 @@ import { baseTone } from '../../render/tiles/materials';
 import { streetTexture } from '../../render/tiles/roadMaterial';
 import { U } from '../../render/uniforms';
 import { glyphAtlas, GLYPH_CELL, GLYPH_L } from './glyphs';
+import { labelAtlas, LABEL_CELLS } from '../apron/labels';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type N = any;
@@ -228,28 +229,118 @@ export function pavementMaterial(): THREE.MeshStandardNodeMaterial {
 
 // ---------------------------------------------------------------------------- markings
 
+const RED = vec3(0.55, 0.05, 0.03);
+const BLACK = vec3(0.012, 0.012, 0.012);
+
+/**
+ * Marking ribbons + stand labels (docs/AIR.md "Surfaces" / "Apron"). mk = (u across m, v along
+ * m, kind, line half width); labels: (gx, gy, 10, glyph index). Kinds: 0 centreline · 1 edge
+ * (double) · 2 runway holding position · 3 stand lead-in · 4 stop bar (yellow) · 5 apron
+ * service road (white edges, dashed centre) · 6 service road across a taxi route (zipper
+ * edges) · 7 red line · 8 red hatched no-parking area · 9 white line · 10 stand number
+ * glyph · 11 white stop line · 12 walkway (white edges + zebra bars); +16 = black border
+ * (yellow on light concrete, TP 312). Lines are box filtered and widened with distance
+ * (≥ ~0.75 px, 1.8× energy) so a 30 cm centreline still reads from a few hundred metres.
+ */
 export function markingMaterial(): THREE.MeshStandardNodeMaterial {
   const m = new THREE.MeshStandardNodeMaterial({ transparent: true, depthWrite: false });
   m.name = 'airport-markings';
   m.side = THREE.DoubleSide;
   m.metalness = 0;
   pull(m, float(4.5));
-  const mk = attribute('mk', 'vec4'); // u across (m), v along (m), kind, line half-width
-  const u = mk.x, v = mk.y, kind = mk.z, lh = mk.w;
+  const mk = attribute('mk', 'vec4');
+  const u = mk.x, v = mk.y, kraw = mk.z, lh = mk.w;
+  const border = kraw.greaterThan(15.5);
+  const kind = select(border, kraw.sub(16), kraw);
   const fu = max(fwidth(u), 0.002), fv = max(fwidth(v), 0.002);
-  const is = (k: number) => abs(kind.sub(k)).lessThan(0.5);
-  const centre = band(u, float(0), lh, fu);
-  const edge = band(abs(u), float(0.25), lh, fu);
-  // runway holding position (pattern A): two solid lines on the taxiway side (u > 0), two dashed on the runway side
-  const solid = band(u, float(0.45), lh, fu).add(band(u, float(1.05), lh, fu));
-  const dashed = band(u, float(-0.45), lh, fu).add(band(u, float(-1.05), lh, fu)).mul(wave(v.add(0.45), 1.8, 0.9, fv));
-  const hold = solid.add(dashed);
-  const cov: N = select(is(1), edge, select(is(2), hold, centre));
+  const is = (k: number) => f01(abs(kind.sub(k)).lessThan(0.5));
+  /** line of half width h centred at c: widened to ≥ 0.75 px with 1.8× energy when thin */
+  const line = (x: N, c: N, h: N, f: N) => {
+    const hh = max(h, f.mul(0.75));
+    return band(x, c, hh, f).mul(min(float(1), h.div(hh).mul(1.8)));
+  };
+  const au = abs(u);
+  // yellow
+  const centre = line(u, float(0), lh, fu);
+  const edge = line(au, float(0.25), lh, fu);
+  const solid = line(u, float(0.45), lh, fu).add(line(u, float(1.05), lh, fu));
+  const dashed = line(u, float(-0.45), lh, fu).add(line(u, float(-1.05), lh, fu)).mul(wave(v.add(0.45), 1.8, 0.9, fv));
+  const yl = centre.mul(is(0).add(is(3)).add(is(4))).add(edge.mul(is(1))).add(solid.add(dashed).mul(is(2)));
+  const yBorder = line(u, float(0), lh.add(0.12), fu).sub(centre).max(0).mul(f01(border));
+  // white: service roads, zipper, white lines / stop lines, walkways
+  const svcEdge = line(au, lh.sub(0.2), float(0.1), fu);
+  const svcCl = line(u, float(0), float(0.075), fu).mul(wave(v.add(1000), 6, 3, fv));
+  const zipBand = band(au, lh.sub(0.25), float(0.25), fu);
+  const zipOn = wave(v.add(1000), 1.2, 0.6, fv);
+  const walkBars = wave(v.add(1000), 1.2, 0.6, fv).mul(band(au, float(0), lh.sub(0.35), fu));
+  const wh = svcEdge.add(svcCl).mul(is(5))
+    .add(zipBand.mul(zipOn).mul(is(6)))
+    .add(line(u, float(0), lh, fu).mul(is(9).add(is(11))))
+    .add(svcEdge.add(walkBars).mul(is(12)));
+  const zipBlack = zipBand.mul(float(1).sub(zipOn)).mul(is(6));
+  // red: lines + hatched area
+  const hatch = wave(u.add(v).mul(0.7071).add(1000), 1.6, 0.45, max(fu, fv)).mul(band(au, float(0), lh.sub(0.05), fu));
+  const rd = line(u, float(0), lh, fu).mul(is(7)).add(hatch.mul(is(8)));
+  // stand number glyphs (yellow on a black box)
+  const atlas = labelAtlas();
+  const gi = lh; // glyph index for kind 10
+  const gx = clamp(u, 0, 1), gy = clamp(v, 0, 1);
+  const glyphA = texture(atlas, vec2(gi.add(gx).div(LABEL_CELLS), gy)).r;
+  const isG = is(10);
+  const gY = smoothstep(0.35, 0.65, glyphA).mul(isG);
+  const gK = float(1).sub(gY).mul(isG);
+
+  const cy = clamp(yl.add(gY), 0, 1), cw = clamp(wh, 0, 1), cr = clamp(rd, 0, 1);
+  const ck = clamp(yBorder.add(zipBlack).add(gK), 0, 1);
+  const a = clamp(cy.add(cw).add(cr).add(ck), 0, 1);
   const dist = length(cameraPosition.sub(modelWorldMatrix.mul(vec4(positionGeometry, 1)).xyz));
-  const wear = texture(streetTexture('asphalt_color.webp'), vec2(positionGeometry.x, positionGeometry.z).div(4)).r;
-  m.colorNode = baseTone(YELLOW.mul(clamp(wear.mul(8).add(0.7), 0.8, 1.05)));
-  m.opacityNode = clamp(cov, 0, 1).mul(0.95).mul(float(1).sub(smoothstep(9000, 12000, dist)));
+  const wear = clamp(texture(streetTexture('asphalt_color.webp'), vec2(positionGeometry.x, positionGeometry.z).div(4)).r.mul(8).add(0.7), 0.8, 1.05);
+  const col = YELLOW.mul(cy).add(WHITE.mul(1.15).mul(cw)).add(RED.mul(cr)).add(BLACK.mul(ck)).div(max(a.add(0.0), 0.001)).mul(wear);
+  m.colorNode = baseTone(col);
+  m.opacityNode = a.mul(0.95).mul(float(1).sub(smoothstep(9000, 12000, dist)));
   m.roughnessNode = float(0.85);
+  return m;
+}
+
+// ---------------------------------------------------------------------------- terminal massing
+
+/**
+ * Terminal / hangar extrusions the tile buildings miss (airports.py missing_buildings):
+ * tm = (u along the facade m, v height m or -1 on the roof, kind 0 terminal · 1 hangar, height).
+ * Terminal: concrete plinth, glass curtain wall with mullions / transoms, metal fascia;
+ * lit interiors at night. Hangar: ribbed metal cladding. Roof: pale membrane with seams.
+ */
+export function terminalMaterial(): THREE.MeshStandardNodeMaterial {
+  const m = new THREE.MeshStandardNodeMaterial();
+  m.name = 'airport-terminal';
+  m.side = THREE.DoubleSide;
+  const tm = attribute('tm', 'vec4');
+  const u = tm.x, v = tm.y, kind = tm.z, h = tm.w;
+  const fu = max(fwidth(u), 0.002), fv = max(fwidth(v), 0.002);
+  const roof = v.lessThan(-0.5);
+  const hangar = kind.greaterThan(0.5);
+  const gp = groundXY();
+  // roof: membrane with 12 m seams
+  const seam = wave(gp.x.add(1000), 12, 0.25, max(fwidth(gp.x), 0.002)).max(wave(gp.y.add(1000), 12, 0.25, max(fwidth(gp.y), 0.002)));
+  const roofC = vec3(0.56, 0.57, 0.58).mul(float(1).sub(seam.mul(0.25)));
+  // terminal facade
+  const plinth = f01(v.lessThan(1.2));
+  const fascia = f01(v.greaterThan(h.sub(2.2)));
+  const mull = wave(u.add(1000), 1.5, 0.12, fu).max(wave(v.add(0.4), 3.6, 0.18, fv));
+  const glass = mix(vec3(0.16, 0.22, 0.27), vec3(0.62, 0.64, 0.66), mull);
+  const term = select(plinth.greaterThan(0.5), vec3(0.34, 0.34, 0.33), select(fascia.greaterThan(0.5), vec3(0.72, 0.73, 0.74), glass));
+  // hangar: vertical ribs, darker door band
+  const rib = wave(u.add(1000), 0.9, 0.3, fu);
+  const hang = vec3(0.6, 0.63, 0.66).mul(float(0.9).add(rib.mul(0.1))).mul(select(v.lessThan(h.mul(0.75)), float(0.9), float(1)));
+  const col = select(roof, roofC, select(hangar, hang, term));
+  m.colorNode = baseTone(col);
+  const isGlass = f01(roof.not().and(hangar.not())).mul(float(1).sub(plinth)).mul(float(1).sub(fascia)).mul(float(1).sub(mull));
+  m.roughnessNode = mix(float(0.8), float(0.15), isGlass);
+  m.metalnessNode = mix(float(0.05), float(0.3), isGlass);
+  // lit interiors: per-panel variation (bays 1.5 m × storeys 3.6 m), dimmer near the roof
+  const pid = floor(u.div(4.5)).add(floor(v.div(3.6)).mul(37.1));
+  const rnd = fract(pid.mul(0.1031).sin().mul(43758.5453));
+  m.emissiveNode = vec3(1.0, 0.84, 0.6).mul(isGlass).mul(U.night).mul(rnd.mul(0.22).add(0.04));
   return m;
 }
 

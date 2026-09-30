@@ -48,6 +48,7 @@ BOXES = [
     (-80.497, 43.448, -80.487, 43.456),
     (-79.10, 43.06, -79.04, 43.10),
     (-79.63, 43.67, -79.59, 43.70),
+    (-79.43, 43.620, -79.405, 43.640),  # Exhibition Place & Ontario Place
 ]
 
 # Each landmark: anchors = {alias: osm id} (ways +, relations -). The first
@@ -62,6 +63,12 @@ BOXES = [
 #    (kind "building", `whole` true; `outline` true when parts lie inside it)
 #  - holes: export courtyard rings as `holes: {alias: [[ring], ...]}`
 #  - exclude: ids never suppressed (e.g. owned by another landmark)
+#  - base_z: explicit model base elevation (datum m), e.g. the lake surface
+#  - subtract: ids cut out of the exported footprint/parts (models that interlock
+#    with another landmark's parts, e.g. the ROM wings around the Crystal)
+#  - covered: roads under the footprint become a covered roadway (`covered`:
+#    ground masses, clear height, columns off the lanes; `canopy_roads` = road
+#    names that get a cantilevered frontage canopy), see covered_roadway()
 LANDMARKS: list[dict] = [
     dict(id="cn_tower", name="CN Tower", height=553.3,
          anchors={"base": 32742038, "leg": 288273458}, rot="cn_leg"),
@@ -94,7 +101,7 @@ LANDMARKS: list[dict] = [
          anchors={"podium": 198500761},
          partfoot={"east": 27767544, "west": 27767543, "council": 27767545}),
     dict(id="old_city_hall", name="Old City Hall", height=103.6,
-         anchors={"building": -3116}, partfoot={"clock": 178252639}),
+         anchors={"building": -3116}, partfoot={"clock": 178252639}, holes=True),
     dict(id="union_station", name="Union Station", height=32.5,
          anchors={"station": 14744491},
          partfoot={"hall": 290168042, "hall_mid": 290168050, "hall_low": 290168028}),
@@ -109,7 +116,7 @@ LANDMARKS: list[dict] = [
     dict(id="one_bloor_east", name="One Bloor East", height=257,
          anchors={"site": 303709935}, partfoot={"tower": 991851853}),
     dict(id="st_regis", name="The St. Regis Toronto", height=277,
-         anchors={"tower": 25108216}),
+         anchors={"tower": 25108216}, suppress_extra=[709824128]),  # small building inside the podium
     dict(id="shangri_la", name="Shangri-La Toronto", height=214,
          anchors={"tower": 25491342}, partfoot={"slab": 231773826}),
     dict(id="l_tower", name="L Tower", height=205,
@@ -117,23 +124,23 @@ LANDMARKS: list[dict] = [
     dict(id="rom_crystal", name="ROM Michael Lee-Chin Crystal", height=39,
          anchors={}, center_lonlat=(-79.39485, 43.66815), rotation_deg=16.7,
          parts_only=[992716633, 992716634, 992716635, 992716636, 992716637, 992716638,
-                     992716639, 992716640]),
+                     992716639, 992716640, 992716632, 992753871]),
     dict(id="casa_loma", name="Casa Loma", height=37,
          anchors={"castle": 198471666}),
     dict(id="gooderham", name="Gooderham Building", height=22,
          anchors={"building": 300884214}),
-    dict(id="skylon_tower", name="Skylon Tower", height=160,
-         anchors={"tower": 241004747}, rotation_deg=0.0),
+    dict(id="skylon_tower", name="Skylon Tower", height=160, terrain_z=True,
+         anchors={"tower": 241004747, "base": 241004751}, rotation_deg=0.0),
     dict(id="rainbow_bridge", name="Rainbow Bridge", height=0,
          bridge=-14629795, contain=False),
     dict(id="pearson_t1", name="Pearson Terminal 1", height=40,
-         anchors={"terminal": 59439578}),
+         anchors={"terminal": 59439578}, covered=True, canopy_roads=["Departures", "Arrivals"]),
     # --- pass 2: downtown retail & theatres
     dict(id="eaton_centre", terrain_z=True, name="CF Toronto Eaton Centre", height=151,
          anchors={"mall": 4321312, "bay": 31728272, "simpson": 34587440}, center="mall"),
     dict(id="yonge_dundas_square", terrain_z=True, name="Sankofa Square (Yonge-Dundas Square)", height=40,
          anchors={"hardrock": 127288086, "citytv": 8033925, "tenor": 366547307,
-                  "canopy": 61014138, "stage": 1105572886},
+                  "canopy": 61014138, "stage": 1105572886, "kiosk": 1105572885},
          center="hardrock", rot_from="hardrock", osm_all=True),
     dict(id="massey_hall", terrain_z=True, name="Massey Hall", height=24,
          anchors={"hall": 62004062}),
@@ -162,7 +169,9 @@ LANDMARKS: list[dict] = [
     dict(id="rom_heritage", terrain_z=True, name="Royal Ontario Museum (1914/1933 wings)", height=36,
          anchors={"rom": 4942687}, osm_all=True,
          exclude=[992716633, 992716634, 992716635, 992716636, 992716637, 992716638,
-                  992716639, 992716640]),
+                  992716639, 992716640, 992716632, 992753871],
+         subtract=[992716633, 992716634, 992716635, 992716636, 992716637, 992716638,
+                   992716639, 992716640, 992716632, 992753871]),
     # --- markets, industrial heritage, culture
     dict(id="st_lawrence_market", terrain_z=True, name="St. Lawrence Market", height=33,
          anchors={"south": 24626769, "north": 1290813314, "hall": 24626954}, center="south",
@@ -172,7 +181,7 @@ LANDMARKS: list[dict] = [
                   "f": 43806108, "g": 945953414, "h": 192836912, "i": 43805649, "j": 178676583,
                   "k": 43805353, "l": 205006666, "m": 43804881, "n": 192836911, "o": 43807811,
                   "p": 43807808, "q": 1040906356},
-         center="a", osm_all=True),
+         center="a", osm_all=True, special="distillery"),
     dict(id="reference_library", terrain_z=True, name="Toronto Reference Library", height=26,
          anchors={"lib": 28156063}),
     dict(id="ago", terrain_z=True, name="Art Gallery of Ontario", height=41,
@@ -185,6 +194,17 @@ LANDMARKS: list[dict] = [
          anchors={"hall": 138175760}),
     dict(id="roy_thomson_hall", terrain_z=True, name="Roy Thomson Hall", height=32,
          anchors={"hall": 141694015}),
+    # --- pass 3: waterfront & the Ex
+    dict(id="ontario_place", name="Ontario Place (Pods & Cinesphere)", height=32, terrain_z=True,
+         anchors={"pods": 149476928, "cinesphere": 188989522}, center="pods", special="ontario_place",
+         base_z=-0.3),  # over the lake: model base = Lake Ontario's surface (datum -0.3 m)
+    dict(id="bmo_field", terrain_z=True, name="BMO Field", height=45,
+         anchors={"stadium": 971664909, "west": 971275707, "east": 971275703}, center="stadium",
+         partfoot={"pitch": 22952579}),
+    dict(id="princes_gates", terrain_z=True, name="Princes' Gates", height=26,
+         anchors={"gate": 22952678}, covered=True),
+    dict(id="coliseum", terrain_z=True, name="Coca-Cola Coliseum", height=30,
+         anchors={"coliseum": 227711310}),
 ]
 
 WATERFALLS = [
@@ -196,6 +216,162 @@ WATERFALLS = [
 # Upper Niagara River at the brink ≈ 171.5 m ASL; Maid-of-the-Mist pool ≈ 100 m ASL.
 FALLS_TOP_ASL = {"horseshoe_falls": 171.5, "american_falls": 170.0, "bridal_veil_falls": 170.0}
 FALLS_BOTTOM_ASL = 100.0
+
+
+# Carriageway widths (m) by highway class when `lanes` / `width` are missing; for
+# covered roadways (roads passing under a landmark, see `covered` below).
+ROAD_W = {"motorway": 11.0, "trunk": 10.0, "primary": 10.0, "secondary": 9.0, "tertiary": 8.0,
+          "unclassified": 7.0, "residential": 7.0, "service": 6.0, "motorway_link": 6.0, "trunk_link": 6.0,
+          "primary_link": 6.0, "secondary_link": 6.0, "tertiary_link": 6.0}
+ROADS: dict[int, tuple[dict, object]] = {}  # filled by load_osm: highway id -> (tags, projected line)
+COVER_CLEAR = 5.5  # m: underside of a landmark over a covered roadway (>= 5 m road clearance)
+COVER_MARGIN = 1.2  # m: kept free of walls / columns beside the carriageway edge
+
+
+def _road_width(t: dict) -> float:
+    w = _num(t.get("width"))
+    if w:
+        return float(w)
+    try:
+        n = int(str(t.get("lanes", "")).split(";")[0])
+        return max(3.5 * n, 3.5)
+    except ValueError:
+        return ROAD_W.get(t.get("highway"), 6.0)
+
+
+def covered_roadway(L: dict, foot, pos, rot) -> dict | None:
+    """Roads under a landmark footprint (world geometry `foot`): the model is lifted over them.
+
+    Returns local-frame rings: `lower` = footprint minus the carriageways (+ margin), the mass
+    that stands on the ground below COVER_CLEAR; `columns` = posts on the edge of the clear zone
+    where the overhang would span > 8 m from the lower mass (always >= COVER_MARGIN off the
+    lanes); `canopy` = frontage roof over the named curb roads (L["canopy_roads"]), cantilevered
+    from the facade (no posts in the road).
+    """
+    from shapely.geometry import MultiLineString
+    bufs, curb = [], []
+    for i, (t, g) in ROADS.items():
+        if not g.intersects(foot.buffer(40)):
+            continue
+        b = g.buffer(_road_width(t) / 2 + COVER_MARGIN, cap_style=2)
+        if b.intersects(foot):
+            bufs.append(b)
+        nm = t.get("name", "")
+        if any(k in nm for k in L.get("canopy_roads", [])):
+            curb.append(g.buffer(_road_width(t) / 2 + 1.0, cap_style=2))
+    if not bufs and not curb:
+        return None
+    clear = unary_union(bufs).intersection(foot) if bufs else Polygon()
+    lower = foot.difference(clear) if not clear.is_empty else foot
+    polys = [p for p in (lower.geoms if hasattr(lower, "geoms") else [lower]) if p.geom_type == "Polygon" and p.area > 25]
+    out: dict = {"clear": COVER_CLEAR, "lower": [], "columns": []}
+    for p in polys:
+        lp = to_local(p, pos, rot)
+        rec = {"ring": ring(lp, 0.2)}
+        hs = [ring(Polygon(r), 0.2) for r in lp.interiors if Polygon(r).area > 4]
+        if hs:
+            rec["holes"] = hs
+        out["lower"].append(rec)
+    if not clear.is_empty:
+        allroads = unary_union(bufs)
+        lower_u = unary_union(polys) if polys else Polygon()
+        edge = clear.boundary.intersection(foot.buffer(-0.6))
+        lines = list(edge.geoms) if hasattr(edge, "geoms") else [edge]
+        for ln in lines:
+            if ln.is_empty or ln.length < 1:
+                continue
+            k = 6.0
+            while k < ln.length:
+                pt = ln.interpolate(k)
+                k += 12.0
+                if lower_u.is_empty or lower_u.distance(pt) > 8.0:
+                    if allroads.buffer(-(COVER_MARGIN - 0.5)).contains(pt):
+                        continue
+                    lp = to_local(pt, pos, rot)
+                    out["columns"].append([round(lp.x, 2), round(lp.y, 2)])
+    if curb:
+        can = unary_union(curb).intersection(foot.buffer(12.0, join_style=2).difference(foot))
+        cps = [p for p in (can.geoms if hasattr(can, "geoms") else [can]) if p.geom_type == "Polygon" and p.area > 30]
+        if cps:
+            out["canopy"] = [ring(to_local(p, pos, rot), 0.3) for p in cps]
+    return out
+
+
+def ontario_place(areas: dict, geoms: dict, pos, rot) -> dict:
+    """Ontario Place (Eberhard Zeidler, 1971): the five pods (27 m squares hung from four
+    pipe columns 32 m over the lake), the glazed bridges between them and to the shore.
+    The OSM pod parts carry the columns as small corner stubs: the pod box is the part
+    opened by 3 m (stubs removed), the columns are the stubs' centroids; the bridges are
+    the complex outline minus the pods."""
+    whole = geoms["pods"]
+    pods, cols_all = [], []
+    pod_parts = [(i, t, g) for i, (t, g) in areas.items()
+                 if "building:part" in t and str(t.get("name", "")).startswith("Pod") and whole.buffer(1).contains(g.representative_point())]
+    for i, t, g in sorted(pod_parts, key=lambda x: str(x[1].get("name"))):
+        box = g.buffer(-3.0, join_style=2).buffer(3.0, join_style=2)
+        stubs = g.difference(box.buffer(0.2, join_style=2))
+        cols = []
+        for s_ in (stubs.geoms if hasattr(stubs, "geoms") else [stubs]):
+            if s_.area > 1.5:
+                c = to_local(s_.centroid, pos, rot)
+                cols.append([round(c.x, 2), round(c.y, 2)])
+        pods.append({"name": t.get("name"), "ring": ring(to_local(box, pos, rot)), "cols": cols})
+        cols_all.append(box)
+    rest = whole.difference(unary_union([g for _, _, g in pod_parts]).buffer(0.5, join_style=2))
+    bridges = [ring(to_local(p, pos, rot), 0.3) for p in (rest.geoms if hasattr(rest, "geoms") else [rest])
+               if p.geom_type == "Polygon" and p.area > 25]
+    print(f"   ontario place: {len(pods)} pods, {sum(len(p['cols']) for p in pods)} columns, {len(bridges)} bridges")
+    return {"pods": pods, "bridges": bridges}
+
+
+def distillery_lanes(bld: dict, suppress: set, pos, rot) -> dict:
+    """Distillery District lanes: the pedestrian ground between the heritage blocks
+    (brick paving) = the blocks' neighbourhood (closed by 9 m) minus the buildings and
+    minus the carriageways of the streets around (Mill, Parliament, Cherry); and iron
+    catwalks between facing blocks across narrow lanes (4-13 m, both >= 10 m tall)."""
+    from shapely.ops import nearest_points
+    blds = [(i, bld[i][1], bld[i][0]) for i in suppress if i in bld]
+    fp = unary_union([g for _, g, _ in blds])
+    area = fp.buffer(14, join_style=2).buffer(-8, join_style=2)
+    roads = [g.buffer(_road_width(t) / 2 + 1.0, cap_style=2) for t, g in ROADS.values()
+             if g.intersects(area) and t.get("highway") not in ("service",)]
+    lanes = area.difference(fp.buffer(0.3, join_style=2))
+    if roads:
+        lanes = lanes.difference(unary_union(roads))
+    out = []
+    for p in (lanes.geoms if hasattr(lanes, "geoms") else [lanes]):
+        if p.geom_type != "Polygon" or p.area < 40:
+            continue
+        lp = to_local(p, pos, rot)
+        rec = {"ring": ring(lp, 0.3)}
+        hs = [ring(Polygon(r), 0.3) for r in lp.interiors if Polygon(r).area > 6]
+        if hs:
+            rec["holes"] = hs
+        out.append(rec)
+    # catwalks
+    tall = [(i, g) for i, g, t in blds if "building" in t and (_num(t.get("height")) or 3.6 * (_num(t.get("building:levels")) or 0)) >= 10]
+    cand = []
+    for a in range(len(tall)):
+        for b in range(a + 1, len(tall)):
+            d = tall[a][1].distance(tall[b][1])
+            if 4 <= d <= 13:
+                p0, p1 = nearest_points(tall[a][1], tall[b][1])
+                cand.append((d, p0, p1))
+    cand.sort(key=lambda c: c[0])
+    walks = []
+    for d, p0, p1 in cand:
+        m = ((p0.x + p1.x) / 2, (p0.y + p1.y) / 2)
+        if any(math.hypot(m[0] - w[2][0], m[1] - w[2][1]) < 40 for w in walks):
+            continue
+        walks.append((p0, p1, m))
+        if len(walks) >= 5:
+            break
+    cw = []
+    for p0, p1, _ in walks:
+        a_, b_ = to_local(p0, pos, rot), to_local(p1, pos, rot)
+        cw.append([[round(a_.x, 2), round(a_.y, 2)], [round(b_.x, 2), round(b_.y, 2)]])
+    print(f"   distillery: {len(out)} lane areas ({sum(p.area for p in (lanes.geoms if hasattr(lanes, 'geoms') else [lanes])):.0f} m2), {len(cw)} catwalks")
+    return {"paving": out, "catwalks": cw}
 
 
 def _in_boxes(lon: float, lat: float) -> bool:
@@ -217,9 +393,20 @@ def load_osm() -> tuple[dict, dict]:
         files.append(ny)
     for f in files:
         fp = (osmium.FileProcessor(str(f)).with_locations().with_areas()
-              .with_filter(osmium.filter.KeyFilter("building", "building:part", "waterway", "man_made")))
+              .with_filter(osmium.filter.KeyFilter("building", "building:part", "waterway", "man_made", "highway", "leisure")))
         for o in fp:
             try:
+                if o.is_way() and o.tags.get("highway") in ROAD_W and not o.is_area():
+                    g = wkb.loads(fab.create_linestring(o), hex=True)
+                    c = g.representative_point()
+                    if _in_boxes(c.x, c.y):
+                        ROADS[o.id] = (dict(o.tags), _proj(g))
+                    continue
+                if "highway" in o.tags and not any(k in o.tags for k in ("building", "building:part", "man_made")):
+                    continue
+                if ("leisure" in o.tags and o.tags["leisure"] not in ("pitch", "stadium")
+                        and not any(k in o.tags for k in ("building", "building:part", "man_made", "waterway"))):
+                    continue
                 if o.is_area():
                     g = wkb.loads(fab.create_multipolygon(o), hex=True)
                     oid = o.orig_id() if o.from_way() else -o.orig_id()
@@ -372,6 +559,8 @@ def main() -> None:
             river = float(ter.sample(np.array([pos[0]]), np.array([pos[1]]))[0])
             base = rim
 
+        if "base_z" in L:
+            base = float(L["base_z"])
         entry = {
             "id": L["id"], "name": L["name"],
             "pos": [round(pos[0], 2), round(pos[1], 2)],
@@ -429,6 +618,23 @@ def main() -> None:
                        "kind": t.get("building:part") or "building"})
         if op:
             entry["osmParts"] = op
+        if L.get("covered"):
+            cov = covered_roadway(L, main_g if main_g.geom_type != "Point" else union, pos, rot)
+            if cov:
+                entry["covered"] = cov
+                print(f"   covered roadway: {len(cov['lower'])} ground masses, {len(cov['columns'])} columns, "
+                      f"{len(cov.get('canopy', []))} canopies")
+        if L.get("special") == "ontario_place":
+            entry["op"] = ontario_place(areas, geoms, pos, rot)
+        if L.get("special") == "distillery":
+            entry["lanes"] = distillery_lanes(bld, suppress, pos, rot)
+        if L.get("subtract"):
+            # footprint/parts minus another landmark's parts (interlocking models: ROM wings vs Crystal)
+            cut = unary_union([areas[i][1] for i in L["subtract"] if i in areas]).buffer(0.05)
+            lg = to_local((main_g if main_g.geom_type != "Point" else union).difference(cut), pos, rot)
+            entry["footprint"] = ring(lg)
+            for a, g in geoms.items():
+                entry.setdefault("parts", {})[a] = ring(to_local(g.difference(cut), pos, rot))
         if "bridge" in L:
             entry["suppress"] = []
             b = union.minimum_rotated_rectangle

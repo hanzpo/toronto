@@ -181,17 +181,19 @@ are not rasterised).
   (code 4 instrument) / 75 m / 45 m from the runway centreline wherever a
   taxiway crosses that line, stand lead-in lines + stop bars (from
   `airports.json` stands for the four scheduled airports, OSM
-  `parking_position` ways elsewhere).
+  `parking_position` ways elsewhere). Stand, apron and service-road markings:
+  see "Apron" below.
 - **Lights** (night only): runway edge (60 m), threshold (green), end (red),
-  taxiway edge (blue) as instanced additive sprites.
+  taxiway edge (blue, also along apron edges that meet grass) as instanced
+  additive sprites.
 - **Underlay**: grass polygons covering what the pre-change raster painted as
   runway/taxiway/apron (+2.5 m), so the layer looks right with old tiles; harmless
   after the tiles are rebuilt.
 
-Layout (TBN1; `version: 1`, header `airports: [{key, icao, name, origin [E,N]
+Layout (TBN1; `version: 2`, header `airports: [{key, icao, name, origin [E,N]
 (64 m aligned), bbox [minE,minN,maxE,maxN], runways [{des,len,width,disp,kind}],
-rw|pv|mk: [vertexOffset, vertexCount, indexOffset, indexCount], lt: [offset,
-count]}]`). Vertex positions are three.js coords relative to `origin`
+rw|pv|mk|tm: [vertexOffset, vertexCount, indexOffset, indexCount], lt|jb|gse|mast:
+[offset, count], sr: [first path, count], labels: [[ref, x, h, z, bearing]]}]`). Vertex positions are three.js coords relative to `origin`
 (`x = E-E0, y = elevation, z = -(N-N0)`), draped on the level-0 terrain surface
 (32 m grid, dm-quantised, bilinear), indices are per airport.
 
@@ -199,12 +201,17 @@ count]}]`). Vertex positions are three.js coords relative to `origin`
 |---|---|---|
 | `rw_pos`, `rw_attr` (12), `rw_idx` | f32, f32, u32 | `u` (m, right of A→B), `v` (m from end A), half width, length · displaced A, B, stopway A, B · designator A, B (`num·4 + {L1,C2,R3}`), surface (0 asphalt, 1 concrete, 2 turf), flags (1 closed) |
 | `pv_pos`, `pv_attr` (1), `pv_idx` | f32, u8, u32 | surface: 0 taxiway asphalt · 1 apron concrete · 2 grass underlay |
-| `mk_pos`, `mk_attr` (4), `mk_idx` | f32, f32, u32 | `u` across (m), `v` along (m), kind (0 centreline · 1 edge · 2 hold · 3 lead-in · 4 stop bar), line half width |
-| `lt_pos`, `lt_kind` | f32, u8 | per light: kind 0 runway edge · 1 threshold · 2 end · 3 taxiway edge |
+| `mk_pos`, `mk_attr` (4), `mk_idx` | f32, f32, u32 | `u` across (m), `v` along (m), kind, line half width. Kinds: 0 centreline · 1 edge (double) · 2 hold · 3 lead-in · 4 stop bar (yellow) · 5 apron service road · 6 service road across a taxi route (zipper) · 7 red line · 8 red hatched area · 9 white line · 11 white stop line · 12 walkway; +16 = black border |
+| `tm_pos`, `tm_attr` (4), `tm_idx` | f32, f32, u32 | terminal / hangar massing: `u` along the facade (m), `v` height (m, −1 = roof), kind (0 terminal · 1 hangar), height |
+| `lt_pos`, `lt_kind` | f32, u8 | per light: kind 0 runway edge · 1 threshold · 2 end · 3 taxiway / apron edge |
+| `jb` | f32 ×9 per bridge | rotunda x, ground h, z · parked cab x, z · stand index · door (0 L1, 1 L2) · facade x, z (fixed-link start, = rotunda if none) |
+| `gse` | f32 ×5 | x, ground h, z, yaw (rad, CCW from +E), kind (0 baggage tug · 1 cart · 2 belt loader · 3 fuel truck · 4 catering · 5 pushback tractor · 6 GPU) |
+| `mast` | f32 ×3 | floodlight mast foot x, ground h, z |
+| `sr_off`, `sr_xyz` | u32, f32 ×3 | service-road centrelines (merged, ≥ 150 m, 6 m steps) for moving GSE |
 
-Client: runway + pavement meshes (2 draws) for airports within 90 km (major) /
-25 km (minor); markings + lights (2 draws) built on demand within 15 km and
-released beyond 18 km. Depth: the road layer's distance-scaled pull (underlay
+Client: runway + pavement (+ massing) meshes (2–3 draws) for airports within 90 km (major) /
+25 km (minor); markings, stand numbers, lights and the apron furniture built on
+demand within 15 km and released beyond 18 km. Depth: the road layer's distance-scaled pull (underlay
 0.5 < pavement 2 < runway 2.4 < markings 4.5 < lights). Debug: `?airports=0`
 (off) / `?airports=base` (no markings/lights).
 
@@ -217,5 +224,63 @@ CYYZ 05 41 m / 23 148 m / 24R 60 m / 15R & 33L 179 m displaced; CYHM 12
 45 m, no displacement; 06/24 750 × 30 m; 15/33 closed 2018).
 
 ```
-uv run python -m tpipe.airports    # after tpipe.air; ~1 min, writes surfaces.bin.gz (~2 MB)
+uv run python -m tpipe.airports    # after tpipe.air and osm_tiles; ~10 s, writes surfaces.bin.gz (~2 MB),
+                                   # airside.bin.gz (zone masks) and airside_roads.json
 ```
+
+## Apron (stands, service roads, bridges, GSE, lighting)
+
+Pearson T1 / T3 and Billy Bishop at ground level, built by `airports.py` (stands from
+`airports.json`, the rest from OSM semantics rebuilt by rule) and drawn by
+`AirportLayer` + `app/src/air/apron/*`. References: TP 312 ch. 5 / ICAO Annex 14 §5.2.13
+(stand markings), §5.2.14–16 (apron safety lines, road-holding position, service roads);
+GTAA apron marking practice from aerial imagery (T1 piers D/E/F, T3 piers A/B/C).
+
+- **Surface**: continuous concrete apron (7.5 m slabs, sealed joints, per-slab tone)
+  between terminals, piers and taxiways, closed across gaps (8 m) and enclosed
+  slivers < 2,500 m²; taxiways stay asphalt (darker, different texture).
+- **Stands**: yellow lead-in (black-bordered on concrete) and stop bar; red stand
+  safety envelope (wing tips + equipment restraint line at the tail, one per MARS
+  group, e.g. 160/160B); red-hatched head-of-stand no-parking area (nose to facade);
+  white-outlined equipment staging box on the service (right) side with GSE parked in
+  it; stand numbers painted yellow on a black box at the lead-in entry and at the head
+  of stand (Canvas2D glyph atlas, `air/apron/labels.ts`, drawn in the markings draw).
+- **Airside service roads**: OSM service roads / footways lying on the paved airside
+  are painted instead of meshed: white edge lines + dashed centreline, zipper edges
+  (white/black blocks) where they cross a taxi route, white stop lines 2 m before each
+  crossing; walkways get white edges + zebra bars. The client drops the road mesh
+  (curbs, sidewalks, lamps, street furniture) and the traffic-graph edges there:
+  `data/air/airside.bin.gz` holds a 2 m zone raster per aerodrome (pavement incl.
+  painted roads, minus buildings), read by `app/src/workers/airside.ts` from
+  `workers/tileWorker.ts` (level-0 road pieces of class ≥ 5 at grade are cut at the
+  zone edge, street points inside dropped) and `sim/sim.worker.ts` (graph edges of
+  class ≥ 5 at grade whose vertices are mostly inside collapse to a point, so no cars
+  or pedestrians spawn or route there). `airside_roads.json` lists the OSM ids.
+- **Passenger boarding bridges** (`ApronFurniture`): the 111 OSM `aeroway=jet_bridge`
+  ways at Pearson (rotunda = end nearer the terminal), matched to the stand whose nose
+  point is within 45 m; contact stands at T1/T3 with no mapped bridge get one from the
+  nearest facade. Each has a rotunda on its column, three telescoping tunnel sections,
+  cab with bellows, drive column + bogie, and a fixed link where the rotunda stands off
+  the facade. The cab docks at the aircraft's forward left passenger door (door
+  station and fuselage width from `models/aircraft.ts`, sill ≈ belly + 0.4 × fuselage
+  height), L2 bridges only for wide-bodies; it only approaches from ahead of / beside the
+  door (never from behind the wing), not for turboprops, within 9–52 m. It extends in
+  45 s (sim) after the aircraft parks and retracts when pushback starts; scrubbing snaps.
+  Billy Bishop has no bridges (Porter boards by airstairs).
+- **GSE** (instanced, `air/apron/models.ts`): staged in the equipment boxes (baggage
+  tug + 1–3 carts, belt loader, GPU, pushback tractor); around every parked aircraft a
+  turnaround set on the right side (belt loader at the forward hold, tug + cart train,
+  catering truck at the last right door, fuel truck outboard of the engines); a
+  pushback tractor on the nose during pushback; tug trains, fuel / catering trucks and
+  belt loaders driving the service roads in their lane (ping-pong along merged paths).
+- **Lighting**: 30 m apron floodlight masts along the apron edge and in the wing-tip
+  gaps between contact stands; at night glowing heads + additive light pools; blue
+  taxiway / apron edge lights.
+- **Terminal massing**: the tile pipeline keeps only the first outer ring of a
+  building multipolygon, so Pearson T3 (relation 8883468) was missing. Aeroway
+  terminal / hangar footprints that the level-0 tile buildings and landmark models
+  don't cover are extruded by `airports.py` (glass curtain wall, fascia, lit interiors
+  at night; hangars ribbed metal), `tm_*`.
+
+Draws (Pearson, detail range): bridges 6, GSE 7, masts 1, night glow 2, labels 1,
+massing 1; ≈ 250 k triangles for the whole airport layer at Pearson.
