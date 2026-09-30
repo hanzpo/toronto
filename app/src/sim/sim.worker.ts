@@ -4,7 +4,7 @@
 import init, { Sim } from './pkg/sim.js';
 import { decodeTbn, type Tbn } from '../data/tbn';
 import {
-  bottleneckOf, CAR_STRIDE, H, HEADER_BYTES, HF, MAX_CARS, MAX_PEDS, PED_STRIDE, SLOT_BYTES, SLOT_HEADER, SLOTS,
+  bottleneckOf, CAR_STRIDE, H, HEADER_BYTES, HF, MAX_CARS, MAX_PEDS, MAX_SIGNALS, PED_STRIDE, SIG_OFFSET, SIG_STRIDE, SLOT_BYTES, SLOT_HEADER, SLOTS,
   type FromWorker, type TickMsg, type ToWorker,
 } from './protocol';
 
@@ -28,6 +28,12 @@ const loaded = new Map<string, { names: string[]; eName: Uint16Array }>();
 const pending = new Set<string>();
 const missing = new Set<string>();
 let stepAvg = 0;
+let plansVersion = -1;
+let plansAt = 0;
+// building footprints (player collisions): level-0 render tiles around the player
+const fpPending = new Set<string>();
+const fpMissing = new Set<string>();
+let fpCache: Promise<Cache | null> | null = null;
 let lastRoad: string | null | undefined;
 
 // congestion tier
@@ -78,6 +84,7 @@ async function loadTile(tx: number, ty: number) {
       a.e_from as Uint32Array, a.e_to as Uint32Array, a.e_off as Uint32Array, a.e_xyz as Float32Array,
       a.e_class as Uint8Array, a.e_lanes_fwd as Uint8Array, a.e_lanes_bwd as Uint8Array,
       a.e_speed as Float32Array, a.e_flags as Uint8Array, bn,
+      (a.e_width as Float32Array | undefined) ?? new Float32Array(0), (a.e_side as Uint8Array | undefined) ?? new Uint8Array(0),
     );
     loaded.set(k, { names, eName: new Uint16Array(eName) });
   } catch (e) {
@@ -135,9 +142,11 @@ function publish(m: TickMsg) {
   const mem = memory.buffer;
   if (nc) new Float32Array(sab, base + SLOT_HEADER, nc * CAR_STRIDE).set(new Float32Array(mem, sim.car_ptr(), nc * CAR_STRIDE));
   if (np) new Float32Array(sab, base + SLOT_HEADER + MAX_CARS * CAR_STRIDE * 4, np * PED_STRIDE).set(new Float32Array(mem, sim.ped_ptr(), np * PED_STRIDE));
-  const si = new Int32Array(sab, base, 2);
+  const ns = Math.min(sim.signal_count(), MAX_SIGNALS);
+  if (ns) new Float32Array(sab, base + SIG_OFFSET, ns * SIG_STRIDE).set(new Float32Array(mem, sim.signal_ptr(), ns * SIG_STRIDE));
+  const si = new Int32Array(sab, base, 10);
   const sf = new Float64Array(sab, base, 4);
-  si[0] = nc; si[1] = np;
+  si[0] = nc; si[1] = np; si[8] = ns;
   sf[1] = m.originE; sf[2] = m.originN; sf[3] = m.simMs;
   Atomics.store(hdr, H.SLOT, slot);
   Atomics.add(hdr, H.SEQ, 1);
@@ -146,7 +155,7 @@ function publish(m: TickMsg) {
 function playerInfo() {
   if (!sim) return;
   const p = sim.player_state();
-  for (let i = 0; i < 12 && i < p.length; i++) hf[HF.PLAYER + i] = p[i];
+  for (let i = 0; i < 14 && i < p.length; i++) hf[HF.PLAYER + i] = p[i];
   let road: string | null = null;
   if (p[0] && p[10] >= 0) {
     const t = loaded.get(key(p[8], p[9]));
@@ -168,6 +177,8 @@ function tick(m: TickMsg) {
       const t0 = performance.now();
       sim.set_view(m.focusE, m.focusN, m.radius, m.pedRadius);
       const pl = m.player;
+      sim.set_obstacles(m.obst ?? new Float64Array(0));
+      if (pl) manageFootprints(hf[HF.PLAYER + 1], hf[HF.PLAYER + 2]);
       if (pl && m.simDt > 0) sim.player_step(m.realDt, pl.throttle, pl.brake, pl.steer, pl.handbrake, pl.groundZ);
       let remaining = Math.min(m.simDt, 3600);
       sim.set_time(m.tod - remaining, m.weekday);
@@ -198,10 +209,97 @@ function tick(m: TickMsg) {
       hf[HF.TARGET_PEDS] = st[1];
       playerInfo();
       publish(m);
+      const gv = sim.graph_version();
+      if (gv !== plansVersion && performance.now() - plansAt > 1000) {
+        plansVersion = gv;
+        plansAt = performance.now();
+        const plans = new Float64Array(sim.signal_plans());
+        post({ type: 'plans', plans }, [plans.buffer]);
+      }
     }
   } finally {
     Atomics.store(hdr, H.BUSY, 0);
     Atomics.add(hdr, H.ACK, 1);
+  }
+}
+
+// ----------------------------------------------------------------------------- building footprints
+// While the player drives, the building outlines of the level-0 render tiles
+// around the car are handed to the sim for collisions. The bytes normally come
+// straight from the tile worker's Cache Storage (same URL), so this costs no
+// extra download.
+
+async function tileBuffer(url: string): Promise<ArrayBuffer | null> {
+  fpCache ??= typeof caches === 'undefined' ? Promise.resolve(null) : caches.open(`tiles-${build}`).catch(() => null);
+  const cache = await fpCache;
+  const hit = cache ? await cache.match(url).catch(() => undefined) : undefined;
+  const raw = hit ? await hit.arrayBuffer() : await (async () => {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    return res.arrayBuffer();
+  })();
+  if (!raw) return null;
+  const u = new Uint8Array(raw, 0, Math.min(2, raw.byteLength));
+  if (u[0] !== 0x1f || u[1] !== 0x8b) return raw;
+  return new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+}
+
+async function loadFootprints(tx: number, ty: number) {
+  const k = key(tx, ty);
+  fpPending.add(k);
+  try {
+    const buf = await tileBuffer(`${dataRoot}/tiles/0/${tx}_${ty}.bin.gz${build ? `?v=${build}` : ''}`);
+    if (!buf) { fpMissing.add(k); return; }
+    const a = decodeTbn(buf).arrays;
+    const x0 = tx * TILE, y0 = ty * TILE;
+    const off: number[] = [0];
+    const xy: number[] = [];
+    // buildings: outer ring of each (skip overhangs / canopies that start well above the street)
+    const bro = a.b_ring_off as Uint32Array | undefined, bvo = a.b_vert_off as Uint32Array | undefined, bxy = a.b_xy as Float32Array | undefined;
+    const bmin = a.b_min as Float32Array | undefined;
+    if (bro && bvo && bxy) {
+      for (let b = 0; b + 1 < bro.length; b++) {
+        if (bmin && bmin[b] > 2.5) continue;
+        const r = bro[b];
+        for (let v = bvo[r]; v < bvo[r + 1]; v++) xy.push(x0 + bxy[v * 2], y0 + bxy[v * 2 + 1]);
+        off.push(xy.length / 2);
+      }
+    }
+    // instanced houses: oriented rectangles
+    const hxy = a.h_xy as Float32Array | undefined, ha = a.h_angle as Float32Array | undefined;
+    const hl = a.h_len as Float32Array | undefined, hw = a.h_wid as Float32Array | undefined;
+    if (hxy && ha && hl && hw) {
+      for (let i = 0; i < ha.length; i++) {
+        const c = Math.cos(ha[i]), s = Math.sin(ha[i]), L = hl[i] / 2, W = hw[i] / 2;
+        const cx = x0 + hxy[i * 2], cy = y0 + hxy[i * 2 + 1];
+        for (const [u, v] of [[L, W], [-L, W], [-L, -W], [L, -W]]) xy.push(cx + u * c - v * s, cy + u * s + v * c);
+        off.push(xy.length / 2);
+      }
+    }
+    if (sim && !sim.has_footprints(tx, ty)) sim.add_footprints(tx, ty, Uint32Array.from(off), Float32Array.from(xy));
+  } catch (e) {
+    console.warn('[sim] footprints', k, e);
+    fpMissing.add(k);
+  } finally {
+    fpPending.delete(k);
+  }
+}
+
+function manageFootprints(e: number, n: number) {
+  if (!sim || !Number.isFinite(e)) return;
+  const cx = Math.floor(e / TILE), cy = Math.floor(n / TILE);
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dy = -1; dy <= 1; dy++) {
+      const tx = cx + dx, ty = cy + dy, k = key(tx, ty);
+      // only the tiles the car is near (within 150 m of their edge)
+      if (rectDist(tx, ty, e, n) > 150 || fpPending.has(k) || fpMissing.has(k) || sim.has_footprints(tx, ty)) continue;
+      if (available && !available.has(k)) continue;
+      void loadFootprints(tx, ty);
+    }
+  }
+  const t = sim.footprint_tiles();
+  for (let i = 0; i + 1 < t.length; i += 2) {
+    if (Math.abs(t[i] - cx) > 2 || Math.abs(t[i + 1] - cy) > 2) sim.remove_footprints(t[i], t[i + 1]);
   }
 }
 

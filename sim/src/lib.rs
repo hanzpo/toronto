@@ -3,6 +3,7 @@
 //! The crate is plain Rust (tested with `cargo test`); `Sim` is the thin
 //! wasm-bindgen facade the Web Worker drives (see app/src/sim/sim.worker.ts).
 
+pub mod collide;
 pub mod demand;
 pub mod graph;
 pub mod idm;
@@ -57,6 +58,8 @@ impl Sim {
         e_speed: &[f32],
         e_flags: &[u8],
         bottleneck: &[f32],
+        e_width: &[f32],
+        e_side: &[u8],
     ) {
         self.w.g.add_tile(&TileData {
             tx,
@@ -74,7 +77,26 @@ impl Sim {
             e_speed,
             e_flags,
             bottleneck,
+            e_width,
+            e_side,
         });
+    }
+
+    /// bumps whenever the loaded road graph changes
+    pub fn graph_version(&self) -> u32 {
+        self.w.g.version
+    }
+
+    /// fixed-time plans of all loaded signal nodes: [osmId, x, y, offset, axis, greenA, greenB]*
+    pub fn signal_plans(&self) -> Vec<f64> {
+        let mut out = Vec::new();
+        for n in &self.w.g.nodes {
+            if n.alive && n.control == graph::Control::Signal {
+                let p = n.plan;
+                out.extend_from_slice(&[n.osm as f64, n.x, n.y, p.offset as f64, p.axis as f64, p.green_a as f64, p.green_b as f64]);
+            }
+        }
+        out
     }
 
     pub fn remove_tile(&mut self, tx: i32, ty: i32) {
@@ -114,6 +136,38 @@ impl Sim {
     pub fn write_output(&mut self, origin_e: f64, origin_n: f64) {
         self.w.write_cars(origin_e, origin_n);
         self.w.peds.write(&self.w.g, origin_e, origin_n);
+        self.w.write_signals(origin_e, origin_n);
+    }
+
+    /// signalised approaches: [dE, dN, bearing, halfWidth, light]* (light 0 green, 1 amber, 2 red)
+    pub fn signal_count(&self) -> u32 {
+        (self.w.out_signals.len() / 5) as u32
+    }
+    pub fn signal_ptr(&self) -> *const f32 {
+        self.w.out_signals.as_ptr()
+    }
+
+    /// External moving obstacles (surface transit), replacing the previous set:
+    /// [e, n, heading, length, width, speed, flags]* with a front-centre pose.
+    /// flags: 1 doors state known, 2 doors open, 4 rail vehicle (streetcar / LRT).
+    pub fn set_obstacles(&mut self, data: &[f64]) {
+        self.w.set_obstacles(data);
+    }
+
+    /// Building outlines of a level-0 tile for player collisions:
+    /// `ring_off` [n+1] into `xy` (world E/N pairs).
+    pub fn add_footprints(&mut self, tx: i32, ty: i32, ring_off: &[u32], xy: &[f32]) {
+        self.w.fp.add_tile(tx, ty, ring_off, xy);
+    }
+    pub fn remove_footprints(&mut self, tx: i32, ty: i32) {
+        self.w.fp.remove_tile(tx, ty);
+    }
+    pub fn has_footprints(&self, tx: i32, ty: i32) -> bool {
+        self.w.fp.has_tile(tx, ty)
+    }
+    /// loaded footprint tiles, flat [tx, ty, ...]
+    pub fn footprint_tiles(&self) -> Vec<i32> {
+        self.w.fp.tiles().into_iter().flat_map(|(a, b)| [a, b]).collect()
     }
 
     pub fn car_count(&self) -> u32 {
@@ -160,13 +214,28 @@ impl Sim {
     pub fn player_step(&mut self, dt: f32, throttle: f32, brake: f32, steer: f32, handbrake: bool, ground_z: f32) {
         self.w.player_step(dt, throttle, brake, steer, handbrake, ground_z);
     }
-    /// [active, e, n, elev, heading, speed, pitch, onRoad, tileX, tileY, edgeIdx, carId]
+    /// [active, e, n, elev, heading, speed, pitch, onRoad, tileX, tileY, edgeIdx, carId, structure, bump]
     pub fn player_state(&self) -> Vec<f64> {
         match &self.w.player {
-            None => vec![0.0; 12],
+            None => vec![0.0; 14],
             Some(p) => {
                 let (tx, ty, ei) = self.w.player_road().map(|(a, b, c)| (a as f64, b as f64, c as f64)).unwrap_or((0.0, 0.0, -1.0));
-                vec![1.0, p.x, p.y, p.z as f64, p.h as f64, p.v as f64, p.p as f64, if p.on_road { 1.0 } else { 0.0 }, tx, ty, ei, p.id as f64]
+                vec![
+                    1.0,
+                    p.x,
+                    p.y,
+                    p.z as f64,
+                    p.h as f64,
+                    p.v as f64,
+                    p.p as f64,
+                    if p.on_road { 1.0 } else { 0.0 },
+                    tx,
+                    ty,
+                    ei,
+                    p.id as f64,
+                    if p.structure { 1.0 } else { 0.0 },
+                    p.bump as f64,
+                ]
             }
         }
     }

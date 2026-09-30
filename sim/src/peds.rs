@@ -2,9 +2,10 @@
 //! roads), turn corners, cross at junctions (waiting for the walk phase at
 //! signals) and wait in small crowds at transit stops.
 
+use std::collections::HashMap;
 use std::f32::consts::PI;
 
-use crate::demand;
+use crate::demand::{self, FLAG_BRIDGE, FLAG_TUNNEL};
 use crate::graph::{wrap_pi, Control, Graph, NONE};
 use crate::rng::{hash01, Rng};
 use crate::signal::Light;
@@ -55,6 +56,12 @@ pub struct Peds {
     active_at: f64,
     active_focus: (f64, f64),
     pub stops: Vec<[f64; 3]>,
+    stop_grid: HashMap<(i32, i32), Vec<u32>>,
+    /// stop position snapped to the sidewalk: (x, y, z, along-heading, facing), graph version
+    stop_snap: Vec<Option<([f64; 3], f32, f32)>>,
+    stop_snap_ver: Vec<u32>,
+    /// pedestrians on a crossing: (node, [x0, y0, x1, y1] relative to the node), sorted by node
+    pub cross: Vec<(u32, [f32; 4])>,
     stop_want: Vec<u8>,
     stop_have: Vec<u8>,
     stops_at: f64,
@@ -81,6 +88,10 @@ impl Peds {
             active_at: -1e9,
             active_focus: (1e12, 1e12),
             stops: Vec::new(),
+            stop_grid: HashMap::new(),
+            stop_snap: Vec::new(),
+            stop_snap_ver: Vec::new(),
+            cross: Vec::new(),
             stop_want: Vec::new(),
             stop_have: Vec::new(),
             stops_at: -1e9,
@@ -90,6 +101,12 @@ impl Peds {
 
     pub fn set_stops(&mut self, xyz: &[f64]) {
         self.stops = xyz.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+        self.stop_grid.clear();
+        for (i, s) in self.stops.iter().enumerate() {
+            self.stop_grid.entry(((s[0] / 64.0).floor() as i32, (s[1] / 64.0).floor() as i32)).or_default().push(i as u32);
+        }
+        self.stop_snap = vec![None; self.stops.len()];
+        self.stop_snap_ver = vec![u32::MAX; self.stops.len()];
         self.stop_want = vec![0; self.stops.len()];
         self.stop_have = vec![0; self.stops.len()];
         self.stops_at = -1e9;
@@ -98,6 +115,67 @@ impl Peds {
                 p.dead = true;
             }
         }
+    }
+
+    /// any transit stop within `r` of (x, y)
+    pub fn stop_near(&self, x: f64, y: f64, r: f32) -> bool {
+        let r = r as f64;
+        let (c0x, c0y) = (((x - r) / 64.0).floor() as i32, ((y - r) / 64.0).floor() as i32);
+        let (c1x, c1y) = (((x + r) / 64.0).floor() as i32, ((y + r) / 64.0).floor() as i32);
+        for cx in c0x..=c1x {
+            for cy in c0y..=c1y {
+                if let Some(v) = self.stop_grid.get(&(cx, cy)) {
+                    for &i in v {
+                        let s = self.stops[i as usize];
+                        if (s[0] - x).powi(2) + (s[1] - y).powi(2) <= r * r {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Where a stop's crowd waits: on the sidewalk next to the nearest road
+    /// (streetcar stops are often mapped in the middle of the road).
+    fn snap_stop(g: &Graph, s: [f64; 3], near: &mut Vec<u32>) -> ([f64; 3], f32, f32) {
+        g.edges_near(s[0], s[1], 30.0, near);
+        let mut best: Option<(u32, f32, f32, f32)> = None;
+        for &eid in near.iter() {
+            let e = &g.edges[eid as usize];
+            if !e.alive || !e.ped_ok || e.ped_sides == 0 {
+                continue;
+            }
+            let (se, lat, _, _) = g.project_on_edge(eid, s[0], s[1]);
+            if se <= 0.0 || se >= e.len {
+                continue;
+            }
+            // distance to the nearest walkable sidewalk line
+            let mut d = f32::INFINITY;
+            for (bit, side) in [(1u8, 1.0f32), (2u8, -1.0f32)] {
+                if e.ped_sides & bit != 0 {
+                    d = d.min((lat - side * e.ped_off).abs());
+                }
+            }
+            if lat.abs() < e.half_w + 0.5 {
+                d *= 0.5; // stop mapped on this carriageway: prefer its own sidewalk
+            }
+            if best.map_or(true, |b| d < b.3) {
+                best = Some((eid, se, lat, d));
+            }
+        }
+        let Some((eid, se, lat, _)) = best else { return (s, 0.0, 0.0) };
+        let e = &g.edges[eid as usize];
+        if lat.abs() > e.ped_off + 4.0 {
+            return (s, 0.0, 0.0); // already off the road (terminal, plaza)
+        }
+        let want = if lat >= 0.0 { 1.0f32 } else { -1.0 };
+        let side = if e.ped_sides & if want > 0.0 { 1 } else { 2 } != 0 { want } else { -want };
+        let q = g.edge_pose(e, se, side * e.ped_off, false);
+        // face the carriageway
+        let face = wrap_pi(q.h + if side > 0.0 { PI * 0.5 } else { -PI * 0.5 });
+        ([q.x, q.y, q.z as f64], q.h, face)
     }
 
     fn refresh(&mut self, g: &Graph, tod: f64, wd: u32, mono: f64, focus: (f64, f64)) {
@@ -114,7 +192,7 @@ impl Peds {
         let r2 = self.radius * self.radius;
         let mut acc = 0.0f32;
         for (i, e) in g.edges.iter().enumerate() {
-            if !e.alive || !e.ped_ok || e.len < 6.0 {
+            if !e.alive || !e.ped_ok || e.ped_sides == 0 || e.len < 6.0 {
                 continue;
             }
             let a = &g.nodes[e.from as usize];
@@ -135,7 +213,8 @@ impl Peds {
         self.target = acc.min(self.max as f32 * 0.85);
     }
 
-    pub fn step(&mut self, g: &Graph, rng: &mut Rng, dt: f32, tod: f64, wd: u32, mono: f64, focus: (f64, f64)) {
+    /// `boxes`: junction paths of vehicles (node, samples relative to the node, first live sample), sorted by node
+    pub fn step(&mut self, g: &Graph, rng: &mut Rng, dt: f32, tod: f64, wd: u32, mono: f64, focus: (f64, f64), boxes: &[(u32, [[f32; 2]; crate::world::NS], u8)]) {
         self.refresh(g, tod, wd, mono, focus);
         let r2 = (self.radius * 1.15 + 50.0).powi(2);
         for i in 0..self.list.len() {
@@ -152,7 +231,7 @@ impl Peds {
                 continue;
             }
             let e = &g.edges[p.edge as usize];
-            if !e.alive || e.gen != p.egen {
+            if !e.alive || e.gen != p.egen || (p.state == WALK && e.ped_sides & side_bit(p.side) == 0) {
                 p.dead = true;
                 continue;
             }
@@ -172,10 +251,15 @@ impl Peds {
                 }
                 WAIT => {
                     let n = &g.nodes[p.node as usize];
-                    let bearing = ((p.p1[1] - p.p0[1]) as f32).atan2((p.p1[0] - p.p0[0]) as f32);
-                    let phase = n.plan.phase_of(bearing);
                     p.phase += dt * 0.5;
-                    if n.plan.light(tod, phase) == Light::Green && n.plan.green_left(tod, phase) > p.clen / p.speed + 2.0 {
+                    let walk = if n.control == Control::Signal {
+                        let bearing = ((p.p1[1] - p.p0[1]) as f32).atan2((p.p1[0] - p.p0[0]) as f32);
+                        let phase = n.plan.phase_of(bearing);
+                        n.plan.light(tod, phase) == Light::Green && n.plan.green_left(tod, phase) > p.clen / p.speed + 2.0
+                    } else {
+                        true
+                    };
+                    if walk && !Self::cars_in_way(g, p, boxes) {
                         p.state = CROSS;
                         p.t = 0.0;
                     }
@@ -208,6 +292,37 @@ impl Peds {
         }
         self.list.retain(|p| !p.dead);
         self.spawn(g, rng, tod, wd, mono, focus);
+        // crossings in use (cars yield to them)
+        self.cross.clear();
+        for p in &self.list {
+            if p.state == CROSS && p.node != NONE {
+                let z = zone(g, p.node);
+                let n = &g.nodes[z as usize];
+                let t = p.t.clamp(0.0, 1.0) as f64;
+                let (x, y) = (p.p0[0] + (p.p1[0] - p.p0[0]) * t, p.p0[1] + (p.p1[1] - p.p0[1]) * t);
+                self.cross.push((z, [(x - n.x) as f32, (y - n.y) as f32, (p.p1[0] - n.x) as f32, (p.p1[1] - n.y) as f32]));
+            }
+        }
+        self.cross.sort_unstable_by_key(|c| c.0);
+    }
+
+    /// a vehicle's junction path crosses this pedestrian's crossing
+    fn cars_in_way(g: &Graph, p: &Ped, boxes: &[(u32, [[f32; 2]; crate::world::NS], u8)]) -> bool {
+        let z = zone(g, p.node);
+        let a = boxes.partition_point(|b| b.0 < z);
+        let n = &g.nodes[z as usize];
+        let seg = [(p.p0[0] - n.x) as f32, (p.p0[1] - n.y) as f32, (p.p1[0] - n.x) as f32, (p.p1[1] - n.y) as f32];
+        for b in &boxes[a..] {
+            if b.0 != z {
+                break;
+            }
+            for q in &b.1[b.2 as usize..] {
+                if seg_dist(seg, q[0], q[1]) < 2.4 {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn walk_point(g: &Graph, edge: u32, s: f32, side: f32, jitter: f32) -> [f64; 3] {
@@ -243,6 +358,9 @@ impl Peds {
                 if eid == p.edge && side == p.side {
                     continue; // straight back the way we came
                 }
+                if e.ped_sides & side_bit(side) == 0 {
+                    continue; // no sidewalk there (median, other carriageway)
+                }
                 let q = Self::walk_point(g, eid, s, side, p.jitter);
                 let d = ((q[0] - here[0]).hypot(q[1] - here[1])) as f32;
                 let crossing = d > 0.6 * o;
@@ -269,14 +387,10 @@ impl Peds {
         p.clen = d.max(0.3);
         p.node = ni;
         p.nx = (eid, g.edges[eid as usize].gen, side, dir, s);
+        let _ = tod;
         let crossing = d > 0.6 * o;
-        if crossing && node.control == Control::Signal {
-            let bearing = ((q[1] - here[1]) as f32).atan2((q[0] - here[0]) as f32);
-            let ph = node.plan.phase_of(bearing);
-            p.state = if node.plan.light(tod, ph) == Light::Green && node.plan.green_left(tod, ph) > d / p.speed + 2.0 { CROSS } else { WAIT };
-        } else {
-            p.state = CROSS;
-        }
+        // crossings wait for the walk signal / a gap in turning traffic (see step)
+        p.state = if crossing { WAIT } else { CROSS };
     }
 
     fn spawn(&mut self, g: &Graph, rng: &mut Rng, tod: f64, wd: u32, mono: f64, focus: (f64, f64)) {
@@ -302,16 +416,23 @@ impl Peds {
                     0
                 };
             }
+            let mut near = Vec::new();
             for i in 0..self.stops.len() {
                 let (want, have) = (self.stop_want[i], self.stop_have[i]);
                 if have >= want || self.list.len() >= self.max {
                     continue;
                 }
-                let s = self.stops[i];
+                if self.stop_snap_ver[i] != g.version {
+                    self.stop_snap_ver[i] = g.version;
+                    self.stop_snap[i] = Some(Self::snap_stop(g, self.stops[i], &mut near));
+                }
+                let (s, along, face) = self.stop_snap[i].unwrap_or((self.stops[i], 0.0, 0.0));
+                let (ah, ac) = along.sin_cos();
                 for _ in have..want {
-                    let a = rng.f32() * 2.0 * PI;
-                    let r = rng.range(1.0, 3.5) as f64;
-                    let pos = [s[0] + r * a.cos() as f64, s[1] + r * a.sin() as f64, s[2]];
+                    // spread along the curb, ~1 m either side of the sidewalk centre line
+                    let u = rng.range(-5.0, 5.0) as f64;
+                    let w = rng.range(-0.9, 0.9) as f64;
+                    let pos = [s[0] + u * ac as f64 + w * ah as f64, s[1] + u * ah as f64 - w * ac as f64, s[2]];
                     self.list.push(Ped {
                         edge: NONE,
                         egen: 0,
@@ -332,7 +453,7 @@ impl Peds {
                         stop: i as u32,
                         life: rng.range(40.0, 420.0),
                         pos,
-                        h: rng.f32() * 2.0 * PI,
+                        h: face + rng.range(-0.7, 0.7),
                         dead: false,
                     });
                 }
@@ -383,10 +504,15 @@ impl Peds {
                 }
             }
             let speed = (1.35 + 0.18 * rng.normal()).clamp(0.9, 1.9);
+            let side = match e.ped_sides {
+                1 => 1.0,
+                2 => -1.0,
+                _ => if rng.f32() < 0.5 { -1.0 } else { 1.0 },
+            };
             self.list.push(Ped {
                 edge: eid,
                 egen: e.gen,
-                side: if rng.f32() < 0.5 { -1.0 } else { 1.0 },
+                side,
                 dir: if rng.f32() < 0.5 { -1.0 } else { 1.0 },
                 s,
                 speed,
@@ -409,7 +535,7 @@ impl Peds {
         }
     }
 
-    /// Record: [dE, dN, elev, heading, phase, meta(u32 bits)]; meta = color | state << 8
+    /// Record: [dE, dN, elev, heading, phase, meta(u32 bits)]; meta = color | state << 8 | on-structure << 16
     pub fn write(&mut self, g: &Graph, oe: f64, on: f64) {
         self.out.clear();
         for p in self.list.iter_mut() {
@@ -432,10 +558,39 @@ impl Peds {
             };
             p.pos = pos;
             p.h = h;
-            let meta = p.color as u32 | (p.state as u32) << 8;
+            let structure = p.state != IDLE && p.edge != NONE && g.edges[p.edge as usize].flags & (FLAG_BRIDGE | FLAG_TUNNEL) != 0;
+            let meta = p.color as u32 | (p.state as u32) << 8 | (structure as u32) << 16;
             self.out.extend_from_slice(&[(pos[0] - oe) as f32, (pos[1] - on) as f32, pos[2] as f32, h, p.phase, f32::from_bits(meta)]);
         }
     }
+}
+
+/// conflict zone of a node (see `Node::zone`)
+#[inline]
+fn zone(g: &Graph, node: u32) -> u32 {
+    let z = g.nodes[node as usize].zone;
+    if z == NONE || !g.nodes[z as usize].alive {
+        node
+    } else {
+        z
+    }
+}
+
+#[inline]
+fn side_bit(side: f32) -> u8 {
+    if side > 0.0 {
+        1
+    } else {
+        2
+    }
+}
+
+/// distance from (x, y) to segment [x0, y0, x1, y1]
+fn seg_dist(s: [f32; 4], x: f32, y: f32) -> f32 {
+    let (dx, dy) = (s[2] - s[0], s[3] - s[1]);
+    let l2 = dx * dx + dy * dy;
+    let t = if l2 > 1e-6 { (((x - s[0]) * dx + (y - s[1]) * dy) / l2).clamp(0.0, 1.0) } else { 0.0 };
+    (x - s[0] - dx * t).hypot(y - s[1] - dy * t)
 }
 
 #[cfg(test)]
@@ -454,7 +609,7 @@ mod tests {
         let mut crossed = 0;
         let mut waited = 0;
         for k in 0..3000 {
-            peds.step(&g, &mut rng, 0.1, tod, 3, k as f64 * 0.1, (512.0, 512.0));
+            peds.step(&g, &mut rng, 0.1, tod, 3, k as f64 * 0.1, (512.0, 512.0), &[]);
             tod += 0.1;
             for p in &peds.list {
                 if p.state == WAIT {
@@ -486,7 +641,7 @@ mod tests {
         let mut rng = Rng::new(3);
         let mut peds = Peds::new(500);
         peds.set_stops(&[520.0, 520.0, 0.0, 530.0, 480.0, 0.0]);
-        peds.step(&g, &mut rng, 0.1, 17.5 * 3600.0, 3, 10.0, (512.0, 512.0));
+        peds.step(&g, &mut rng, 0.1, 17.5 * 3600.0, 3, 10.0, (512.0, 512.0), &[]);
         assert!(peds.list.iter().any(|p| p.state == IDLE));
     }
 }

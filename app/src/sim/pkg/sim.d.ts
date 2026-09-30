@@ -4,9 +4,23 @@
 export class Sim {
     free(): void;
     [Symbol.dispose](): void;
-    add_tile(tx: number, ty: number, n_id: Float64Array, n_xyz: Float32Array, n_flags: Uint8Array, e_from: Uint32Array, e_to: Uint32Array, e_off: Uint32Array, e_xyz: Float32Array, e_class: Uint8Array, e_lanes_fwd: Uint8Array, e_lanes_bwd: Uint8Array, e_speed: Float32Array, e_flags: Uint8Array, bottleneck: Float32Array): void;
+    /**
+     * Building outlines of a level-0 tile for player collisions:
+     * `ring_off` [n+1] into `xy` (world E/N pairs).
+     */
+    add_footprints(tx: number, ty: number, ring_off: Uint32Array, xy: Float32Array): void;
+    add_tile(tx: number, ty: number, n_id: Float64Array, n_xyz: Float32Array, n_flags: Uint8Array, e_from: Uint32Array, e_to: Uint32Array, e_off: Uint32Array, e_xyz: Float32Array, e_class: Uint8Array, e_lanes_fwd: Uint8Array, e_lanes_bwd: Uint8Array, e_speed: Float32Array, e_flags: Uint8Array, bottleneck: Float32Array, e_width: Float32Array, e_side: Uint8Array): void;
     car_count(): number;
     car_ptr(): number;
+    /**
+     * loaded footprint tiles, flat [tx, ty, ...]
+     */
+    footprint_tiles(): Int32Array;
+    /**
+     * bumps whenever the loaded road graph changes
+     */
+    graph_version(): number;
+    has_footprints(tx: number, ty: number): boolean;
     has_tile(tx: number, ty: number): boolean;
     /**
      * speed ratio (0..255 = 0..1) per major segment at a time
@@ -20,17 +34,24 @@ export class Sim {
     ped_count(): number;
     ped_ptr(): number;
     /**
-     * [active, e, n, elev, heading, speed, pitch, onRoad, tileX, tileY, edgeIdx, carId]
+     * [active, e, n, elev, heading, speed, pitch, onRoad, tileX, tileY, edgeIdx, carId, structure, bump]
      */
     player_state(): Float64Array;
     player_step(dt: number, throttle: number, brake: number, steer: number, handbrake: boolean, ground_z: number): void;
     release_player(): void;
+    remove_footprints(tx: number, ty: number): void;
     remove_tile(tx: number, ty: number): void;
     set_fast(fast: boolean): void;
     /**
      * `geo` = per segment [midE, midN, dirE, dirN] (unit direction)
      */
     set_majors(_class: Uint8Array, flags: Uint8Array, bottleneck: Float32Array, geo: Float32Array): void;
+    /**
+     * External moving obstacles (surface transit), replacing the previous set:
+     * [e, n, heading, length, width, speed, flags]* with a front-centre pose.
+     * flags: 1 doors state known, 2 doors open, 4 rail vehicle (streetcar / LRT).
+     */
+    set_obstacles(data: Float64Array): void;
     /**
      * transit stop positions, flat [E, N, elev, …]
      */
@@ -43,6 +64,15 @@ export class Sim {
      * focus point (world E/N), car radius and pedestrian radius (m)
      */
     set_view(e: number, n: number, radius: number, ped_radius: number): void;
+    /**
+     * signalised approaches: [dE, dN, bearing, halfWidth, light]* (light 0 green, 1 amber, 2 red)
+     */
+    signal_count(): number;
+    /**
+     * fixed-time plans of all loaded signal nodes: [osmId, x, y, offset, axis, greenA, greenB]*
+     */
+    signal_plans(): Float64Array;
+    signal_ptr(): number;
     spawn_player(e: number, n: number, heading: number): boolean;
     /**
      * [target cars, target peds, cars, peds, live links, tiles]
@@ -62,9 +92,13 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_sim_free: (a: number, b: number) => void;
-    readonly sim_add_tile: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number, a1: number, b1: number, c1: number) => void;
+    readonly sim_add_footprints: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly sim_add_tile: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number, a1: number, b1: number, c1: number, d1: number, e1: number, f1: number, g1: number) => void;
     readonly sim_car_count: (a: number) => number;
     readonly sim_car_ptr: (a: number) => number;
+    readonly sim_footprint_tiles: (a: number) => [number, number];
+    readonly sim_graph_version: (a: number) => number;
+    readonly sim_has_footprints: (a: number, b: number, c: number) => number;
     readonly sim_has_tile: (a: number, b: number, c: number) => number;
     readonly sim_major_ratios: (a: number, b: number, c: number) => [number, number];
     readonly sim_measured: (a: number) => [number, number];
@@ -74,12 +108,17 @@ export interface InitOutput {
     readonly sim_player_state: (a: number) => [number, number];
     readonly sim_player_step: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly sim_release_player: (a: number) => void;
+    readonly sim_remove_footprints: (a: number, b: number, c: number) => void;
     readonly sim_remove_tile: (a: number, b: number, c: number) => void;
     readonly sim_set_fast: (a: number, b: number) => void;
     readonly sim_set_majors: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
+    readonly sim_set_obstacles: (a: number, b: number, c: number) => void;
     readonly sim_set_stops: (a: number, b: number, c: number) => void;
     readonly sim_set_time: (a: number, b: number, c: number) => void;
     readonly sim_set_view: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly sim_signal_count: (a: number) => number;
+    readonly sim_signal_plans: (a: number) => [number, number];
+    readonly sim_signal_ptr: (a: number) => number;
     readonly sim_spawn_player: (a: number, b: number, c: number, d: number) => number;
     readonly sim_stats: (a: number) => [number, number];
     readonly sim_step: (a: number, b: number) => void;

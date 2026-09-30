@@ -162,6 +162,10 @@ def main() -> None:
             "e_osm": d["id"][gw[E]].astype(np.float64),
             "e_name": eni,
             "e_flags": flags[E].astype(np.uint8),
+            # carriageway width as drawn by the render tiles (r_width) and OSM sidewalk code
+            # (r_side), so the sim can put pedestrians on the rendered sidewalks
+            "e_width": d["width"][gw[E]].astype(np.float32),
+            "e_side": d["side"][gw[E]].astype(np.uint8),
         }
         total += tbn.write(out / f"{X}_{Y}.bin.gz", arrays, tx=X, ty=Y, names=name_list)
         ntiles += 1

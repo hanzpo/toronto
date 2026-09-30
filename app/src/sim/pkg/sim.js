@@ -12,6 +12,21 @@ export class Sim {
         wasm.__wbg_sim_free(ptr, 0);
     }
     /**
+     * Building outlines of a level-0 tile for player collisions:
+     * `ring_off` [n+1] into `xy` (world E/N pairs).
+     * @param {number} tx
+     * @param {number} ty
+     * @param {Uint32Array} ring_off
+     * @param {Float32Array} xy
+     */
+    add_footprints(tx, ty, ring_off, xy) {
+        const ptr0 = passArray32ToWasm0(ring_off, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF32ToWasm0(xy, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.sim_add_footprints(this.__wbg_ptr, tx, ty, ptr0, len0, ptr1, len1);
+    }
+    /**
      * @param {number} tx
      * @param {number} ty
      * @param {Float64Array} n_id
@@ -27,8 +42,10 @@ export class Sim {
      * @param {Float32Array} e_speed
      * @param {Uint8Array} e_flags
      * @param {Float32Array} bottleneck
+     * @param {Float32Array} e_width
+     * @param {Uint8Array} e_side
      */
-    add_tile(tx, ty, n_id, n_xyz, n_flags, e_from, e_to, e_off, e_xyz, e_class, e_lanes_fwd, e_lanes_bwd, e_speed, e_flags, bottleneck) {
+    add_tile(tx, ty, n_id, n_xyz, n_flags, e_from, e_to, e_off, e_xyz, e_class, e_lanes_fwd, e_lanes_bwd, e_speed, e_flags, bottleneck, e_width, e_side) {
         const ptr0 = passArrayF64ToWasm0(n_id, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passArrayF32ToWasm0(n_xyz, wasm.__wbindgen_malloc);
@@ -55,7 +72,11 @@ export class Sim {
         const len11 = WASM_VECTOR_LEN;
         const ptr12 = passArrayF32ToWasm0(bottleneck, wasm.__wbindgen_malloc);
         const len12 = WASM_VECTOR_LEN;
-        wasm.sim_add_tile(this.__wbg_ptr, tx, ty, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9, ptr10, len10, ptr11, len11, ptr12, len12);
+        const ptr13 = passArrayF32ToWasm0(e_width, wasm.__wbindgen_malloc);
+        const len13 = WASM_VECTOR_LEN;
+        const ptr14 = passArray8ToWasm0(e_side, wasm.__wbindgen_malloc);
+        const len14 = WASM_VECTOR_LEN;
+        wasm.sim_add_tile(this.__wbg_ptr, tx, ty, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9, ptr10, len10, ptr11, len11, ptr12, len12, ptr13, len13, ptr14, len14);
     }
     /**
      * @returns {number}
@@ -70,6 +91,33 @@ export class Sim {
     car_ptr() {
         const ret = wasm.sim_car_ptr(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * loaded footprint tiles, flat [tx, ty, ...]
+     * @returns {Int32Array}
+     */
+    footprint_tiles() {
+        const ret = wasm.sim_footprint_tiles(this.__wbg_ptr);
+        var v1 = getArrayI32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * bumps whenever the loaded road graph changes
+     * @returns {number}
+     */
+    graph_version() {
+        const ret = wasm.sim_graph_version(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {number} tx
+     * @param {number} ty
+     * @returns {boolean}
+     */
+    has_footprints(tx, ty) {
+        const ret = wasm.sim_has_footprints(this.__wbg_ptr, tx, ty);
+        return ret !== 0;
     }
     /**
      * @param {number} tx
@@ -128,7 +176,7 @@ export class Sim {
         return ret >>> 0;
     }
     /**
-     * [active, e, n, elev, heading, speed, pitch, onRoad, tileX, tileY, edgeIdx, carId]
+     * [active, e, n, elev, heading, speed, pitch, onRoad, tileX, tileY, edgeIdx, carId, structure, bump]
      * @returns {Float64Array}
      */
     player_state() {
@@ -150,6 +198,13 @@ export class Sim {
     }
     release_player() {
         wasm.sim_release_player(this.__wbg_ptr);
+    }
+    /**
+     * @param {number} tx
+     * @param {number} ty
+     */
+    remove_footprints(tx, ty) {
+        wasm.sim_remove_footprints(this.__wbg_ptr, tx, ty);
     }
     /**
      * @param {number} tx
@@ -183,6 +238,17 @@ export class Sim {
         wasm.sim_set_majors(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
     }
     /**
+     * External moving obstacles (surface transit), replacing the previous set:
+     * [e, n, heading, length, width, speed, flags]* with a front-centre pose.
+     * flags: 1 doors state known, 2 doors open, 4 rail vehicle (streetcar / LRT).
+     * @param {Float64Array} data
+     */
+    set_obstacles(data) {
+        const ptr0 = passArrayF64ToWasm0(data, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.sim_set_obstacles(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
      * transit stop positions, flat [E, N, elev, …]
      * @param {Float64Array} xyz
      */
@@ -208,6 +274,31 @@ export class Sim {
      */
     set_view(e, n, radius, ped_radius) {
         wasm.sim_set_view(this.__wbg_ptr, e, n, radius, ped_radius);
+    }
+    /**
+     * signalised approaches: [dE, dN, bearing, halfWidth, light]* (light 0 green, 1 amber, 2 red)
+     * @returns {number}
+     */
+    signal_count() {
+        const ret = wasm.sim_signal_count(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * fixed-time plans of all loaded signal nodes: [osmId, x, y, offset, axis, greenA, greenB]*
+     * @returns {Float64Array}
+     */
+    signal_plans() {
+        const ret = wasm.sim_signal_plans(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
+     * @returns {number}
+     */
+    signal_ptr() {
+        const ret = wasm.sim_signal_ptr(this.__wbg_ptr);
+        return ret >>> 0;
     }
     /**
      * @param {number} e
@@ -296,6 +387,11 @@ function getArrayF64FromWasm0(ptr, len) {
     return getFloat64ArrayMemory0().subarray(ptr / 8, ptr / 8 + len);
 }
 
+function getArrayI32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getInt32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
 function getArrayU8FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
@@ -315,6 +411,14 @@ function getFloat64ArrayMemory0() {
         cachedFloat64ArrayMemory0 = new Float64Array(wasm.memory.buffer);
     }
     return cachedFloat64ArrayMemory0;
+}
+
+let cachedInt32ArrayMemory0 = null;
+function getInt32ArrayMemory0() {
+    if (cachedInt32ArrayMemory0 === null || cachedInt32ArrayMemory0.byteLength === 0) {
+        cachedInt32ArrayMemory0 = new Int32Array(wasm.memory.buffer);
+    }
+    return cachedInt32ArrayMemory0;
 }
 
 function getStringFromWasm0(ptr, len) {
@@ -388,6 +492,7 @@ function __wbg_finalize_init(instance, module) {
     wasmModule = module;
     cachedFloat32ArrayMemory0 = null;
     cachedFloat64ArrayMemory0 = null;
+    cachedInt32ArrayMemory0 = null;
     cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();

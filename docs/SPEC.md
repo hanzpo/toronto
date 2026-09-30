@@ -166,4 +166,5 @@ unified client-side by OSM id. Positions are tile-local like render tiles.
   bridge/tunnel profiles, first/last vertex = from/to node.
 - `e_len` f32 m · `e_class` u8 (road classes) · `e_lanes_fwd` / `e_lanes_bwd`
   u8 (bwd = 0 ⇒ one-way) · `e_speed` f32 m/s (maxspeed or class default) ·
-  `e_flags` u8 (road flags) · `e_name` u16 (header `names`) · `e_osm` f64.
+  `e_flags` u8 (road flags) · `e_name` u16 (header `names`) · `e_osm` f64 ·
+  `e_width` f32 m (as render `r_width`) · `e_side` u8 (as render `r_side`).

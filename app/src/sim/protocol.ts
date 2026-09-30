@@ -14,24 +14,36 @@
 //     f64[8]  STEP_MS   wasm time for the last tick (step + output), ms
 //     f64[9]  STEP_AVG  exponential average of STEP_MS
 //     f64[10] TARGET_CARS   f64[11] TARGET_PEDS
-//     f64[12..24) PLAYER    [active, e, n, elev, heading, speed, pitch, onRoad, carId, …]
+//     f64[12..26) PLAYER    [active, e, n, elev, heading, speed, pitch, onRoad, tileX, tileY, edgeIdx, carId, structure, bump]
 //   then 3 snapshot slots of SLOT_BYTES each:
-//     i32[0] carCount · i32[1] pedCount · f64[1] originE · f64[2] originN · f64[3] simMs
+//     i32[0] carCount · i32[1] pedCount · f64[1] originE · f64[2] originN · f64[3] simMs · i32[8] signalCount
 //     +64:             cars  MAX_CARS × CAR_STRIDE f32
-//                      [dE, dN, elev, heading, pitch, speed, meta u32, id u32]
-//                      meta = kind | colour << 8 | flags << 16 (1 brake, 2 player, 4 left, 8 right)
+//                      [dE, dN, elev, heading, pitch, speed, meta u32, id u32]   (body centre)
+//                      meta = kind | colour << 8 | flags << 16 | ground << 24
+//                        flags: 1 brake, 2 player, 4 indicator left, 8 indicator right
+//                        ground: road class (bits 0-2) | 8 on a bridge / in a tunnel (use elev as is)
 //     +64+carBytes:    peds  MAX_PEDS × PED_STRIDE f32
-//                      [dE, dN, elev, heading, phase, meta u32]   meta = colour | state << 8
+//                      [dE, dN, elev, heading, phase, meta u32]   meta = colour | state << 8 | structure << 16
+//     +…+pedBytes:     signals MAX_SIGNALS × SIG_STRIDE f32
+//                      [dE, dN, bearing, halfWidth, light]  stop line of a signalised approach
+//                      (bearing = travel direction, light 0 green · 1 amber · 2 red)
 // Positions are relative to the slot's origin (the renderer's floating anchor).
 
 export const MAX_CARS = 16384;
 export const MAX_PEDS = 16384;
 export const CAR_STRIDE = 8;
 export const PED_STRIDE = 6;
+export const MAX_SIGNALS = 4096;
+export const SIG_STRIDE = 5;
+/** floats per external obstacle in TickMsg.obst: [e, n, heading, length, width, speed, flags] */
+export const OB_STRIDE = 7;
+/** obstacle flags */
+export const OB_FLAG = { DOORS_KNOWN: 1, DOORS_OPEN: 2, RAIL: 4 } as const;
 export const HEADER_BYTES = 256;
 export const SLOT_HEADER = 64;
 export const SLOTS = 3;
-export const SLOT_BYTES = SLOT_HEADER + MAX_CARS * CAR_STRIDE * 4 + MAX_PEDS * PED_STRIDE * 4;
+export const SLOT_BYTES = SLOT_HEADER + MAX_CARS * CAR_STRIDE * 4 + MAX_PEDS * PED_STRIDE * 4 + MAX_SIGNALS * SIG_STRIDE * 4;
+export const SIG_OFFSET = SLOT_HEADER + MAX_CARS * CAR_STRIDE * 4 + MAX_PEDS * PED_STRIDE * 4;
 export const SAB_BYTES = HEADER_BYTES + SLOTS * SLOT_BYTES;
 
 export const H = { SEQ: 0, SLOT: 1, BUSY: 2, TILES: 3, PENDING: 4, SUBSTEPS: 5, FAST: 6, ACK: 7 } as const;
@@ -58,6 +70,8 @@ export interface TickMsg {
   originE: number;
   originN: number;
   player?: { throttle: number; brake: number; steer: number; handbrake: boolean; groundZ: number };
+  /** surface transit near the focus as moving obstacles (OB_STRIDE floats each), or absent */
+  obst?: Float64Array;
 }
 
 export type ToWorker =
@@ -75,7 +89,9 @@ export type FromWorker =
   | { type: 'error'; message: string }
   | { type: 'player'; roadName: string | null; ok?: boolean }
   | { type: 'majorsGeom'; off: Uint32Array; xyz: Float32Array; cls: Uint8Array; names: string[]; name: Uint16Array }
-  | { type: 'majorsRatio'; ratio: Uint8Array; tod: number };
+  | { type: 'majorsRatio'; ratio: Uint8Array; tod: number }
+  /** signal plans of the loaded graph: [osmId, e, n, offset, axis, greenA, greenB]* */
+  | { type: 'plans'; plans: Float64Array };
 
 /**
  * Extra peak load of known bottleneck corridors, by road name (0 = none).

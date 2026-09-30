@@ -85,6 +85,9 @@ pub struct Node {
     /// reservation of the junction box (monotonic sim s) and holder link
     pub busy_until: f64,
     pub busy_link: u32,
+    /// conflict zone: controlled nodes joined by very short links (dual
+    /// carriageways, split junctions) share one zone = index of its root node
+    pub zone: u32,
 }
 
 pub struct Edge {
@@ -108,6 +111,11 @@ pub struct Edge {
     /// lateral offset of the sidewalk centre from the edge centreline
     pub ped_off: f32,
     pub ped_ok: bool,
+    /// sidewalk sides that are walkable: 1 = right of from→to, 2 = left
+    /// (a side is dropped when it lies in another carriageway or a median)
+    pub ped_sides: u8,
+    /// sides with a sidewalk according to OSM tags (same bits)
+    pub ped_tag: u8,
 }
 
 pub struct Link {
@@ -167,7 +175,16 @@ pub struct TileData<'a> {
     pub e_speed: &'a [f32],
     pub e_flags: &'a [u8],
     pub bottleneck: &'a [f32],
+    /// carriageway width (m) per edge; empty when the graph has no widths
+    pub e_width: &'a [f32],
+    /// OSM sidewalk code per edge (as render `r_side`); may be empty
+    pub e_side: &'a [u8],
 }
+
+/// rendered sidewalk width per road class (app/src/workers/roads.ts SIDEWALK_W)
+pub const SIDEWALK_W: [f32; 7] = [0.0, 0.0, 3.2, 2.8, 2.4, 1.9, 0.0];
+/// rendered default road width per class when a way has none (ROAD_W_DEFAULT)
+pub const ROAD_W_DEFAULT: [f32; 7] = [24.0, 18.0, 14.0, 12.0, 10.0, 8.0, 5.0];
 
 /// A point on a link: world position, heading (CCW from east), pitch.
 #[derive(Clone, Copy, Debug, Default)]
@@ -257,6 +274,7 @@ impl Graph {
                     dirty: true,
                     busy_until: -1.0,
                     busy_link: NONE,
+                    zone: NONE,
                 });
                 self.node_map.insert(osm, g);
                 if d.n_flags[i] & 1 != 0 {
@@ -298,8 +316,19 @@ impl Graph {
             let lanes_f = d.e_lanes_fwd[e].clamp(1, MAXL as u8);
             let lanes_b = d.e_lanes_bwd[e].min(MAXL as u8);
             let flags = d.e_flags[e];
-            let half_w = (lanes_f + lanes_b) as f32 * LANE_W * 0.5 + if class >= 2 && class <= 5 { 0.8 } else { 0.3 };
-            let ped_ok = (2..=6).contains(&class) && flags & (FLAG_LINK | FLAG_TUNNEL) == 0;
+            // carriageway as rendered (render tiles draw r_width, curbs + sidewalks outside it)
+            let w = d.e_width.get(e).copied().filter(|&w| w > 0.0 && w < 80.0).unwrap_or(ROAD_W_DEFAULT[class as usize]);
+            let road_hw = w.max(if class <= 1 { 10.0 } else { 2.0 }) * 0.5;
+            let half_w = ((lanes_f + lanes_b) as f32 * LANE_W * 0.5 + 0.3).max(road_hw);
+            // sidewalk centre line: middle of the rendered sidewalk (service roads: just off the edge)
+            let ped_off = if (2..=5).contains(&class) { road_hw + SIDEWALK_W[class as usize] * 0.5 } else { road_hw + 1.2 };
+            let ped_ok = (2..=6).contains(&class) && flags & (FLAG_LINK | FLAG_TUNNEL | 2) == 0;
+            let ped_tag = match d.e_side.get(e).copied().unwrap_or(0) {
+                1 => 0,
+                2 => 2,
+                3 => 1,
+                _ => 3,
+            };
             let eid = self.alloc_edge(Edge {
                 alive: true,
                 gen: 0,
@@ -318,8 +347,10 @@ impl Graph {
                 bottleneck: d.bottleneck.get(e).copied().unwrap_or(0.0),
                 links: [NONE, NONE],
                 half_w,
-                ped_off: half_w + 2.2,
+                ped_off,
                 ped_ok,
+                ped_sides: ped_tag,
+                ped_tag,
             });
             // links
             let mut links = [NONE, NONE];
@@ -365,9 +396,114 @@ impl Graph {
             tile_edges.push(eid);
             self.live_edges += 1;
         }
+        self.refresh_sidewalks(d.tx, d.ty, &tile_edges);
         self.tiles.insert((d.tx, d.ty), tile_edges);
         self.version = self.version.wrapping_add(1);
         self.refresh();
+    }
+
+    /// Re-derive walkable sidewalk sides for a new tile's edges and the
+    /// already-loaded edges along its border.
+    fn refresh_sidewalks(&mut self, tx: i32, ty: i32, new_edges: &[u32]) {
+        let mut todo: Vec<u32> = new_edges.to_vec();
+        let (x0, y0) = (tx as f64 * TILE, ty as f64 * TILE);
+        let (c0x, c0y) = cell(x0 - 60.0, y0 - 60.0, GRID);
+        let (c1x, c1y) = cell(x0 + TILE + 60.0, y0 + TILE + 60.0, GRID);
+        let (i0x, i0y) = cell(x0 + 60.0, y0 + 60.0, GRID);
+        let (i1x, i1y) = cell(x0 + TILE - 60.0, y0 + TILE - 60.0, GRID);
+        for cx in c0x..=c1x {
+            for cy in c0y..=c1y {
+                if cx > i0x && cx < i1x && cy > i0y && cy < i1y {
+                    continue;
+                }
+                if let Some(v) = self.grid.get(&(cx, cy)) {
+                    for &e in v {
+                        if self.edges[e as usize].tile != (tx, ty) && !todo.contains(&e) {
+                            todo.push(e);
+                        }
+                    }
+                }
+            }
+        }
+        let mut near = Vec::new();
+        for e in todo {
+            let sides = self.sidewalk_sides(e, &mut near);
+            self.edges[e as usize].ped_sides = sides;
+        }
+    }
+
+    /// Which sidewalk sides of edge `eid` are usable (see `Edge::ped_sides`).
+    pub fn sidewalk_sides(&self, eid: u32, near: &mut Vec<u32>) -> u8 {
+        let e = &self.edges[eid as usize];
+        if !e.alive || !e.ped_ok {
+            return 0;
+        }
+        let one_way = e.lanes_b == 0;
+        let mut sides = 0u8;
+        for (bit, side) in [(1u8, 1.0f32), (2u8, -1.0f32)] {
+            if e.ped_tag & bit == 0 {
+                continue;
+            }
+            let mut bad = 0;
+            let mut n = 0;
+            for k in 0..5 {
+                let s = e.len * (0.1 + 0.2 * k as f32);
+                let q = self.edge_pose(e, s, side * e.ped_off, false);
+                n += 1;
+                self.edges_near(q.x, q.y, 16.0, near);
+                for &o in near.iter() {
+                    if o == eid {
+                        continue;
+                    }
+                    let oe = &self.edges[o as usize];
+                    if !oe.alive || oe.class > 5 || oe.flags & (FLAG_TUNNEL | 2) != 0 {
+                        continue;
+                    }
+                    // cross streets meeting this edge at its ends are crossed at corners
+                    if oe.from == e.from || oe.from == e.to || oe.to == e.from || oe.to == e.to {
+                        continue;
+                    }
+                    let (so, lat, _, _) = self.project_on_edge(o, q.x, q.y);
+                    if so > 1.0 && so < oe.len - 1.0 && lat.abs() < oe.half_w + 0.6 {
+                        bad += 1;
+                        break;
+                    }
+                }
+            }
+            if bad * 3 >= n {
+                continue; // mostly inside another carriageway
+            }
+            // dual carriageway: no sidewalk in the median between the two one-way halves
+            if one_way && e.class <= 4 {
+                let m = self.edge_pose(e, e.len * 0.5, 0.0, false);
+                let (rx, ry) = (m.h.sin(), -m.h.cos()); // right normal
+                self.edges_near(m.x, m.y, 45.0, near);
+                let mut median = false;
+                for &o in near.iter() {
+                    let oe = &self.edges[o as usize];
+                    if o == eid || !oe.alive || oe.lanes_b != 0 || oe.class > 4 {
+                        continue;
+                    }
+                    let (so, _, _, ho) = self.project_on_edge(o, m.x, m.y);
+                    if so <= 0.5 || so >= oe.len - 0.5 || (wrap_pi(ho - m.h)).abs() < 2.6 {
+                        continue;
+                    }
+                    let p = self.edge_pose(oe, so, 0.0, false);
+                    let (dx, dy) = ((p.x - m.x) as f32, (p.y - m.y) as f32);
+                    let lat = dx * rx + dy * ry;
+                    let along = dx * m.h.cos() + dy * m.h.sin();
+                    if lat * side > 0.0 && lat.abs() < 45.0 && along.abs() < 20.0 {
+                        median = true;
+                        break;
+                    }
+                }
+                if median {
+                    continue;
+                }
+            }
+            sides |= bit;
+        }
+        sides
     }
 
     pub fn remove_tile(&mut self, tx: i32, ty: i32) {
@@ -554,6 +690,23 @@ impl Graph {
         self.edge_pose(e, se, if l.rev { -lat } else { lat }, l.rev)
     }
 
+    /// Position on a link at `s` with lateral offset `lat` (right of travel) — no trig.
+    #[inline]
+    pub fn link_xyz(&self, link: u32, s: f32, lat: f32) -> (f64, f64, f32) {
+        let l = &self.links[link as usize];
+        let e = &self.edges[l.edge as usize];
+        let se = if l.rev { e.len - s } else { s }.clamp(0.0, e.len);
+        let lat = if l.rev { -lat } else { lat };
+        let k = seg_index(&e.cum, se);
+        let (a, b) = (e.pts[k], e.pts[k + 1]);
+        let sl = e.cum[k + 1] - e.cum[k];
+        let t = if sl > 1e-6 { ((se - e.cum[k]) / sl).clamp(0.0, 1.0) } else { 0.0 } as f64;
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let h = dx.hypot(dy);
+        let (nx, ny) = if h > 1e-9 { (dy / h, -dx / h) } else { (0.0, 0.0) };
+        (a[0] + dx * t + nx * lat as f64, a[1] + dy * t + ny * lat as f64, (a[2] + (b[2] - a[2]) * t) as f32)
+    }
+
     /// Pose on an edge at `s` (from the edge start) with lateral offset right of from→to.
     pub fn edge_pose(&self, e: &Edge, s: f32, lat: f32, rev: bool) -> Pose {
         let k = seg_index(&e.cum, s);
@@ -594,7 +747,41 @@ impl Graph {
             }
         }
         for &i in &dirty {
+            self.refresh_zone(i);
+        }
+        for &i in &dirty {
             self.nodes[i as usize].dirty = false;
+        }
+    }
+
+    /// Group controlled nodes connected by links shorter than ZONE_LINK into one zone.
+    fn refresh_zone(&mut self, seed: u32) {
+        const ZONE_LINK: f32 = 25.0;
+        if !self.nodes[seed as usize].alive {
+            return;
+        }
+        let mut comp = vec![seed];
+        let mut k = 0;
+        while k < comp.len() && comp.len() < 12 {
+            let n = comp[k];
+            k += 1;
+            if self.nodes[n as usize].control == Control::Free {
+                continue;
+            }
+            for &e in &self.nodes[n as usize].edges {
+                let ed = &self.edges[e as usize];
+                if !ed.alive || ed.len > ZONE_LINK {
+                    continue;
+                }
+                let o = if ed.from == n { ed.to } else { ed.from };
+                if self.nodes[o as usize].control != Control::Free && !comp.contains(&o) {
+                    comp.push(o);
+                }
+            }
+        }
+        let root = *comp.iter().min_by_key(|&&n| self.nodes[n as usize].osm).unwrap();
+        for n in comp {
+            self.nodes[n as usize].zone = root;
         }
     }
 
@@ -633,12 +820,13 @@ impl Graph {
         } else {
             Control::Free
         };
+        n.ped_trim = if deg >= 3 { max_ped.min(20.0) } else { 0.0 };
+        // stop line just before the crosswalk (crosswalk centre at ped_trim)
         n.setback = match n.control {
             Control::Free => 0.0,
             _ if deg <= 2 => 3.0,
-            _ => (max_hw + 1.2).clamp(3.0, 16.0),
+            _ => (max_hw + 1.2).max(n.ped_trim + 2.2).clamp(3.0, 22.0),
         };
-        n.ped_trim = if deg >= 3 { max_ped.min(20.0) } else { 0.0 };
     }
 
     fn signals_near(&self, x: f64, y: f64) -> Vec<u32> {
@@ -703,6 +891,39 @@ impl Graph {
         let green_b = if has_cross { 22.0 + 6.0 * hash01(key ^ 0x55) } else { 12.0 };
         let plan = SignalPlan { offset: (mix(key) % 997) as f32, axis, green_a, green_b };
         self.nodes[i as usize].plan = plan;
+    }
+}
+
+impl Graph {
+    /// Stop-line records of signalised approaches within `r` of (x, y):
+    /// [dx, dy, bearing, half width, light (0 green, 1 amber, 2 red)] relative to (ox, oy).
+    pub fn signal_approaches(&self, x: f64, y: f64, r: f64, tod: f64, ox: f64, oy: f64, out: &mut Vec<f32>) {
+        let r2 = r * r;
+        for cellv in self.signal_grid.values() {
+            for &ni in cellv {
+                let n = &self.nodes[ni as usize];
+                if !n.alive || n.control != Control::Signal || (n.x - x).powi(2) + (n.y - y).powi(2) > r2 {
+                    continue;
+                }
+                for &li in &n.ins {
+                    let l = &self.links[li as usize];
+                    if !l.alive {
+                        continue;
+                    }
+                    let sb = n.setback.min(l.len * 0.45);
+                    let a = self.lane_offset(l, 0);
+                    let b = self.lane_offset(l, l.lanes - 1);
+                    let p = self.link_pose(li, l.len - sb, (a + b) * 0.5);
+                    let hw = (a - b).abs() * 0.5 + LANE_W * 0.5 + 0.5;
+                    let light = match n.plan.light_for(tod, l.bearing_end) {
+                        crate::signal::Light::Green => 0.0,
+                        crate::signal::Light::Amber => 1.0,
+                        crate::signal::Light::Red => 2.0,
+                    };
+                    out.extend_from_slice(&[(p.x - ox) as f32, (p.y - oy) as f32, l.bearing_end, hw, light]);
+                }
+            }
+        }
     }
 }
 
@@ -775,6 +996,8 @@ pub mod tests {
             e_speed: &speed,
             e_flags: &ef,
             bottleneck: &bn,
+            e_width: &[],
+            e_side: &[],
         });
     }
 

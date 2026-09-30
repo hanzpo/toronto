@@ -2,44 +2,77 @@
 // SharedArrayBuffer) rendered with instancing, the region-wide congestion
 // overlay (statistical tier), and a player-drivable car.
 //
+// Ground contact: agents sit on the *rendered* terrain (GroundSampler) unless
+// the sim flags them as on a bridge / in a tunnel, where the graph elevation is
+// used; cars pitch and roll with the surface under their wheels.
+//
+// Interop (window.__traffic):
+//   queryAhead(e, n, heading, lookahead, halfWidth)  distance to the nearest car in a corridor
+//   signalAhead(e, n, heading, lookahead)             distance to a red/amber stop line
+// Surface transit (window.__transit.groundVehicles) is fed to the sim every
+// tick as moving obstacles; the sim's signal states drive window.__street.
+//
 // Headings in this API are radians counter-clockwise from +E (east).
 import * as THREE from 'three/webgpu';
-import { attribute, cos, float, mix, mod, sin, step, vec3, positionLocal, abs as tslAbs } from 'three/tsl';
+import { attribute, clamp, cos, dot, float, floor, fract, mix, mod, normalView, positionGeometry, positionLocal, positionViewDirection, pow, sin, step, vec3, abs as tslAbs } from 'three/tsl';
 import type { Engine } from '../engine/Engine';
 import type { FrameContext, Layer } from '../engine/types';
 import { U } from '../render/uniforms';
 import { clock } from '../state/clock';
 import { useApp } from '../state/store';
 import {
-  CAR_FLAG, CAR_STRIDE, H, HEADER_BYTES, HF, MAX_CARS, MAX_PEDS, PED_STRIDE, SAB_BYTES, SLOT_BYTES, SLOT_HEADER,
-  type FromWorker, type TickMsg, type ToWorker,
+  CAR_FLAG, CAR_STRIDE, H, HEADER_BYTES, HF, MAX_CARS, MAX_PEDS, OB_FLAG, OB_STRIDE, PED_STRIDE, SAB_BYTES, SIG_OFFSET, SIG_STRIDE,
+  SLOT_BYTES, SLOT_HEADER, type FromWorker, type TickMsg, type ToWorker,
 } from '../sim/protocol';
-import { carGeometries, carPalette, pedestrianGeometry, shirtPalette } from './traffic/models';
+import { CAR_LENGTH, carPalette, carVariantsForKind, pedestrianGeometries, shirtPalette, type CarVariant } from './traffic/models';
 import { CongestionOverlay } from './traffic/congestion';
+import { GroundSampler } from './traffic/ground';
 
 export interface PlayerInput { throttle: number; brake: number; steer: number; handbrake: boolean }
 export interface PlayerState { e: number; n: number; elev: number; heading: number; speed: number; pitch: number; onRoad: boolean; roadName: string | null; carId: number }
 export interface TrafficStats { cars: number; peds: number; targetCars: number; targetPeds: number; stepMs: number; stepAvgMs: number; fillMs: number; substeps: number; tiles: number; pendingTiles: number; fast: boolean }
 
 /** anything exposing transit stop positions (TransitLayer) */
-interface StopSource { system: { stops(): { x: Float64Array; y: Float64Array; z: Float32Array }; stopCount?: number } }
+interface StopSource {
+  system: { stops(opts?: { modes?: string[] }): { x: Float64Array; y: Float64Array; z: Float32Array }; stopCount?: number };
+  groundVehicles?(out: GroundVeh[]): number;
+}
+interface GroundVeh { e: number; n: number; heading: number; length: number; width: number; speed: number; trip: number; doorsOpen?: boolean; rail?: boolean }
+/** StreetLayer's signal-head hook (window.__street) */
+interface StreetSignals {
+  setSignal(junctionOsmId: number, armAngle: number | null, state: 0 | 1 | 2): void;
+  listSignals(): { junction: number; armAngle: number; e: number; n: number }[];
+}
 
 const HIDE_ALTITUDE = 6000;
 const KINDS = 6;
 const DRIVE_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space']);
+/** body half widths per kind (m), matching the sim */
+const HALF_W = [0.92, 0.9, 0.98, 1.01, 1.0, 1.25];
+/** road surface above the terrain (roads.ts lift ≈ 0.03 + (9 − class)·0.004) */
+const ROAD_LIFT = 0.06;
+/** raised sidewalk top above the terrain at the curb (lift + 15 cm curb) */
+const WALK_LIFT = 0.2;
+/** detailed ground contact (pitch / roll from 4 samples) within this range of the camera */
+const NEAR_GROUND = 700;
+const AMBER = 4, ALL_RED = 2;
 
 class Pool {
   mesh: THREE.InstancedMesh;
+  /** rgb tint + flags (WebGPU allows only 8 vertex buffers: attributes are packed) */
   col: THREE.InstancedBufferAttribute;
-  extra: THREE.InstancedBufferAttribute;
+  extra: THREE.InstancedBufferAttribute | null;
   count = 0;
-  constructor(geom: THREE.BufferGeometry, mat: THREE.Material, cap: number, extraSize: number, extraName: string, parent: THREE.Object3D, name: string) {
-    this.col = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
-    this.extra = new THREE.InstancedBufferAttribute(new Float32Array(cap * extraSize), extraSize);
+  constructor(geom: THREE.BufferGeometry, mat: THREE.Material, cap: number, parent: THREE.Object3D, name: string, extra = 0) {
+    this.col = new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4);
     this.col.setUsage(THREE.DynamicDrawUsage);
-    this.extra.setUsage(THREE.DynamicDrawUsage);
-    geom.setAttribute('iCol', this.col);
-    geom.setAttribute(extraName, this.extra);
+    geom.setAttribute('iColF', this.col);
+    this.extra = null;
+    if (extra) {
+      this.extra = new THREE.InstancedBufferAttribute(new Float32Array(cap * extra), extra);
+      this.extra.setUsage(THREE.DynamicDrawUsage);
+      geom.setAttribute('iAnim', this.extra);
+    }
     this.mesh = new THREE.InstancedMesh(geom, mat, cap);
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.mesh.count = 0;
@@ -54,45 +87,123 @@ class Pool {
     if (!this.count) return;
     const im = this.mesh.instanceMatrix;
     im.clearUpdateRanges(); im.addUpdateRange(0, this.count * 16); im.needsUpdate = true;
-    this.col.clearUpdateRanges(); this.col.addUpdateRange(0, this.count * 3); this.col.needsUpdate = true;
-    this.extra.clearUpdateRanges(); this.extra.addUpdateRange(0, this.count * this.extra.itemSize); this.extra.needsUpdate = true;
+    this.col.clearUpdateRanges(); this.col.addUpdateRange(0, this.count * 4); this.col.needsUpdate = true;
+    if (this.extra) { this.extra.clearUpdateRanges(); this.extra.addUpdateRange(0, this.count * this.extra.itemSize); this.extra.needsUpdate = true; }
   }
 }
 
-function carMaterial(): THREE.MeshLambertNodeMaterial {
-  const m = new THREE.MeshLambertNodeMaterial();
+/** Copy of a model geometry with the per-vertex tags packed into one vec4 (livery, lamp, sign, glass). */
+function packCar(g: THREE.BufferGeometry): THREE.BufferGeometry {
+  const c = new THREE.BufferGeometry();
+  const n = g.attributes.position.count;
+  c.setAttribute('position', g.attributes.position);
+  c.setAttribute('normal', g.attributes.normal);
+  c.setAttribute('color', g.attributes.color);
+  const tags = new Float32Array(n * 4);
+  (['livery', 'lamp', 'sign', 'glass'] as const).forEach((k, j) => {
+    const a = (g.attributes[k] ?? (k === 'livery' ? g.attributes.tint : undefined)) as THREE.BufferAttribute | undefined;
+    if (a) for (let i = 0; i < n; i++) tags[i * 4 + j] = a.getX(i);
+  });
+  c.setAttribute('tags', new THREE.BufferAttribute(tags, 4));
+  if (g.index) c.setIndex(g.index);
+  c.computeBoundingSphere();
+  return c;
+}
+
+/** Pedestrian geometry with (tint, limb, pivot) packed into one vec3. */
+function packPed(g: THREE.BufferGeometry): THREE.BufferGeometry {
+  const c = new THREE.BufferGeometry();
+  const n = g.attributes.position.count;
+  c.setAttribute('position', g.attributes.position);
+  c.setAttribute('normal', g.attributes.normal);
+  c.setAttribute('color', g.attributes.color);
+  const t = new Float32Array(n * 3);
+  (['tint', 'limb', 'pivot'] as const).forEach((k, j) => {
+    const a = (g.attributes[k] ?? (k === 'tint' ? g.attributes.livery : undefined)) as THREE.BufferAttribute | undefined;
+    if (a) for (let i = 0; i < n; i++) t[i * 3 + j] = a.getX(i);
+  });
+  c.setAttribute('tlp', new THREE.BufferAttribute(t, 3));
+  if (g.index) c.setIndex(g.index);
+  c.computeBoundingSphere();
+  return c;
+}
+
+/**
+ * Vehicle shading of models/material.ts (vehicleMaterial) reading the packed
+ * `tags` / `iColF` attributes. Instance flags: 1 brake, 4 / 8 indicators, 16 headlights.
+ */
+function carMaterial(): THREE.MeshStandardNodeMaterial {
+  const m = new THREE.MeshStandardNodeMaterial({ roughness: 0.5, metalness: 0.05 });
   m.name = 'traffic-cars';
   const vc = attribute('color', 'vec3');
-  const tint = attribute('tint', 'float');
-  const lamp = attribute('lamp', 'float');
-  const iCol = attribute('iCol', 'vec3');
-  const iFlags = attribute('iFlags', 'float');
-  m.colorNode = mix(vc, vc.mul(iCol), tint);
-  const brake = mod(iFlags, 2);
-  const head = step(0.5, lamp).mul(step(lamp, 1.5));
-  const tail = step(1.5, lamp);
+  const tags = attribute('tags', 'vec4');
+  const inst = attribute('iColF', 'vec4');
+  const liv = tags.x, lamp = tags.y, sign = tags.z, glass = tags.w;
+  const flags = inst.w;
+  const bit = (v: number) => step(0.5, mod(floor(flags.div(v)), 2));
+  const is = (k: number) => step(k - 0.5, lamp).mul(step(lamp, k + 0.5));
   const night = U.night;
-  (m as unknown as { emissiveNode: unknown }).emissiveNode = vec3(1.0, 0.9, 0.7).mul(head).mul(night.mul(3.0))
-    .add(vec3(1.0, 0.05, 0.02).mul(tail).mul(night.mul(1.2).add(brake.mul(2.2))));
+  const blink = step(0.5, fract(U.time.mul(1.5)));
+  const head = is(1).mul(float(0.25).add(night.mul(2.8)).add(bit(16).mul(1.5)));
+  const tail = is(2).mul(night.mul(1.1).add(bit(1).mul(2.4)));
+  const ind = is(3).mul(bit(4)).add(is(4).mul(bit(8))).mul(blink).mul(2.5);
+  const emissive = vec3(1.0, 0.93, 0.78).mul(head)
+    .add(vec3(1.0, 0.06, 0.03).mul(tail))
+    .add(vec3(1.0, 0.5, 0.05).mul(ind))
+    .add(vec3(1.0, 0.62, 0.12).mul(sign.mul(float(0.3).add(night.mul(1.4)))));
+  const f = pow(float(1).sub(clamp(dot(normalView, positionViewDirection), 0, 1)), 3);
+  const sky = mix(U.skyHorizon, U.skyZenith, 0.35);
+  const refl = sky.mul(glass).mul(f.mul(0.32).add(0.03)).mul(float(1).sub(night.mul(0.85)));
+  m.colorNode = vc.mul(mix(vec3(1, 1, 1), inst.xyz, liv));
+  m.roughnessNode = mix(float(0.5), float(0.08), glass);
+  m.metalnessNode = mix(float(0.12), float(0.0), glass);
+  m.emissiveNode = emissive.add(refl);
   return m;
 }
 
-function pedMaterial(): THREE.MeshLambertNodeMaterial {
-  const m = new THREE.MeshLambertNodeMaterial();
+/** Pedestrians: clothing tint + limb walk cycle (models/traffic pedestrianWalkNode, packed attributes). */
+function pedMaterial(): THREE.MeshStandardNodeMaterial {
+  const m = new THREE.MeshStandardNodeMaterial({ roughness: 0.85, metalness: 0 });
   m.name = 'traffic-peds';
   const vc = attribute('color', 'vec3');
-  const tint = attribute('tint', 'float');
-  const iCol = attribute('iCol', 'vec3');
-  const anim = attribute('iAnim', 'vec3'); // phase, heading, moving
-  const swing = attribute('swing', 'float');
-  m.colorNode = mix(vc, vc.mul(iCol), tint);
-  // limb swing along the walking direction + a small bob (instanced space)
-  const s = sin(anim.x);
-  const fwd = vec3(cos(anim.y), float(0), sin(anim.y).negate());
-  const off = fwd.mul(swing.mul(s).mul(0.28).mul(anim.z));
-  const bob = tslAbs(s).mul(0.035).mul(anim.z);
-  m.positionNode = positionLocal.add(off).add(vec3(0, bob, 0));
+  const tlp = attribute('tlp', 'vec3');
+  const inst = attribute('iColF', 'vec4');
+  const a = attribute('iAnim', 'vec3'); // phase, heading (unused), moving
+  m.colorNode = vc.mul(mix(vec3(1, 1, 1), inst.xyz, tlp.x));
+  const limb = tlp.y, pivot = tlp.z;
+  // limb rotation about the shoulder / hip pivot, computed in model space and
+  // added to the (already instanced) positionLocal, rotated by the heading
+  const p = positionGeometry;
+  const s = sin(a.x).mul(a.z);
+  const isL = (k: number) => float(1).sub(tslAbs(limb.sub(k)).min(1));
+  const ang = s.mul(isL(3).mul(0.45).sub(isL(4).mul(0.45)).sub(isL(1).mul(0.35)).add(isL(2).mul(0.35)));
+  const dy = p.y.sub(pivot);
+  const c = cos(ang), sn = sin(ang);
+  const limbMask = limb.min(1);
+  const ddx = p.x.mul(c).sub(dy.mul(sn)).sub(p.x).mul(limbMask);
+  const ddy = pivot.add(p.x.mul(sn)).add(dy.mul(c)).sub(p.y).mul(limbMask).add(tslAbs(sin(a.x)).mul(0.03).mul(a.z));
+  const hc = cos(a.y), hs = sin(a.y);
+  m.positionNode = positionLocal.add(vec3(ddx.mul(hc), ddy, ddx.mul(hs).negate()));
   return m;
+}
+
+/** integer hash → [0, 1) */
+function hash01(x: number): number {
+  let h = Math.imul(x ^ 0x9e3779b9, 0x85ebca6b);
+  h ^= h >>> 13; h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+
+/** light of a fixed-time plan (sim/src/signal.rs): 0 green · 1 amber · 2 red */
+function planLight(p: Float64Array, o: number, tod: number, bearing: number): number {
+  const offset = p[o + 3], axis = p[o + 4], ga = p[o + 5], gb = p[o + 6];
+  let d = (bearing - axis) % Math.PI; if (d < 0) d += Math.PI;
+  const phase = Math.min(d, Math.PI - d) <= Math.PI / 4 ? 0 : 1;
+  const cyc = ga + gb + 2 * (AMBER + ALL_RED);
+  let u = (tod + offset) % cyc; if (u < 0) u += cyc;
+  const [start, green] = phase === 0 ? [0, ga] : [ga + AMBER + ALL_RED, gb];
+  const x = u - start;
+  return x >= 0 && x < green ? 0 : x >= green && x < green + AMBER ? 1 : 2;
 }
 
 export class TrafficLayer implements Layer {
@@ -110,8 +221,12 @@ export class TrafficLayer implements Layer {
   private hf!: Float64Array;
   private ready = false;
   private group = new THREE.Group();
+  /** car pools per model variant; kindVariants[kind] = pool indices */
   private cars: Pool[] = [];
-  private peds!: Pool;
+  private variants: CarVariant[] = [];
+  private kindVariants: number[][] = [];
+  private peds: Pool[] = [];
+  private ground!: GroundSampler;
   private ticksSent = 0;
   private stopsCount = 0;
   private stopsAt = -1e9;
@@ -119,6 +234,25 @@ export class TrafficLayer implements Layer {
   private accReal = 0;
   private stopSource: StopSource | null;
   private congestion: CongestionOverlay | null = null;
+  /** smoothed elevation offsets (bridge ends / LOD changes) per car id */
+  private zoff = new Map<number, number>();
+  private zoffNext = new Map<number, number>();
+  // transit obstacles
+  private gv: GroundVeh[] = [];
+  // queries
+  private qSeq = -1;
+  private qCars = { e: new Float64Array(0), n: new Float64Array(0), h: new Float32Array(0), hl: new Float32Array(0), hw: new Float32Array(0), count: 0 };
+  private qGrid = new Map<number, number[]>();
+  private sSeq = -1;
+  private sGrid = new Map<number, number[]>();
+  private sig = { e: new Float64Array(0), n: new Float64Array(0), b: new Float32Array(0), hw: new Float32Array(0), light: new Uint8Array(0), count: 0 };
+  // signal heads (StreetLayer)
+  private plans: Float64Array = new Float64Array(0);
+  private planIndex = new Map<number, number>();
+  private streetList: { junction: number; armAngle: number; e: number; n: number; plan: number }[] = [];
+  private streetListAt = -1e9;
+  private streetStates = new Map<string, number>();
+  private streetAt = -1e9;
   // player
   private playerActive = false;
   private roadName: string | null = null;
@@ -135,13 +269,25 @@ export class TrafficLayer implements Layer {
 
   async init(engine: Engine) {
     this.engine = engine;
+    this.ground = new GroundSampler(engine.tiles);
     this.group.name = 'traffic';
     engine.scene.add(this.group);
-    const geoms = carGeometries();
     const cm = carMaterial();
-    for (let k = 0; k < KINDS; k++) this.cars.push(new Pool(geoms[k], cm, MAX_CARS, 1, 'iFlags', this.group, `cars-${k}`));
-    this.peds = new Pool(pedestrianGeometry(), pedMaterial(), MAX_PEDS, 3, 'iAnim', this.group, 'pedestrians');
-    this.peds.mesh.castShadow = false;
+    for (let k = 0; k < KINDS; k++) {
+      const idx: number[] = [];
+      for (const v of carVariantsForKind(k)) {
+        idx.push(this.cars.length);
+        this.variants.push(v);
+        this.cars.push(new Pool(packCar(v.geometry()), cm, MAX_CARS, this.group, `cars-${v.key}`));
+      }
+      this.kindVariants.push(idx);
+    }
+    const pm = pedMaterial();
+    for (const [i, g] of pedestrianGeometries().entries()) {
+      const p = new Pool(packPed(g), pm, MAX_PEDS, this.group, `pedestrians-${i}`, 3);
+      p.mesh.castShadow = false;
+      this.peds.push(p);
+    }
     this.congestion = new CongestionOverlay(engine);
     this.congestion.bind((m) => this.post(m));
 
@@ -180,6 +326,12 @@ export class TrafficLayer implements Layer {
         break;
       case 'majorsGeom': this.congestion?.setGeometry(m); break;
       case 'majorsRatio': this.congestion?.setRatios(m.ratio); break;
+      case 'plans':
+        this.plans = m.plans;
+        this.planIndex.clear();
+        for (let i = 0; i < m.plans.length; i += 7) this.planIndex.set(m.plans[i], i);
+        this.streetListAt = -1e9; // re-match signal heads
+        break;
     }
   }
 
@@ -250,9 +402,80 @@ export class TrafficLayer implements Layer {
     const { f, u, count, oe, on } = snap;
     for (let i = 0; i < count; i++) {
       const o = i * CAR_STRIDE;
-      if (u[o + 7] === id) return { e: f[o] + oe, n: f[o + 1] + on, elev: f[o + 2], heading: f[o + 3], speed: f[o + 5] };
+      if (u[o + 7] === id) {
+        const e = f[o] + oe, n = f[o + 1] + on;
+        const g = this.ground?.at(e, n);
+        const elev = (u[o + 6] >>> 24) & 8 || !Number.isFinite(g) ? f[o + 2] : g + ROAD_LIFT;
+        return { e, n, elev, heading: f[o + 3], speed: f[o + 5] };
+      }
     }
     return null;
+  }
+
+  /**
+   * Distance (m) from (e, n) along `heading` to the nearest car whose body
+   * intersects the corridor [0, lookahead] × [−halfWidth, halfWidth], or null.
+   * Uses the latest sim snapshot (extrapolated to now).
+   */
+  queryAhead(e: number, n: number, heading: number, lookahead: number, halfWidth: number): number | null {
+    const q = this.carGrid();
+    if (!q || !q.count) return null;
+    const c = Math.cos(heading), s = Math.sin(heading);
+    const CELL = 20;
+    const ex = e + c * lookahead, ny = n + s * lookahead;
+    const pad = halfWidth + 6;
+    const x0 = Math.floor((Math.min(e, ex) - pad) / CELL), x1 = Math.floor((Math.max(e, ex) + pad) / CELL);
+    const y0 = Math.floor((Math.min(n, ny) - pad) / CELL), y1 = Math.floor((Math.max(n, ny) + pad) / CELL);
+    let best: number | null = null;
+    for (let gx = x0; gx <= x1; gx++) {
+      for (let gy = y0; gy <= y1; gy++) {
+        const list = this.qGrid.get(gx * 100003 + gy);
+        if (!list) continue;
+        for (const i of list) {
+          const dx = q.e[i] - e, dy = q.n[i] - n;
+          const a = dx * c + dy * s, b = -dx * s + dy * c;
+          // extent of the car's box along / across the corridor
+          const rc = Math.cos(q.h[i] - heading), rs = Math.sin(q.h[i] - heading);
+          const ea = Math.abs(rc) * q.hl[i] + Math.abs(rs) * q.hw[i];
+          const eb = Math.abs(rs) * q.hl[i] + Math.abs(rc) * q.hw[i];
+          if (a + ea < 0 || a - ea > lookahead || Math.abs(b) - eb > halfWidth) continue;
+          const d = Math.max(0, a - ea);
+          if (best === null || d < best) best = d;
+        }
+      }
+    }
+    return best;
+  }
+
+  /**
+   * Distance (m) from (e, n) along `heading` to the stop line of a signalised
+   * approach travelled in that direction whose light is red or amber, or null.
+   */
+  signalAhead(e: number, n: number, heading: number, lookahead: number): number | null {
+    const sg = this.signalGrid();
+    if (!sg || !sg.count) return null;
+    const c = Math.cos(heading), s = Math.sin(heading);
+    const CELL = 50;
+    const ex = e + c * lookahead, ny = n + s * lookahead;
+    const x0 = Math.floor((Math.min(e, ex) - 20) / CELL), x1 = Math.floor((Math.max(e, ex) + 20) / CELL);
+    const y0 = Math.floor((Math.min(n, ny) - 20) / CELL), y1 = Math.floor((Math.max(n, ny) + 20) / CELL);
+    let best: number | null = null;
+    for (let gx = x0; gx <= x1; gx++) {
+      for (let gy = y0; gy <= y1; gy++) {
+        const list = this.sGrid.get(gx * 100003 + gy);
+        if (!list) continue;
+        for (const i of list) {
+          if (sg.light[i] === 0) continue;
+          const db = Math.abs(Math.atan2(Math.sin(sg.b[i] - heading), Math.cos(sg.b[i] - heading)));
+          if (db > 0.6) continue;
+          const dx = sg.e[i] - e, dy = sg.n[i] - n;
+          const a = dx * c + dy * s, b = -dx * s + dy * c;
+          if (a < 0 || a > lookahead || Math.abs(b) > sg.hw[i] + 1.5) continue;
+          if (best === null || a < best) best = a;
+        }
+      }
+    }
+    return best;
   }
 
   stats(): TrafficStats {
@@ -325,22 +548,97 @@ export class TrafficLayer implements Layer {
     i.handbrake = k.has('Space');
   }
 
-  private snapshot() {
+  /** Latest published snapshot (views into the shared buffer). */
+  snapshot() {
     if (!this.hdr) return null;
     const slot = Atomics.load(this.hdr, H.SLOT);
     const seq = Atomics.load(this.hdr, H.SEQ);
     if (seq === 0) return null;
     const base = HEADER_BYTES + slot * SLOT_BYTES;
-    const si = new Int32Array(this.sab, base, 2);
+    const si = new Int32Array(this.sab, base, 10);
     const sf = new Float64Array(this.sab, base, 4);
-    const count = si[0], pedCount = si[1];
+    const count = si[0], pedCount = si[1], sigCount = si[8];
     return {
-      seq, count, pedCount, oe: sf[1], on: sf[2], simMs: sf[3],
+      seq, count, pedCount, sigCount, oe: sf[1], on: sf[2], simMs: sf[3],
       f: new Float32Array(this.sab, base + SLOT_HEADER, count * CAR_STRIDE),
       u: new Uint32Array(this.sab, base + SLOT_HEADER, count * CAR_STRIDE),
       pf: new Float32Array(this.sab, base + SLOT_HEADER + MAX_CARS * CAR_STRIDE * 4, pedCount * PED_STRIDE),
       pu: new Uint32Array(this.sab, base + SLOT_HEADER + MAX_CARS * CAR_STRIDE * 4, pedCount * PED_STRIDE),
+      sg: new Float32Array(this.sab, base + SIG_OFFSET, sigCount * SIG_STRIDE),
     };
+  }
+
+  /** spatial hash of the latest car bodies (rebuilt once per snapshot) */
+  private carGrid() {
+    const snap = this.snapshot();
+    if (!snap) return null;
+    if (snap.seq === this.qSeq) return this.qCars;
+    this.qSeq = snap.seq;
+    const q = this.qCars;
+    const { f, u, count, oe, on } = snap;
+    if (q.e.length < count) {
+      const cap = Math.max(count, 1024) * 2;
+      q.e = new Float64Array(cap); q.n = new Float64Array(cap); q.h = new Float32Array(cap); q.hl = new Float32Array(cap); q.hw = new Float32Array(cap);
+    }
+    const dtx = THREE.MathUtils.clamp((clock.simMs - snap.simMs) / 1000, 0, 0.12);
+    this.qGrid.clear();
+    for (let i = 0; i < count; i++) {
+      const o = i * CAR_STRIDE;
+      const kind = u[o + 6] & 0xff;
+      const h = f[o + 3], adv = f[o + 5] * dtx;
+      q.e[i] = f[o] + oe + Math.cos(h) * adv;
+      q.n[i] = f[o + 1] + on + Math.sin(h) * adv;
+      q.h[i] = h;
+      q.hl[i] = (CAR_LENGTH[kind] ?? 4.7) / 2;
+      q.hw[i] = HALF_W[kind] ?? 0.95;
+      const k = Math.floor(q.e[i] / 20) * 100003 + Math.floor(q.n[i] / 20);
+      const l = this.qGrid.get(k);
+      if (l) l.push(i); else this.qGrid.set(k, [i]);
+    }
+    q.count = count;
+    return q;
+  }
+
+  private signalGrid() {
+    const snap = this.snapshot();
+    if (!snap) return null;
+    if (snap.seq === this.sSeq) return this.sig;
+    this.sSeq = snap.seq;
+    const s = this.sig;
+    const { sg, sigCount, oe, on } = snap;
+    if (s.e.length < sigCount) {
+      const cap = sigCount * 2;
+      s.e = new Float64Array(cap); s.n = new Float64Array(cap); s.b = new Float32Array(cap); s.hw = new Float32Array(cap); s.light = new Uint8Array(cap);
+    }
+    this.sGrid.clear();
+    for (let i = 0; i < sigCount; i++) {
+      const o = i * SIG_STRIDE;
+      s.e[i] = sg[o] + oe; s.n[i] = sg[o + 1] + on; s.b[i] = sg[o + 2]; s.hw[i] = sg[o + 3]; s.light[i] = sg[o + 4];
+      const k = Math.floor(s.e[i] / 50) * 100003 + Math.floor(s.n[i] / 50);
+      const l = this.sGrid.get(k);
+      if (l) l.push(i); else this.sGrid.set(k, [i]);
+    }
+    s.count = sigCount;
+    return s;
+  }
+
+  /** surface transit near the focus → obstacle records for the sim */
+  private transitObstacles(): Float64Array | undefined {
+    const src = ((window as unknown as { __transit?: StopSource }).__transit ?? this.stopSource) as StopSource | null;
+    if (!src || typeof src.groundVehicles !== 'function') return undefined;
+    let n = 0;
+    try { n = src.groundVehicles(this.gv); } catch { return undefined; }
+    if (typeof n !== 'number') n = this.gv.length;
+    n = Math.min(n, this.gv.length, 2000);
+    const out = new Float64Array(n * OB_STRIDE);
+    for (let i = 0; i < n; i++) {
+      const g = this.gv[i], o = i * OB_STRIDE;
+      out[o] = g.e; out[o + 1] = g.n; out[o + 2] = g.heading; out[o + 3] = g.length; out[o + 4] = g.width; out[o + 5] = g.speed;
+      let fl = g.rail || g.length > 20 ? OB_FLAG.RAIL : 0;
+      if (g.doorsOpen !== undefined) fl |= OB_FLAG.DOORS_KNOWN | (g.doorsOpen ? OB_FLAG.DOORS_OPEN : 0);
+      out[o + 6] = fl;
+    }
+    return out;
   }
 
   private sendTick(ctx: FrameContext, radius: number, pedRadius: number) {
@@ -353,6 +651,9 @@ export class TrafficLayer implements Layer {
       simDt: this.accSim, realDt: this.accReal, focusE, focusN, radius, pedRadius,
       originE: ctx.anchor.origin.x, originN: -ctx.anchor.origin.z,
     };
+    const obst = radius > 0 ? this.transitObstacles() : undefined;
+    const transfer: Transferable[] = [];
+    if (obst) { m.obst = obst; transfer.push(obst.buffer); }
     if (this.playerActive) {
       const i = this.input;
       m.player = {
@@ -360,10 +661,44 @@ export class TrafficLayer implements Layer {
         groundZ: this.engine.heightAt(pl?.e ?? focusE, pl?.n ?? focusN),
       };
     }
-    this.post(m);
+    this.post(m, transfer);
     this.ticksSent++;
     this.accSim = 0;
     this.accReal = 0;
+  }
+
+  /** drive the StreetLayer's signal heads from the sim's plans */
+  private driveStreetSignals(ctx: FrameContext) {
+    const street = (window as unknown as { __street?: StreetSignals }).__street;
+    if (!street || !this.plans.length || ctx.time - this.streetAt < 0.25) return;
+    this.streetAt = ctx.time;
+    if (ctx.time - this.streetListAt > 3) {
+      this.streetListAt = ctx.time;
+      const list = street.listSignals();
+      this.streetList = [];
+      for (const s of list) {
+        let p = this.planIndex.get(s.junction);
+        if (p === undefined) {
+          // signal tagged on an approach node: nearest sim signal within 45 m
+          let bd = 45 * 45;
+          for (let i = 0; i < this.plans.length; i += 7) {
+            const d = (this.plans[i + 1] - s.e) ** 2 + (this.plans[i + 2] - s.n) ** 2;
+            if (d < bd) { bd = d; p = i; }
+          }
+        }
+        if (p !== undefined) this.streetList.push({ ...s, plan: p });
+      }
+    }
+    const tod = clock.parts().secOfDay;
+    for (const s of this.streetList) {
+      // the head on an arm faces traffic arriving along it (travel = arm + π)
+      const light = planLight(this.plans, s.plan, tod, s.armAngle + Math.PI);
+      const st = (2 - light) as 0 | 1 | 2;
+      const k = `${s.junction}:${s.armAngle.toFixed(3)}`;
+      if (this.streetStates.get(k) === st) continue;
+      this.streetStates.set(k, st);
+      street.setSignal(s.junction, s.armAngle, st);
+    }
   }
 
   update(ctx: FrameContext) {
@@ -377,7 +712,8 @@ export class TrafficLayer implements Layer {
     if (this.stopSource && sc > 0 && sc !== this.stopsCount && ctx.time - this.stopsAt > 5) {
       this.stopsCount = sc;
       this.stopsAt = ctx.time;
-      const s = this.stopSource.system.stops();
+      // street-level stops only (subway / rail stations have their own platforms)
+      const s = this.stopSource.system.stops({ modes: ['bus', 'streetcar'] });
       this.setStops(s.x, s.y, s.z);
     }
 
@@ -389,6 +725,7 @@ export class TrafficLayer implements Layer {
     this.accReal += ctx.dt;
     // back-pressure: one tick in flight at a time (sim time accumulates meanwhile)
     if (Atomics.load(this.hdr, H.ACK) >= this.ticksSent) this.sendTick(ctx, radius, pedRadius);
+    if (show && alt < 2500) this.driveStreetSignals(ctx);
 
     if (this.playerActive && this.chaseCamera && this.engine.controls.following) {
       const p = this.getPlayer();
@@ -419,60 +756,118 @@ export class TrafficLayer implements Layer {
     if (!snap) return;
     const ax = ctx.anchor.origin.x, az = ctx.anchor.origin.z;
     this.group.position.set(ax, 0, az);
+    this.ground.begin();
+    const G = this.ground;
+    const camE = ctx.cameraPos.x, camN = -ctx.cameraPos.z;
+    const near2 = NEAR_GROUND * NEAR_GROUND;
+    const night = U.night.value > 0.35 ? CAR_FLAG_HEAD : 0;
+    const kz = Math.min(1, ctx.dt * 4);
     // snapshot origin → anchor-relative
-    const offE = snap.oe - ax, offN = snap.on + az;
     const dtx = THREE.MathUtils.clamp((clock.simMs - snap.simMs) / 1000, 0, 0.12);
-    const { f, u, count } = snap;
+    const { f, u, count, oe, on } = snap;
     for (const p of this.cars) p.count = 0;
+    const prevZ = this.zoff, nextZ = this.zoffNext;
+    nextZ.clear();
     for (let i = 0; i < count; i++) {
       const o = i * CAR_STRIDE;
       const meta = u[o + 6];
       const kind = meta & 0xff;
-      const pool = this.cars[kind < KINDS ? kind : 0];
+      const flags = (meta >>> 16) & 0xff;
+      const gbits = meta >>> 24;
+      const id = u[o + 7];
+      const vars = this.kindVariants[kind < KINDS ? kind : 0];
+      let vi = vars[0];
+      if (vars.length > 1) {
+        const r = hash01(id);
+        // taxis are rare; other alternates split evenly
+        if (this.variants[vars[1]].key === 'taxi') vi = r < 0.04 ? vars[1] : vars[0];
+        else vi = vars[Math.floor(r * vars.length) % vars.length];
+      }
+      const pool = this.cars[vi];
       const k = pool.count++;
-      const h = f[o + 3], p = f[o + 4], v = f[o + 5];
-      const ch = Math.cos(h), sh = Math.sin(h), cp = Math.cos(p), sp = Math.sin(p);
-      const adv = (meta >> 16) & CAR_FLAG.PLAYER ? 0 : v * dtx;
-      const x = f[o] + offE + ch * adv;
-      const y = f[o + 2] + 0.04;
-      const z = -(f[o + 1] + offN + sh * adv);
+      const h = f[o + 3], v = f[o + 5];
+      const ch = Math.cos(h), sh = Math.sin(h);
+      const adv = flags & CAR_FLAG.PLAYER ? 0 : v * dtx;
+      const e = f[o] + oe + ch * adv, n = f[o + 1] + on + sh * adv;
+      const simZ = f[o + 2];
+      const structure = (gbits & 8) !== 0;
+      const len = CAR_LENGTH[kind] ?? 4.7;
+      // ground contact
+      let z: number, pitch = f[o + 4], roll = 0;
+      const d2 = (e - camE) ** 2 + (n - camN) ** 2;
+      const gc = G.at(e, n);
+      if (d2 < near2 && Number.isFinite(gc)) {
+        let target: number;
+        if (structure) {
+          target = simZ + 0.1 - gc;
+        } else {
+          const da = len * 0.32, dw = (HALF_W[kind] ?? 0.95) * 0.85;
+          const zf = G.at(e + ch * da, n + sh * da), zr = G.at(e - ch * da, n - sh * da);
+          const zl = G.at(e - sh * dw, n + ch * dw), zR = G.at(e + sh * dw, n - ch * dw);
+          pitch = Math.atan2(zf - zr, 2 * da);
+          roll = Math.atan2(zR - zl, 2 * dw);
+          target = (zf + zr + zl + zR) * 0.25 - gc + ROAD_LIFT;
+        }
+        const prev = prevZ.get(id);
+        const off = prev === undefined || Math.abs(prev - target) > 6 ? target : prev + (target - prev) * kz;
+        nextZ.set(id, off);
+        z = gc + off;
+      } else {
+        z = structure || !Number.isFinite(gc) ? simZ + (structure ? 0.1 : 0.04) : gc + ROAD_LIFT;
+      }
+      // basis (E, N, U): forward F, right R (rolled), up = R × F
+      const cp = Math.cos(pitch), sp = Math.sin(pitch);
+      const Fx = ch * cp, Fy = sh * cp, Fz = sp;
+      const cr = Math.cos(roll), sr = Math.sin(roll);
+      let Rx = sh * cr, Ry = -ch * cr, Rz = sr;
+      let Ux = Ry * Fz - Rz * Fy, Uy = Rz * Fx - Rx * Fz, Uz = Rx * Fy - Ry * Fx;
+      const ul = Math.hypot(Ux, Uy, Uz) || 1; Ux /= ul; Uy /= ul; Uz /= ul;
+      // re-orthogonalise R = F × U
+      Rx = Fy * Uz - Fz * Uy; Ry = Fz * Ux - Fx * Uz; Rz = Fx * Uy - Fy * Ux;
       const m = pool.mesh.instanceMatrix.array as Float32Array;
       const b = k * 16;
-      // Ry(h) · Rz(p), column-major
-      m[b] = ch * cp; m[b + 1] = sp; m[b + 2] = -sh * cp; m[b + 3] = 0;
-      m[b + 4] = -ch * sp; m[b + 5] = cp; m[b + 6] = sh * sp; m[b + 7] = 0;
-      m[b + 8] = sh; m[b + 9] = 0; m[b + 10] = ch; m[b + 11] = 0;
-      m[b + 12] = x; m[b + 13] = y; m[b + 14] = z; m[b + 15] = 1;
+      // three: (E, U, −N); columns = forward, up, right
+      m[b] = Fx; m[b + 1] = Fz; m[b + 2] = -Fy; m[b + 3] = 0;
+      m[b + 4] = Ux; m[b + 5] = Uz; m[b + 6] = -Uy; m[b + 7] = 0;
+      m[b + 8] = Rx; m[b + 9] = Rz; m[b + 10] = -Ry; m[b + 11] = 0;
+      m[b + 12] = e - ax; m[b + 13] = z; m[b + 14] = -(n) - az; m[b + 15] = 1;
       const c = carPalette[(meta >> 8) & 0xff & 15];
       const ca = pool.col.array as Float32Array;
-      ca[k * 3] = c.r; ca[k * 3 + 1] = c.g; ca[k * 3 + 2] = c.b;
-      (pool.extra.array as Float32Array)[k] = (meta >> 16) & 0xff;
+      ca[k * 4] = c.r; ca[k * 4 + 1] = c.g; ca[k * 4 + 2] = c.b;
+      ca[k * 4 + 3] = (flags & 0x0f) | night;
     }
+    this.zoff = nextZ; this.zoffNext = prevZ;
     for (const p of this.cars) p.commit();
 
     const { pf, pu, pedCount } = snap;
-    const pool = this.peds;
-    pool.count = 0;
-    const m = pool.mesh.instanceMatrix.array as Float32Array;
-    const ca = pool.col.array as Float32Array;
-    const an = pool.extra.array as Float32Array;
+    for (const p of this.peds) p.count = 0;
     for (let i = 0; i < pedCount; i++) {
       const o = i * PED_STRIDE;
+      const meta = pu[o + 5];
+      const colour = meta & 0xff;
+      const state = (meta >> 8) & 0xff;
+      const structure = (meta >> 16) & 1;
+      const pool = this.peds[colour % this.peds.length];
       const k = pool.count++;
       const h = pf[o + 3];
       const ch = Math.cos(h), sh = Math.sin(h);
+      const e = pf[o] + snap.oe, n = pf[o + 1] + snap.on;
+      const g = structure ? NaN : G.at(e, n);
+      // on the raised sidewalk except while crossing the carriageway
+      const y = Number.isFinite(g) ? g + (state === 2 ? ROAD_LIFT : WALK_LIFT) : pf[o + 2] + 0.15;
+      const m = pool.mesh.instanceMatrix.array as Float32Array;
       const b = k * 16;
       m[b] = ch; m[b + 1] = 0; m[b + 2] = -sh; m[b + 3] = 0;
       m[b + 4] = 0; m[b + 5] = 1; m[b + 6] = 0; m[b + 7] = 0;
       m[b + 8] = sh; m[b + 9] = 0; m[b + 10] = ch; m[b + 11] = 0;
-      m[b + 12] = pf[o] + offE; m[b + 13] = pf[o + 2] + 0.15; m[b + 14] = -(pf[o + 1] + offN); m[b + 15] = 1;
-      const meta = pu[o + 5];
-      const c = shirtPalette[(meta & 0xff) % shirtPalette.length];
-      ca[k * 3] = c.r; ca[k * 3 + 1] = c.g; ca[k * 3 + 2] = c.b;
-      const state = (meta >> 8) & 0xff;
+      m[b + 12] = e - ax; m[b + 13] = y; m[b + 14] = -n - az; m[b + 15] = 1;
+      const c = shirtPalette[colour % shirtPalette.length];
+      const ca = pool.col.array as Float32Array;
+      ca[k * 4] = c.r; ca[k * 4 + 1] = c.g; ca[k * 4 + 2] = c.b; ca[k * 4 + 3] = 0;
+      const an = pool.extra!.array as Float32Array;
       an[k * 3] = pf[o + 4]; an[k * 3 + 1] = h; an[k * 3 + 2] = state === 0 || state === 2 ? 1 : 0;
     }
-    pool.commit();
+    for (const p of this.peds) p.commit();
   }
 
   dispose() {
@@ -481,7 +876,7 @@ export class TrafficLayer implements Layer {
     window.removeEventListener('blur', this.onBlur);
     this.worker?.terminate();
     this.worker = null;
-    for (const p of [...this.cars, this.peds]) {
+    for (const p of [...this.cars, ...this.peds]) {
       p.mesh.geometry.dispose();
       p.mesh.dispose();
     }
@@ -489,3 +884,6 @@ export class TrafficLayer implements Layer {
     this.congestion?.dispose();
   }
 }
+
+/** instance flag understood by the car material: headlights on */
+const CAR_FLAG_HEAD = 16;
