@@ -746,7 +746,7 @@ def build_tile(level, tx, ty):
             arrays["p_osm"] = NP["id"][pi].astype(np.float64)
         net_tile_arrays(arrays, tx, ty, x0, y0)
     path = geo.OUT / "tiles" / str(level) / f"{tx}_{ty}.bin.gz"
-    size = tbn.write(path, arrays, level=level, tx=tx, ty=ty, names=names)
+    size = tbn.write(path, arrays, tx=tx, ty=ty, names=names)
     return size
 
 
