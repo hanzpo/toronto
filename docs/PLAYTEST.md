@@ -113,6 +113,17 @@ CIBC Square flicker → fixed in 3eda5f1.
   pedestrian gates, cantilevers) → roads; gates and lights driven by real
   train positions, cars and pedestrians stop, keep-clear → transit/sim.
 
+### Station/clipping hunt (user: "make sure things don't clip into other things")
+- [ ] Union: track deck shows grass with a floating roof slab, trees and a
+  building wall clip into the complex; pulling in must be clean → stations
+- [ ] Clearance checks at all stations: platform edge 1.6–1.7 m from track,
+  columns ≥ 2.2 m, no buildings/trees over tracks → stations (+ script)
+- [ ] Traffic doesn't drop at night: cars above demand target never retire
+  → transit/sim
+- [ ] Camera collision leaves the camera hugging building walls at stations
+  (Bloor-Yonge) → stations/UX
+- [ ] Gardiner at Exhibition now elevated on piers (roads WIP): good
+
 ## Resolved
 - [x] Trains colliding and wrong-track running (the user's Kitchener GO
   report): signalled rail agents with interlocking. Verified with ~220
