@@ -262,8 +262,14 @@ just in time and only onto a free platform. Terminals: every block's turnback is
 joined with its route extended back to the car, `chain`); layovers longer than 20 min are
 spent in the depot (the next trip pulls out as the start of a block); nothing is ever
 removed while any part of it is in view (`remove_unless_kept`, `train_seen`) — a train
-that must go waits until the camera looks away. Paused (project moves to generated network
-primitives, docs/NETWORK.md): (2) FCFS queues at tram junction boxes (a first attempt
+that must go waits until the camera looks away. Terminal loops have **layover bays**: the short
+tram tracks at a streetcar terminal that no pattern runs (the loop's other tracks and
+sidings, per OSM) form a bay "depot" of that terminal (`build_bays`); a car whose next trip
+leaves more than 150 s later waits in a free bay (a car on a track with switches at both
+ends stands in the middle, clear of both), and the trip pulls out of it just as it is due and
+only onto a free departure track; bays are never filled with stored cars and cars left in
+one are cleared out of sight after 30 min. Streetcar turnouts foul 11 m; a streetcar dwelling at a stop gives back the junctions it claimed ahead (claimed again as it leaves). Paused (project
+moves to generated network primitives, docs/NETWORK.md): (2) FCFS queues at tram junction boxes (a first attempt
 created priority locks and was reverted); (4) passing loops (long GO / VIA single track is
 one two-way route today); capacity queues. Measure: `no_stuck_trains` (full weekday, all agencies; run with
 `--ignored`): trains stopped > 3 min without a legitimate occupant ahead.

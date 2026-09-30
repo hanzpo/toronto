@@ -85,6 +85,8 @@ pub struct Crossing {
 
 /// s of ATP overspeed warning before the penalty brake (player)
 const ATP_WARN: f32 = 3.0;
+/// layovers longer than this (s) at a terminal with bays are spent in a bay
+const BAY_LAYOVER: f64 = 150.0;
 /// layovers longer than this (s) are spent in the depot
 const LONG_LAYOVER: f64 = 1200.0;
 const SP_BLOCK: u8 = 0;
@@ -94,7 +96,7 @@ const SP_DIR: u8 = 2;
 /// block length by track kind (m)
 const BLOCK_LEN: [f32; 4] = [800.0, 150.0, 150.0, 120.0];
 /// half length of an interlocking zone along each arm (fouling point), by kind
-const FOUL: [f32; 4] = [55.0, 35.0, 28.0, 18.0];
+const FOUL: [f32; 4] = [55.0, 35.0, 28.0, 11.0];
 
 #[derive(Clone, Copy, Debug)]
 pub struct Dyn {
@@ -698,6 +700,9 @@ pub struct Depot {
     pub filled: bool,
     /// representative (feed index, pattern local, consist length, mode) for parked trains
     pub rep: Option<(u32, u32, f32, u8)>,
+    /// a layover bay of a terminal loop (its loop / siding tracks): cars ending a trip wait
+    /// here for their next one; never filled with stored cars
+    pub bay: bool,
 }
 
 #[inline]
@@ -745,6 +750,12 @@ pub struct RailSim {
     pub stuck_removed: u32,
     /// empty-stock moves removed to break a head-on lock with a waiting train
     pub dh_yield: u32,
+    /// cars that went to a layover bay
+    pub bay_pullins: u32,
+    /// layover bays of the terminal loops have been found for the loaded feeds
+    bays_built: bool,
+    /// trips whose car lays over in a bay before them (they pull out of it)
+    bay_trips: std::collections::HashSet<(u32, u32)>,
     /// trip plans extended back to where a train stands (chain onto a trip starting just ahead)
     ext_cache: std::collections::HashMap<(u32, u32), u32>,
     /// deadlock cycles broken (back-offs and empty trains taken out)
@@ -813,6 +824,9 @@ impl Default for RailSim {
             overlaps: 0,
             stuck_removed: 0,
             dh_yield: 0,
+            bay_pullins: 0,
+            bays_built: false,
+            bay_trips: std::collections::HashSet::new(),
             ext_cache: std::collections::HashMap::new(),
             locks_broken: 0,
             stuck_log: Vec::new(),
@@ -1204,6 +1218,22 @@ impl RailSim {
         };
         let tail = front - len;
         let n = self.plans[plan_i].spans.len();
+        // a streetcar dwelling at a stop gives back the junctions it had claimed ahead (the
+        // crossing lines are not held for its whole dwell); it claims them again as it leaves
+        {
+            let tr = &self.trains[ti];
+            if !signalled(self.plans[plan_i].mode) && tr.state == TState::Dwell && self.stime + tr.toff < tr.until - 3.0 && !tr.player {
+                let ahead: Vec<usize> = (0..n).filter(|&k| tr.held[k] && self.plans[plan_i].spans[k].kind == SP_JUNCTION && self.plans[plan_i].spans[k].r0 > front + 0.5).collect();
+                if !ahead.is_empty() {
+                    for k in ahead {
+                        self.release_span(ti, k);
+                    }
+                    let tr = &mut self.trains[ti];
+                    let p = &self.plans[plan_i];
+                    tr.next = (0..n).find(|&k| !tr.held[k] && p.spans[k].r1 >= tail).unwrap_or(n);
+                }
+            }
+        }
         // release
         let lo = self.trains[ti].lo;
         let hi = self.trains[ti].next.min(n);
@@ -1561,6 +1591,10 @@ impl RailSim {
             return;
         }
         let t = st;
+        if !self.bays_built {
+            self.bays_built = true;
+            self.build_bays();
+        }
         self.spawn_acc += dt;
         if self.spawn_acc >= 1.0 {
             self.spawn_acc = 0.0;
@@ -1569,6 +1603,13 @@ impl RailSim {
             self.spawn_pass(t);
             self.handoff();
             self.break_locks(t);
+            // cars left in a layover bay (their next trip went another way): out of sight, away
+            for ti in 0..self.trains.len() {
+                let tr = &self.trains[ti];
+                if !tr.dead && tr.state == TState::Parked && (tr.depot as usize) < self.depots.len() && self.depots[tr.depot as usize].bay && t - tr.since > 1800.0 && !self.train_seen(ti) {
+                    self.remove(ti, false);
+                }
+            }
             self.check();
         }
         self.sight();
@@ -1812,7 +1853,7 @@ impl RailSim {
     /// trip `trip` starts a vehicle block (or follows a long layover spent in the depot)
     fn block_start(&self, fi: usize, trip: usize) -> bool {
         let pv = self.feeds[fi].trip_prev[trip];
-        pv < 0 || self.long_layover(fi, pv as usize)
+        pv < 0 || self.long_layover(fi, pv as usize) || self.bay_trips.contains(&(fi as u32, trip as u32))
     }
 
     /// trains at the end of their trip: continue as the next trip of their block, or leave
@@ -1897,6 +1938,20 @@ impl RailSim {
             if nx >= 0 && self.long_layover(fi, tr.trip as usize) {
                 nx = -1;
             }
+            // a layover at a terminal with bays (streetcar loops): wait in a bay, clear of the
+            // arrival and departure tracks; the next trip pulls out of it when due
+            if nx >= 0 && t >= tr.since + tr.dy.dwell as f64 * 0.5 && tr.id != self.keep {
+                let nxu = nx as usize;
+                let dep = self.feeds[fi].times(nxu, 0).1;
+                if dep - t > BAY_LAYOVER && matches!(self.trip_state[fi][nxu], TripState::None | TripState::Pending(_)) && self.depots.iter().any(|d| d.bay) {
+                    if self.pull_in_to(ti, t, true) {
+                        self.bay_trips.insert((fi as u32, nxu as u32));
+                        self.bay_pullins += 1;
+                        continue;
+                    }
+                }
+            }
+            let tr = &self.trains[ti];
             if nx >= 0 && t >= tr.since + tr.dy.dwell as f64 * 0.5 {
                 let nx = nx as usize;
                 if matches!(self.trip_state[fi][nx], TripState::None | TripState::Pending(_)) && (self.chain(ti, nx, t) || self.turnback(ti, nx, t)) {
@@ -2253,6 +2308,7 @@ impl RailSim {
     /// depots: per depot [group, feed mask] + storage edge list, centre point
     pub fn set_depots(&mut self, group: &[u8], feeds: &[u32], off: &[u32], edges: &[u32]) {
         self.depots.clear();
+        self.bays_built = false;
         self.park_cache.clear();
         let ne = self.net.e_from.len() as u32;
         for d in 0..group.len() {
@@ -2267,15 +2323,98 @@ impl RailSim {
                 y += p[1];
                 n += 1.0;
             }
-            self.depots.push(Depot { group: group[d], feeds: feeds[d], edges: es, x: x / n, y: y / n, filled: false, rep: None });
+            self.depots.push(Depot { group: group[d], feeds: feeds[d], edges: es, x: x / n, y: y / n, filled: false, rep: None, bay: false });
         }
+    }
+
+    /// Layover bays of the streetcar terminal loops: the tram tracks near where the
+    /// streetcar patterns end that no pattern runs (the loop's other tracks and sidings, per
+    /// OSM) become a small bay "depot" of that terminal.
+    fn build_bays(&mut self) {
+        self.depots.retain(|d| !d.bay);
+        self.park_cache.clear();
+        if self.plans.is_empty() {
+            return;
+        }
+        let ne = self.net.e_from.len();
+        let mut used = vec![false; ne];
+        for p in &self.plans[..self.n_pat_plans.min(self.plans.len())] {
+            for it in &p.items {
+                used[it.edge as usize] = true;
+            }
+        }
+        // terminal points (pattern ends) of streetcar patterns, per feed
+        let mut ends: Vec<(f64, f64, u32)> = Vec::new();
+        for (fi, f) in self.feeds.iter().enumerate() {
+            for pat in 0..f.pat_mode.len() {
+                let pl = &self.plans[(f.plan0 as usize) + pat];
+                if !pl.ok || signalled(pl.mode) {
+                    continue;
+                }
+                for r in [0.0, pl.length] {
+                    let q = pl.point(&self.net, r);
+                    match ends.iter_mut().find(|e| (e.0 - q[0]).hypot(e.1 - q[1]) < 300.0) {
+                        Some(e) => e.2 |= 1 << (fi as u32).min(31),
+                        None => ends.push((q[0], q[1], 1 << (fi as u32).min(31))),
+                    }
+                }
+            }
+        }
+        for (x, y, mask) in ends {
+            let mut es = Vec::new();
+            for e in 0..ne {
+                if used[e] || self.net.e_kind[e] != K_TRAM || self.net.e_len[e] < 30.0 || self.net.e_len[e] > 300.0 {
+                    continue;
+                }
+                // the whole track at the terminal (not a street line leaving it)
+                let (a, b) = (self.net.e_off[e] as usize, self.net.e_off[e + 1] as usize);
+                let near = (a..b).all(|v| (self.net.v_xyz[v][0] - x).hypot(self.net.v_xyz[v][1] - y) < 250.0);
+                if near {
+                    es.push(e as u32);
+                }
+            }
+            if !es.is_empty() {
+                self.depots.push(Depot { group: track_group(K_TRAM), feeds: mask, edges: es, x, y, filled: true, rep: None, bay: true });
+            }
+        }
+    }
+
+    /// debugging: which bay tracks can hold a car of length `len`
+    pub fn bay_debug(&mut self, len: f32) -> String {
+        let mut out = String::new();
+        let bays: Vec<(f64, f64, Vec<u32>)> = self.depots.iter().filter(|d| d.bay).map(|d| (d.x, d.y, d.edges.clone())).collect();
+        for (x, y, es) in bays {
+            let mut ok = 0;
+            let mut why = Vec::new();
+            for e in es {
+                match self.build_park_plan(e, len, 0, 0, 2) {
+                    None => why.push(format!("{e}:noplan")),
+                    Some(p) => {
+                        if self.parks_clear(&p, len) {
+                            ok += 1
+                        } else {
+                            let front = p.length;
+                            let bad: Vec<String> = p.spans.iter().filter(|s| s.kind != SP_DIR && s.r0 < front && s.r1 > front - len).map(|s| format!("{}{}[{:.0},{:.0}]/{:.0}", ["B", "J", "D"][s.kind as usize], if self.service_res.get(s.res as usize).copied().unwrap_or(false) { "S" } else { "" }, s.r0, s.r1, front)).collect();
+                            why.push(format!("{e}:{}", bad.join(",")));
+                        }
+                    }
+                }
+            }
+            out += &format!("bay ({x:.0},{y:.0}) usable {ok} {:?}\n", why);
+        }
+        out
     }
 
     /// nearest depot for a feed / track group within `max` m of (x, y)
     fn depot_near(&self, feed: u32, group: u8, x: f64, y: f64, max: f64) -> Option<usize> {
+        self.depot_near_kind(feed, group, x, y, max, None)
+    }
+
+    /// ... only bays (Some(true)), only depots (Some(false)), either (None)
+    fn depot_near_kind(&self, feed: u32, group: u8, x: f64, y: f64, max: f64, bay: Option<bool>) -> Option<usize> {
         let mut best = None;
         for (i, d) in self.depots.iter().enumerate() {
-            if d.group != group || d.feeds & (1 << feed.min(31)) == 0 {
+            if d.group != group || d.feeds & (1 << feed.min(31)) == 0 || bay.map_or(false, |b| b != d.bay) {
                 continue;
             }
             let dd = (d.x - x).hypot(d.y - y);
@@ -2350,7 +2489,10 @@ impl RailSim {
             return None;
         }
         let total: f32 = items.iter().map(|x| net.e_len[x.0 as usize]).sum();
-        let front_r = total - 8.0; // with start = 0
+        // towards a buffer stop: 8 m short of it; on a track with a switch at both ends (a loop
+        // track, a siding): in the middle, clear of both switches
+        let far_dead = if d > 0 { dead(2 * e + 1) } else { dead(2 * e) };
+        let front_r = if far_dead { total - 8.0 } else { total - le + (le + len) * 0.5 };
         let start = (front_r - len - 5.0).max(0.0);
         let front = front_r - start;
         let edges: Vec<u32> = items.iter().map(|&(e, d)| 2 * e + if d > 0 { 0 } else { 1 }).collect();
@@ -2389,13 +2531,19 @@ impl RailSim {
 
     /// Pull-in: the train's block is over; run empty to a free place in the nearest depot.
     fn pull_in(&mut self, ti: usize, t: f64) -> bool {
+        self.pull_in_to(ti, t, false)
+    }
+
+    /// pull in to the nearest depot, or (`bay`) to a layover bay of this terminal
+    fn pull_in_to(&mut self, ti: usize, t: f64, bay: bool) -> bool {
         let (fi, pa, len) = (self.trains[ti].feed as usize, self.trains[ti].plan as usize, self.trains[ti].len);
         if pa >= self.n_pat_plans || self.depots.is_empty() {
             return false;
         }
         let (mode, local) = (self.plans[pa].mode, self.plans[pa].local);
         let p = self.plans[pa].point(&self.net, self.trains[ti].front);
-        let Some(di) = self.depot_near(fi as u32, mode_group(mode), p[0], p[1], 30000.0) else { return false };
+        let (maxd, kind) = if bay { (400.0, Some(true)) } else { (30000.0, Some(false)) };
+        let Some(di) = self.depot_near_kind(fi as u32, mode_group(mode), p[0], p[1], maxd, kind) else { return false };
         // candidate places, nearest first by trying a few
         let mut edges = self.depots[di].edges.clone();
         edges.sort_by(|a, b| self.net.e_len[*b as usize].partial_cmp(&self.net.e_len[*a as usize]).unwrap_or(std::cmp::Ordering::Equal));
@@ -2551,7 +2699,9 @@ impl RailSim {
         // empty stock runs at ~60 % of line speed, ~11 m/s in yards and on leads)
         let dist: f32 = legs.iter().map(|&l| self.plans[l as usize].length).sum();
         let vdh = (0.6 * dyn_for(mode).vmax + 3.0).clamp(8.0, 25.0) * 0.85;
-        let need = dist as f64 / vdh as f64 + 40.0 * legs.len() as f64 + 45.0;
+        // (from a terminal's layover bay it is a few metres: leave just as it is due, the
+        // departure track is the arrival loop too)
+        let need = if self.depots[di].bay { dist as f64 / vdh as f64 + 15.0 * legs.len() as f64 } else { dist as f64 / vdh as f64 + 40.0 * legs.len() as f64 + 45.0 };
         if t < start - need {
             return true; // not yet (the parked train waits)
         }
@@ -2734,6 +2884,9 @@ impl RailSim {
         };
         let r = self.radius;
         for di in 0..self.depots.len() {
+            if self.depots[di].bay {
+                continue;
+            }
             let (dx0, dy0, filled, dfeeds, dgroup) = {
                 let d = &self.depots[di];
                 (d.x, d.y, d.filled, d.feeds, d.group)
@@ -3419,6 +3572,10 @@ impl RailSim {
     /// what train `ti` waits for: a route blocker, else (on sight) the vehicle just ahead
     pub fn wait_for(&self, ti: usize) -> Option<u32> {
         if let Some(b) = self.blocker(ti) {
+            // a direction lock: the (first) train holding it the other way
+            if b == 0 {
+                return self.dir_holders(ti).first().copied().or(Some(0));
+            }
             return Some(b);
         }
         let tr = &self.trains[ti];

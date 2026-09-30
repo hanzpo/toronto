@@ -207,6 +207,10 @@ fn streetcar_loops() {
     }
     sim.focus = (-120.0, -950.0);
     sim.radius = 20000.0;
+    sim.step(0.5, 5.0 * 3600.0 + 1.0);
+    if std::env::var("BAYS").is_ok() {
+        eprintln!("{}", sim.bay_debug(30.0));
+    }
     let mut t = 5.0 * 3600.0;
     let mut seen = std::collections::HashSet::new();
     let mut ex: Vec<String> = Vec::new();
@@ -228,18 +232,27 @@ fn streetcar_loops() {
             let q = pl.point(&sim.net, tr.front);
             if let Some(k) = (0..ends.len()).find(|&k| (ends[k].0 - q[0]).hypot(ends[k].1 - q[1]) < 300.0) {
                 ends[k].2 += 1;
-                if ex.len() < 40 && std::env::var("LOOP_EX").is_ok() {
+                let at_ok = std::env::var("LOOP_AT").ok().map_or(true, |v| { let a: Vec<f64> = v.split(',').map(|x| x.parse().unwrap()).collect(); (ends[k].0 - a[0]).hypot(ends[k].1 - a[1]) < 50.0 });
+                if ex.len() < 40 && std::env::var("LOOP_EX").is_ok() && at_ok {
                     let w = sim.wait_for(ti);
                     let w = if w == Some(0) { sim.dir_holders(ti).first().copied() } else { w };
-                    let wd = w.and_then(|id| sim.trains.iter().find(|o| o.id == id)).map(|o| { let oq = sim.plans[o.plan as usize].point(&sim.net, o.front); format!("{:?} dh {} v {:.1} stopped {:.0} front {:.0}/{:.0} at ({:.0},{:.0}) trip {}", o.state, o.dh, o.v, o.stopped_t, o.front, sim.plans[o.plan as usize].length, oq[0], oq[1], o.trip) }).unwrap_or("-".into());
+                    let wd = w.and_then(|id| sim.trains.iter().find(|o| o.id == id)).map(|o| { let oq = sim.plans[o.plan as usize].point(&sim.net, o.front); format!("{:?} dh {} v {:.1} stopped {:.0} front {:.0}/{:.0} at ({:.0},{:.0}) trip {} until+{:.0} since-{:.0}", o.state, o.dh, o.v, o.stopped_t, o.front, sim.plans[o.plan as usize].length, oq[0], oq[1], o.trip, o.until - (t + o.toff), (t + o.toff) - o.since) }).unwrap_or("-".into());
                     ex.push(format!("({:.0},{:.0}) id {} dh {} front {:.0}/{:.0} sight {:.1} waits {:?} [{}] | {} | {}", q[0], q[1], tr.id, tr.dh, tr.front, pl.length, tr.sight_gap, w, wd, sim.why(ti).chars().take(120).collect::<String>(), sim.spans_near(ti).chars().take(200).collect::<String>()));
                 }
             }
         }
     }
+    for d in sim.depots.iter().filter(|d| d.bay) {
+        if std::env::var("BAYS").is_ok() {
+            eprintln!("BAY ({:.0},{:.0}) edges {:?} lens {:?}", d.x, d.y, d.edges, d.edges.iter().map(|&e| sim.net.e_len[e as usize].round()).collect::<Vec<_>>());
+        }
+    }
     ends.sort_by_key(|e| std::cmp::Reverse(e.2));
     for e in &ends {
         eprintln!("LOOP ({:.0},{:.0}): stuck cars {}", e.0, e.1, e.2);
+    }
+    eprintln!("bay pull-ins {} overlaps {} overruns {}", sim.bay_pullins, sim.overlaps, sim.overruns);
+    for _ in 0..0 {
     }
     for e in &ex {
         eprintln!("  EX {e}");
