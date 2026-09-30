@@ -121,7 +121,7 @@ body.interact-ground .stations-layer, body.interact-inside .stations-layer, body
 .op-exit { font-size: 11.5px; font-weight: 700; padding: 7px 10px; border-radius: 7px; background: rgba(255,107,74,0.14); color: #ffb3a1; border: 1px solid rgba(255,107,74,0.35); }
 .op-take { font-size: 11.5px; font-weight: 800; padding: 7px 10px; border-radius: 7px; background: var(--signal); color: #16140c; }
 
-.op-desk { position: absolute; left: 50%; bottom: 88px; transform: translateX(-50%); display: flex; align-items: stretch; gap: 10px; }
+.op-desk { position: absolute; right: 12px; bottom: 76px; transform: scale(0.82); transform-origin: bottom right; display: flex; align-items: stretch; gap: 10px; } /* corner: keep the track ahead visible */
 .op-dial { width: 190px; padding: 8px 8px 10px; display: flex; flex-direction: column; align-items: center; }
 .speedo { width: 170px; height: 158px; }
 .sp-bg { fill: none; stroke: rgba(255,255,255,0.08); stroke-width: 10; stroke-linecap: round; }
@@ -201,7 +201,7 @@ kbd { font: 600 10px var(--mono); padding: 1px 5px; margin: 0 1px; border-radius
 .walk-exit { position: absolute; right: 12px; top: 12px; padding: 9px 12px; font-size: 12px; font-weight: 700; }
 
 @media (max-width: 1150px) {
-  .op-desk { bottom: 270px; }
+  .op-desk { bottom: 118px; transform: scale(0.72); }
   .op-keys { display: none; }
 }
 
