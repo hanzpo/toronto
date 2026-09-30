@@ -448,6 +448,14 @@ export class TransitSystem {
     return -1;
   }
 
+  /** Global pattern index of local pattern `local` in the (agency, kind) file, or -1. */
+  patternIndex(agency: string, kind: 'rail' | 'bus', local: number): number {
+    for (const fr of this.feeds) {
+      if (fr.f.agency === agency && fr.f.kind === kind) return local >= 0 && local < fr.f.patMode.length ? fr.patBase + local : -1;
+    }
+    return -1;
+  }
+
   /** (agency, kind, local index) of a global trip, or null. */
   tripLocal(trip: number): { agency: string; kind: 'rail' | 'bus'; local: number } | null {
     const fr = this.feedOfTrip(trip);

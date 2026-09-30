@@ -17,6 +17,7 @@
 //     f64[12..26) PLAYER    [active, e, n, elev, heading, speed, pitch, onRoad, tileX, tileY, edgeIdx, carId, structure, bump]
 //     f64[26..30) RAIL      [trains, overlaps (total, must stay 0), authority overruns (total), turnbacks]
 //     f64[30..44) RAILP     player train: see Sim.rail_player_state (sim/src/rail.rs)
+//     f64[44..47) RAILX     [pull-outs, pull-ins (totals), parked trains]
 //   then 3 snapshot slots of SLOT_BYTES each:
 //     i32[0] carCount · i32[1] pedCount · f64[1] originE · f64[2] originN · f64[3] simMs · i32[8] signalCount
 //     i32[9] railCount · i32[10] railPathPoints
@@ -63,7 +64,7 @@ export const SLOT_BYTES = RAIL_PATH_OFFSET + MAX_RAIL_PTS * 3 * 4;
 export const SAB_BYTES = HEADER_BYTES + SLOTS * SLOT_BYTES;
 
 export const H = { SEQ: 0, SLOT: 1, BUSY: 2, TILES: 3, PENDING: 4, SUBSTEPS: 5, FAST: 6, ACK: 7 } as const;
-export const HF = { STEP_MS: 8, STEP_AVG: 9, TARGET_CARS: 10, TARGET_PEDS: 11, PLAYER: 12, RAIL: 26, RAILP: 30 } as const;
+export const HF = { STEP_MS: 8, STEP_AVG: 9, TARGET_CARS: 10, TARGET_PEDS: 11, PLAYER: 12, RAIL: 26, RAILP: 30, RAILX: 44 } as const;
 export const HF_COUNT = 64;
 /** RAILP fields */
 export const RAILP = { ACTIVE: 0, FEED: 1, TRIP: 2, CENTRE: 3, V: 4, A: 5, AHEAD: 6, ASPECT: 7, PENALTY: 8, LIMIT: 9, NEXT_LIMIT: 10, NEXT_LIMIT_DIST: 11, PATTERN: 12, WARN: 13 } as const;
@@ -95,6 +96,8 @@ export interface TickMsg {
   railProfile?: 'weekday' | 'saturday' | 'sunday';
   /** rail agent radius (m, 0 = off) */
   railRadius?: number;
+  /** camera position + horizontal forward (E, N) — rail spawns / removals avoid the view */
+  camera?: [number, number, number, number];
   /** player train command (-1 brake .. 1 power) */
   railCmd?: { cmd: number; emergency: boolean };
 }

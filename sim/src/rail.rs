@@ -66,7 +66,7 @@ const SP_JUNCTION: u8 = 1;
 const SP_DIR: u8 = 2;
 
 /// block length by track kind (m)
-const BLOCK_LEN: [f32; 4] = [800.0, 320.0, 250.0, 120.0];
+const BLOCK_LEN: [f32; 4] = [800.0, 150.0, 150.0, 120.0];
 /// half length of an interlocking zone along each arm (fouling point), by kind
 const FOUL: [f32; 4] = [55.0, 35.0, 28.0, 18.0];
 
@@ -550,6 +550,8 @@ pub enum TState {
     Dwell,
     /// at its last stop
     Terminal,
+    /// stabled in a depot / yard (no trip)
+    Parked,
 }
 
 pub struct Train {
@@ -596,6 +598,8 @@ pub struct Train {
     /// on-sight following: gap to the vehicle ahead on the same track and its speed
     pub sight_gap: f32,
     pub sight_v: f32,
+    /// depot it is parked in / heading for (NONE otherwise)
+    pub depot: u32,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -603,14 +607,51 @@ pub enum TripState {
     None,
     Agent(u32),
     Pending(f64),
-    /// handed back to the timetable (left the radius / finished) at this time
+    /// handed back to the timetable (left the radius)
     Done,
+    /// its vehicle finished it in the sim (arrived, continued as another trip, stabled):
+    /// not drawn from the timetable any more
+    Finished,
 }
 
 #[derive(Clone, Copy, Default)]
 struct DirLock {
     dir: i8,
     count: u16,
+}
+
+/// A depot / yard / layover: storage tracks where trains are stabled between blocks.
+pub struct Depot {
+    pub group: u8,
+    /// feeds (agencies) that use it (bit per feed id)
+    pub feeds: u32,
+    pub edges: Vec<u32>,
+    pub x: f64,
+    pub y: f64,
+    /// parked trains have been placed since it came into the radius
+    pub filled: bool,
+    /// representative (feed index, pattern local, consist length, mode) for parked trains
+    pub rep: Option<(u32, u32, f32, u8)>,
+}
+
+#[inline]
+pub fn track_group(kind: u8) -> u8 {
+    match kind {
+        K_RAIL => 0,
+        K_SUBWAY => 1,
+        K_LRT => 2,
+        _ => 3,
+    }
+}
+
+#[inline]
+pub fn mode_group(mode: u8) -> u8 {
+    match mode {
+        M_SUBWAY => 1,
+        M_LRT => 2,
+        M_STREETCAR => 3,
+        _ => 0,
+    }
 }
 
 pub struct RailSim {
@@ -644,6 +685,24 @@ pub struct RailSim {
     dh_cache: std::collections::HashMap<(u32, u32), Option<Vec<u32>>>,
     /// number of plans built from patterns (turnback plans follow)
     n_pat_plans: usize,
+    /// empty-stock move to a siding from the end of a plan
+    stable_cache: std::collections::HashMap<u32, Option<u32>>,
+    pub depots: Vec<Depot>,
+    /// park plans: (depot edge, consist length in dm) -> plan
+    park_cache: std::collections::HashMap<(u32, u32), Option<u32>>,
+    /// pull-outs tried recently: (feed, trip) -> time
+    pullout_tried: std::collections::HashMap<(u32, u32), f64>,
+    pub pullouts: u32,
+    pub pullins: u32,
+    /// trips placed from the timetable well inside the radius (after start-up: pops)
+    pub spawned_inside: u32,
+    pub spawned_first: u32,
+    /// pull-out failures: no depot, depot outside radius, no free place, place failed, no path
+    pub po_fail: [u32; 5],
+    pub po_last: [u32; 5],
+    pub pop_log: Vec<String>,
+    /// camera (x, y, forward x, forward y); None = unknown (tests)
+    pub camera: Option<(f64, f64, f64, f64)>,
     pub turnbacks: u32,
 }
 
@@ -674,6 +733,18 @@ impl Default for RailSim {
             bidir: Vec::new(),
             dh_cache: std::collections::HashMap::new(),
             n_pat_plans: 0,
+            stable_cache: std::collections::HashMap::new(),
+            depots: Vec::new(),
+            park_cache: std::collections::HashMap::new(),
+            pullout_tried: std::collections::HashMap::new(),
+            pullouts: 0,
+            pullins: 0,
+            spawned_inside: 0,
+            spawned_first: 0,
+            po_fail: [0; 5],
+            po_last: [0; 5],
+            pop_log: Vec::new(),
+            camera: None,
             turnbacks: 0,
         }
     }
@@ -777,6 +848,9 @@ impl RailSim {
             }
         }
         self.player = None;
+        for d in self.depots.iter_mut() {
+            d.filled = false;
+        }
     }
 
     /// (re)build the plans after the network or the feeds changed
@@ -806,6 +880,13 @@ impl RailSim {
         let bidir: Vec<u8> = used.iter().map(|&u| (u == 3) as u8).collect();
         self.bidir = bidir.clone();
         self.dh_cache.clear();
+        self.stable_cache.clear();
+        self.park_cache.clear();
+        self.pullout_tried.clear();
+        for d in self.depots.iter_mut() {
+            d.filled = false;
+            d.rep = None;
+        }
         self.trip_state.clear();
         for fi in 0..self.feeds.len() {
             let plan0 = self.plans.len() as u32;
@@ -949,7 +1030,13 @@ impl RailSim {
         }
         // reserve ahead: braking distance + a sighting margin
         // the player sees further (signals clear well ahead when the line is free)
-        let look = if self.trains[ti].player { v * v / b + 1500.0 } else { v * v / (2.0 * b) + (v * 12.0).max(250.0) };
+        let look = if self.trains[ti].player {
+            v * v / b + 1500.0
+        } else if self.trains[ti].state == TState::Parked {
+            0.0
+        } else {
+            v * v / (2.0 * b) + (v * 12.0).max(250.0)
+        };
         loop {
             let k = self.trains[ti].next;
             if k >= n {
@@ -1052,6 +1139,7 @@ impl RailSim {
             ext_v: 0.0,
             sight_gap: f32::INFINITY,
             sight_v: 0.0,
+            depot: NONE,
         };
         if let Some(k) = dwell_at {
             let (_, dep) = f.times(trip, k);
@@ -1131,6 +1219,44 @@ impl RailSim {
         false
     }
 
+    /// block starts in the next 25 minutes (their trains leave the depot ahead of time)
+    fn pullout_pass(&mut self, t: f64) {
+        if self.depots.is_empty() {
+            return;
+        }
+        let r2 = self.radius * self.radius;
+        for fi in 0..self.feeds.len() {
+            let (lo, hi) = {
+                let f = &self.feeds[fi];
+                (f.trip_start.partition_point(|&s| (s as f64) <= t), f.trip_start.partition_point(|&s| (s as f64) <= t + 1500.0))
+            };
+            for trip in lo..hi {
+                let f = &self.feeds[fi];
+                if f.trip_prev[trip] >= 0 || !matches!(self.trip_state[fi][trip], TripState::None) {
+                    continue;
+                }
+                let pb = (f.plan0 + f.trip_pattern[trip]) as usize;
+                let b = &self.plans[pb];
+                if !b.ok || b.stop_front.is_empty() {
+                    continue;
+                }
+                let p0 = b.point(&self.net, b.stop_front[0]);
+                if (p0[0] - self.focus.0).powi(2) + (p0[1] - self.focus.1).powi(2) > r2 {
+                    continue;
+                }
+                let key = (fi as u32, trip as u32);
+                if self.pullout_tried.get(&key).map_or(false, |&at| t - at < 20.0) {
+                    continue;
+                }
+                self.pullout_tried.insert(key, t);
+                self.pull_out(fi, trip, t);
+            }
+        }
+        if self.pullout_tried.len() > 20000 {
+            self.pullout_tried.retain(|_, at| t - *at < 3600.0);
+        }
+    }
+
     fn spawn_pass(&mut self, t: f64) {
         let r2 = self.radius * self.radius;
         for fi in 0..self.feeds.len() {
@@ -1148,27 +1274,38 @@ impl RailSim {
                     }
                     let st = self.trip_state[fi][trip];
                     match st {
-                        TripState::Agent(_) | TripState::Done => continue,
+                        TripState::Agent(_) | TripState::Done | TripState::Finished => continue,
                         TripState::Pending(at) if tt - at < 2.0 && at <= tt => continue,
                         _ => {}
                     }
                     let pi = (f.plan0 + f.trip_pattern[trip]) as usize;
-                    let plan = &self.plans[pi];
-                    if !plan.ok {
+                    if !self.plans[pi].ok {
                         continue;
+                    }
+                    let (pv, tstart) = (f.trip_prev[trip], f.trip_start[trip] as f64);
+                    if pv < 0 && !self.depots.is_empty() && tt < tstart + 60.0 {
+                        // first trip of a block, due now: it comes out of the depot (pull_out)
+                        let key = (fi as u32, trip as u32);
+                        if self.pullout_tried.get(&key).map_or(true, |&at| tt - at > 20.0) {
+                            self.pullout_tried.insert(key, tt);
+                            if self.pull_out(fi, trip, tt) {
+                                continue;
+                            }
+                        } else {
+                            continue;
+                        }
                     }
                     // the vehicle of this trip is still running its previous trip: it continues
                     // as this one (turnback) unless it is very late
-                    let pv = f.trip_prev[trip];
                     if pv >= 0 {
                         if let TripState::Agent(_) = self.trip_state[fi][pv as usize] {
-                            if tt < f.trip_start[trip] as f64 + 900.0 {
+                            if tt < tstart + 900.0 {
                                 continue;
                             }
                         }
                     }
                     let Some((c, _, _)) = self.sched_centre(fi, trip, tt) else { continue };
-                    let p = plan.point(&self.net, c);
+                    let p = self.plans[pi].point(&self.net, c);
                     let (dx, dy) = (p[0] - self.focus.0, p[1] - self.focus.1);
                     if dx * dx + dy * dy > r2 {
                         if matches!(st, TripState::Pending(_)) {
@@ -1176,8 +1313,26 @@ impl RailSim {
                         }
                         continue;
                     }
+                    // never materialise a train in front of the camera: the timetable keeps
+                    // drawing it until it can be placed unseen
+                    if self.in_view(p[0], p[1]) {
+                        continue;
+                    }
                     if !self.spawn(fi, trip, tt) {
                         self.trip_state[fi][trip] = TripState::Pending(tt);
+                    } else {
+                        // placed from the timetable inside the radius (not arriving from outside)
+                        let d_edge = (self.radius - ((p[0] - self.focus.0).hypot(p[1] - self.focus.1))) > 1000.0;
+                        if d_edge {
+                            self.spawned_inside += 1;
+                            if pv < 0 {
+                                self.spawned_first += 1;
+                                if self.pop_log.len() < 40 {
+                                    let pl = &self.plans[pi];
+                                    self.pop_log.push(format!("feed {} mode {} trip {} t-start {:.0} fail {:?} dist {:.0}", fi, pl.mode, trip, tt - tstart, self.po_last, (p[0] - self.focus.0).hypot(p[1] - self.focus.1)));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1204,6 +1359,8 @@ impl RailSim {
         self.spawn_acc += dt;
         if self.spawn_acc >= 1.0 {
             self.spawn_acc = 0.0;
+            self.fill_depots(t);
+            self.pullout_pass(t);
             self.spawn_pass(t);
             self.handoff();
             self.check();
@@ -1278,7 +1435,7 @@ impl RailSim {
                 }
                 i += 1;
             }
-            let stopped = matches!(tr.state, TState::Dwell | TState::Terminal);
+            let stopped = matches!(tr.state, TState::Dwell | TState::Terminal | TState::Parked);
             let mut set_penalty = false;
             let mut warn_now = false;
             let mut a;
@@ -1425,7 +1582,7 @@ impl RailSim {
                     tr.state = TState::Run;
                 }
             }
-            TState::Terminal => {}
+            TState::Terminal | TState::Parked => {}
         }
     }
 
@@ -1473,6 +1630,24 @@ impl RailSim {
                 }
                 continue;
             }
+            if tr.dh {
+                // end of an empty-stock move: parked in a depot, or stabled out of the way
+                if self.trains[ti].depot != NONE {
+                    let tr = &mut self.trains[ti];
+                    tr.state = TState::Parked;
+                    tr.dh = false;
+                    tr.v = 0.0;
+                    tr.a = 0.0;
+                    tr.since = t;
+                } else if t >= self.trains[ti].since + 10.0 {
+                    let tr = &self.trains[ti];
+                    let pos = self.plans[tr.plan as usize].point(&self.net, tr.front);
+                    if !self.in_view(pos[0], pos[1]) || t > tr.since + 600.0 {
+                        self.remove(ti, true);
+                    }
+                }
+                continue;
+            }
             let nx = self.feeds[fi].trip_next[tr.trip as usize];
             if nx >= 0 && t >= tr.since + tr.dy.dwell as f64 * 0.5 {
                 let nx = nx as usize;
@@ -1480,10 +1655,23 @@ impl RailSim {
                     continue;
                 }
             }
-            // no continuation: clear the platform (after a while, or at once when someone waits)
+            // end of an empty-stock move: stabled
+            if self.trains[ti].dh {
+                if t >= self.trains[ti].since + 10.0 {
+                    self.remove(ti, true);
+                }
+                continue;
+            }
+            // no continuation: after the dwell, run empty to the depot (else a siding / tail
+            // track) and stable there; failing that, clear the platform
             let tr = &self.trains[ti];
             let waited = t - tr.since;
-            if waited > 240.0 || (waited > 45.0 && self.blocking(ti)) {
+            if waited > tr.dy.dwell as f64 && (self.pull_in(ti, t) || self.stable(ti, t)) {
+                continue;
+            }
+            let tr = &self.trains[ti];
+            let pos = self.plans[tr.plan as usize].point(&self.net, tr.front);
+            if (waited > 240.0 && !self.in_view(pos[0], pos[1])) || waited > 900.0 || (waited > 45.0 && self.blocking(ti)) {
                 self.remove(ti, true);
             }
         }
@@ -1527,7 +1715,7 @@ impl RailSim {
             return false;
         }
         let old_trip = self.trains[ti].trip as usize;
-        self.trip_state[fi][old_trip] = TripState::Done;
+        self.trip_state[fi][old_trip] = TripState::Finished;
         self.trip_state[fi][nx] = TripState::Agent(self.trains[ti].id);
         let (_, dep) = self.feeds[fi].times(nx, 0);
         let tr = &mut self.trains[ti];
@@ -1618,7 +1806,7 @@ impl RailSim {
             return false;
         }
         let old_trip = self.trains[ti].trip as usize;
-        self.trip_state[fi][old_trip] = TripState::Done;
+        self.trip_state[fi][old_trip] = TripState::Finished;
         self.trip_state[fi][nx] = TripState::Agent(self.trains[ti].id);
         self.turnbacks += 1;
         let tr = &mut self.trains[ti];
@@ -1629,6 +1817,637 @@ impl RailSim {
         tr.state = TState::Run;
         tr.since = t;
         true
+    }
+
+    /// roughly in view of the camera (within 2 km, inside a 130 deg cone)?
+    pub fn in_view(&self, x: f64, y: f64) -> bool {
+        let Some((cx, cy, fx, fy)) = self.camera else { return false };
+        let (dx, dy) = (x - cx, y - cy);
+        let d = dx.hypot(dy);
+        if d > 2000.0 {
+            return false;
+        }
+        d < 60.0 || (dx * fx + dy * fy) / d > 0.42
+    }
+
+    // ------------------------------------------------------------------ depots
+
+    /// depots: per depot [group, feed mask] + storage edge list, centre point
+    pub fn set_depots(&mut self, group: &[u8], feeds: &[u32], off: &[u32], edges: &[u32]) {
+        self.depots.clear();
+        self.park_cache.clear();
+        let ne = self.net.e_from.len() as u32;
+        for d in 0..group.len() {
+            let es: Vec<u32> = edges[off[d] as usize..off[d + 1] as usize].iter().copied().filter(|&e| e < ne).collect();
+            if es.is_empty() {
+                continue;
+            }
+            let (mut x, mut y, mut n) = (0.0, 0.0, 0.0);
+            for &e in &es {
+                let p = self.net.point(e as usize, self.net.e_len[e as usize] * 0.5);
+                x += p[0];
+                y += p[1];
+                n += 1.0;
+            }
+            self.depots.push(Depot { group: group[d], feeds: feeds[d], edges: es, x: x / n, y: y / n, filled: false, rep: None });
+        }
+    }
+
+    /// nearest depot for a feed / track group within `max` m of (x, y)
+    fn depot_near(&self, feed: u32, group: u8, x: f64, y: f64, max: f64) -> Option<usize> {
+        let mut best = None;
+        for (i, d) in self.depots.iter().enumerate() {
+            if d.group != group || d.feeds & (1 << feed.min(31)) == 0 {
+                continue;
+            }
+            let dd = (d.x - x).hypot(d.y - y);
+            if dd < max && best.map_or(true, |(b, _)| dd < b) {
+                best = Some((dd, i));
+            }
+        }
+        best.map(|b| b.1)
+    }
+
+    /// a plan that parks a consist of length `len` on storage edge `e` (front near its far end,
+    /// towards a buffer stop if there is one), extended back over the approach so the whole
+    /// body is on it
+    fn park_plan(&mut self, e: u32, len: f32, feed: u32, local: u32, mode: u8) -> Option<u32> {
+        let key = (e, (len * 10.0) as u32);
+        if let Some(v) = self.park_cache.get(&key) {
+            return *v;
+        }
+        let v = self.build_park_plan(e, len, feed, local, mode);
+        let v = v.map(|p| {
+            self.plans.push(p);
+            (self.plans.len() - 1) as u32
+        });
+        self.park_cache.insert(key, v);
+        v
+    }
+
+    fn build_park_plan(&self, e: u32, len: f32, feed: u32, local: u32, mode: u8) -> Option<Plan> {
+        let net = &self.net;
+        let le = net.e_len[e as usize];
+        if le < 12.0 {
+            return None;
+        }
+        let dead = |end: u32| net.c_off[end as usize + 1] == net.c_off[end as usize];
+        // direction: towards a dead end if there is one
+        let d: i8 = if dead(2 * e + 1) { 1 } else if dead(2 * e) { -1 } else { 1 };
+        let mut items: Vec<(u32, i8)> = vec![(e, d)];
+        let mut avail = le - 8.0;
+        let mut cur = (e, d);
+        let mut guard = 0;
+        while avail < len + 5.0 && guard < 12 {
+            guard += 1;
+            let (ce, cd) = cur;
+            let k_in = if cd > 0 { 0 } else { 1 };
+            let end = 2 * ce + k_in;
+            let (a, b) = (net.c_off[end as usize] as usize, net.c_off[end as usize + 1] as usize);
+            // predecessor: travelling backwards out through `end`
+            let Some(&x) = net.c_to[a..b].first() else { return None };
+            let (e2, k2) = (x >> 1, x & 1);
+            let d2: i8 = if k2 == 1 { 1 } else { -1 };
+            if items.contains(&(e2, d2)) {
+                return None;
+            }
+            items.insert(0, (e2, d2));
+            avail += net.e_len[e2 as usize];
+            cur = (e2, d2);
+        }
+        if avail < len + 5.0 {
+            return None;
+        }
+        let total: f32 = items.iter().map(|x| net.e_len[x.0 as usize]).sum();
+        let front_r = total - 8.0; // with start = 0
+        let start = (front_r - len - 5.0).max(0.0);
+        let front = front_r - start;
+        let edges: Vec<u32> = items.iter().map(|&(e, d)| 2 * e + if d > 0 { 0 } else { 1 }).collect();
+        let mut p = build_plan(net, feed, local, mode, len, true, start, &edges, &[front - len * 0.5], &[0], &self.bidir);
+        if !p.ok {
+            return None;
+        }
+        p.pshift = f32::NAN;
+        Some(p)
+    }
+
+    /// could a train of plan `pi` stand with its front at `front` (resources and bodies free)?
+    fn can_stand(&self, pi: usize, front: f32, len: f32) -> bool {
+        let p = &self.plans[pi];
+        for s in &p.spans {
+            if s.kind != SP_DIR && s.r0 < front && s.r1 > front - len && self.owner[s.res as usize] != NONE {
+                return false;
+            }
+        }
+        self.body_free(usize::MAX, pi, front - len - 8.0, front + 8.0)
+    }
+
+    /// a free parking place in depot `di` for a consist (plan index), or None
+    fn free_slot(&mut self, di: usize, len: f32, feed: u32, local: u32, mode: u8) -> Option<u32> {
+        let mut edges = self.depots[di].edges.clone();
+        edges.sort_by(|a, b| self.net.e_len[*b as usize].partial_cmp(&self.net.e_len[*a as usize]).unwrap_or(std::cmp::Ordering::Equal));
+        for e in edges {
+            let Some(pp) = self.park_plan(e, len, feed, local, mode) else { continue };
+            let p = &self.plans[pp as usize];
+            if self.can_stand(pp as usize, p.length, len) {
+                return Some(pp);
+            }
+        }
+        None
+    }
+
+    /// Pull-in: the train's block is over; run empty to a free place in the nearest depot.
+    fn pull_in(&mut self, ti: usize, t: f64) -> bool {
+        let (fi, pa, len) = (self.trains[ti].feed as usize, self.trains[ti].plan as usize, self.trains[ti].len);
+        if pa >= self.n_pat_plans || self.depots.is_empty() {
+            return false;
+        }
+        let (mode, local) = (self.plans[pa].mode, self.plans[pa].local);
+        let p = self.plans[pa].point(&self.net, self.trains[ti].front);
+        let Some(di) = self.depot_near(fi as u32, mode_group(mode), p[0], p[1], 30000.0) else { return false };
+        // candidate places, nearest first by trying a few
+        let mut edges = self.depots[di].edges.clone();
+        edges.sort_by(|a, b| self.net.e_len[*b as usize].partial_cmp(&self.net.e_len[*a as usize]).unwrap_or(std::cmp::Ordering::Equal));
+        for e in edges.into_iter().take(24) {
+            let Some(pp) = self.park_plan(e, len, fi as u32, local, mode) else { continue };
+            let front_pp = self.plans[pp as usize].length;
+            if !self.can_stand(pp as usize, front_pp, len) {
+                continue;
+            }
+            let legs = match self.dh_cache.get(&(pa as u32, pp)) {
+                Some(v) => v.clone(),
+                None => {
+                    let v = self.plan_turnback(pa, pp as usize);
+                    self.dh_cache.insert((pa as u32, pp), v.clone());
+                    v
+                }
+            };
+            let Some(legs) = legs else { continue };
+            let (ef, sf, df) = self.plans[pa].locate(&self.net, self.trains[ti].front);
+            let Some(nf) = self.plans[legs[0] as usize].find(&self.net, ef, sf, df) else { continue };
+            if !self.switch_plan(ti, legs[0] as usize, nf) {
+                return false;
+            }
+            let trip = self.trains[ti].trip as usize;
+            self.trip_state[fi][trip] = TripState::Finished;
+            self.pullins += 1;
+            let tr = &mut self.trains[ti];
+            tr.legs = legs[1..].to_vec();
+            tr.dh = true;
+            tr.depot = di as u32;
+            tr.stop = 0;
+            tr.state = TState::Run;
+            tr.since = t;
+            return true;
+        }
+        false
+    }
+
+    /// Pull-out: the first trip of a vehicle block starts soon near a depot within the radius:
+    /// a parked train (or, with none there, a train put in a free place) runs empty to the
+    /// trip's first platform in time for its departure.
+    fn pull_out(&mut self, fi: usize, trip: usize, t: f64) -> bool {
+        let before = self.po_fail;
+        let r = self.pull_out_inner(fi, trip, t);
+        for k in 0..5 {
+            self.po_last[k] = self.po_fail[k] - before[k];
+        }
+        r
+    }
+
+    fn pull_out_inner(&mut self, fi: usize, trip: usize, t: f64) -> bool {
+        let f = &self.feeds[fi];
+        let pb = (f.plan0 + f.trip_pattern[trip]) as usize;
+        let start = f.trip_start[trip] as f64;
+        let b = &self.plans[pb];
+        if !b.ok || b.stop_front.len() < 2 {
+            return false;
+        }
+        let (mode, local, len) = (b.mode, b.local, b.len);
+        let p0 = b.point(&self.net, b.stop_front[0]);
+        let Some(di) = self.depot_near(fi as u32, mode_group(mode), p0[0], p0[1], 25000.0) else {
+            self.po_fail[0] += 1;
+            return false;
+        };
+        let d = &self.depots[di];
+        let r2 = self.radius * self.radius;
+        if (d.x - self.focus.0).powi(2) + (d.y - self.focus.1).powi(2) > r2 {
+            // depot outside the radius: the empty train arrives across the radius boundary
+            if self.pull_out_from_outside(fi, trip, di, t) {
+                return true;
+            }
+            self.po_fail[1] += 1;
+            return false;
+        }
+        // a parked train of this consist in the depot with a way out (else one put on a free
+        // track of the depot)
+        let mut cands: Vec<usize> = (0..self.trains.len())
+            .filter(|&k| {
+                let tr = &self.trains[k];
+                !tr.dead && tr.state == TState::Parked && tr.depot == di as u32 && tr.feed == fi as u32 && (tr.len - len).abs() < 3.0
+            })
+            .collect();
+        cands.truncate(8);
+        let mut found = None;
+        for k in cands {
+            let pa = self.trains[k].plan as usize;
+            let legs = match self.dh_cache.get(&(pa as u32, pb as u32)) {
+                Some(v) => v.clone(),
+                None => {
+                    let v = self.plan_turnback(pa, pb);
+                    self.dh_cache.insert((pa as u32, pb as u32), v.clone());
+                    v
+                }
+            };
+            if let Some(l) = legs {
+                found = Some((k, l));
+                break;
+            }
+        }
+        if found.is_none() {
+            for _ in 0..3 {
+                let Some(pp) = self.free_slot(di, len, fi as u32, local, mode) else {
+                    self.po_fail[2] += 1;
+                    return false;
+                };
+                let legs = match self.dh_cache.get(&(pp, pb as u32)) {
+                    Some(v) => v.clone(),
+                    None => {
+                        let v = self.plan_turnback(pp as usize, pb);
+                        self.dh_cache.insert((pp, pb as u32), v.clone());
+                        v
+                    }
+                };
+                let Some(l) = legs else {
+                    // no way out of this track: mark it unusable
+                    self.park_cache.insert((self.plans[pp as usize].items.last().map(|x| x.edge).unwrap_or(0), (len * 10.0) as u32), None);
+                    continue;
+                };
+                // (a train appearing on a visible depot track would be a pop)
+                let q = { let pl = &self.plans[pp as usize]; pl.point(&self.net, pl.length) };
+                if self.in_view(q[0], q[1]) {
+                    return false;
+                }
+                if !self.spawn_parked(fi as u32, pp, di as u32, len, mode) {
+                    self.po_fail[3] += 1;
+                    return false;
+                }
+                found = Some((self.trains.len() - 1, l));
+                break;
+            }
+        }
+        let Some((ti, legs)) = found else {
+            self.po_fail[4] += 1;
+            return false;
+        };
+        let pa = self.trains[ti].plan as usize;
+        // leave early enough: empty-stock speed ~ 8 m/s, a minute per change of ends
+        let dist: f32 = legs.iter().map(|&l| self.plans[l as usize].length).sum();
+        let need = dist as f64 / 8.0 + 60.0 * legs.len() as f64 + 90.0;
+        if t < start - need {
+            return true; // not yet (the parked train waits)
+        }
+        let (ef, sf, df) = self.plans[pa].locate(&self.net, self.trains[ti].front);
+        let Some(nf) = self.plans[legs[0] as usize].find(&self.net, ef, sf, df) else { return false };
+        if !self.switch_plan(ti, legs[0] as usize, nf) {
+            return false;
+        }
+        self.pullouts += 1;
+        self.trip_state[fi][trip] = TripState::Agent(self.trains[ti].id);
+        let toff = t - self.stime;
+        let tr = &mut self.trains[ti];
+        tr.trip = trip as u32;
+        tr.toff = toff;
+        tr.legs = legs[1..].to_vec();
+        tr.dh = !tr.legs.is_empty();
+        tr.depot = NONE;
+        tr.stop = 0;
+        tr.state = TState::Run;
+        tr.since = t;
+        true
+    }
+
+    /// Pull-out from a depot outside the agent radius: the train is placed on the final leg
+    /// of its empty-stock move where that enters the radius, timed to make the departure.
+    fn pull_out_from_outside(&mut self, fi: usize, trip: usize, di: usize, t: f64) -> bool {
+        let f = &self.feeds[fi];
+        let pb = (f.plan0 + f.trip_pattern[trip]) as usize;
+        let start = f.trip_start[trip] as f64;
+        let (mode, local, len) = (self.plans[pb].mode, self.plans[pb].local, self.plans[pb].len);
+        // a representative place in the depot (need not be free: the move starts out of sight)
+        let mut edges = self.depots[di].edges.clone();
+        edges.sort_by(|a, b| self.net.e_len[*b as usize].partial_cmp(&self.net.e_len[*a as usize]).unwrap_or(std::cmp::Ordering::Equal));
+        let mut legs = None;
+        for e in edges.into_iter().take(6) {
+            let Some(pp) = self.park_plan(e, len, fi as u32, local, mode) else { continue };
+            let v = match self.dh_cache.get(&(pp, pb as u32)) {
+                Some(v) => v.clone(),
+                None => {
+                    let v = self.plan_turnback(pp as usize, pb);
+                    self.dh_cache.insert((pp, pb as u32), v.clone());
+                    v
+                }
+            };
+            if v.is_some() {
+                legs = v;
+                break;
+            }
+        }
+        let Some(legs) = legs else { return false };
+        // the final leg (joins the trip); earlier legs (changes of ends) must be outside
+        let last = *legs.last().unwrap() as usize;
+        let lim = (self.radius - 300.0).max(0.0);
+        let inside = |p: [f64; 3], s: &Self| (p[0] - s.focus.0).hypot(p[1] - s.focus.1) < lim;
+        for &l in &legs[..legs.len() - 1] {
+            let pl = &self.plans[l as usize];
+            if inside(pl.point(&self.net, pl.length), self) {
+                return false;
+            }
+        }
+        let pl = &self.plans[last];
+        let first = pl.stop_front[0];
+        // first route position (from the leg start) that is inside the radius
+        let mut r = len + 5.0;
+        while r < first && !inside(pl.point(&self.net, r), self) {
+            r += 50.0;
+        }
+        if r >= first || r < len {
+            return false;
+        }
+        let need = ((first - r) as f64) / 10.0 + 60.0;
+        if t < start - need {
+            return true; // not yet
+        }
+        // place a train there
+        let n = pl.spans.len();
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let toff = t - self.stime;
+        self.trains.push(Train {
+            id, feed: fi as u32, trip: trip as u32, plan: last as u32, front: r, v: 0.0, a: 0.0, len, dy: dyn_for(mode),
+            held: vec![false; n], next: 0, lo: 0, ma: r, stop: 0, state: TState::Run, until: 0.0, since: t, delay: 0.0,
+            player: false, penalty: false, held_t: 0.0, dead: false, cmd: 0.0, emerg: false, toff, dh: false, legs: Vec::new(),
+            warn: 0.0, ext_gap: f32::INFINITY, ext_v: 0.0, sight_gap: f32::INFINITY, sight_v: 0.0, depot: NONE,
+        });
+        let ti = self.trains.len() - 1;
+        if !self.place(ti, r) {
+            self.trains.pop();
+            return false;
+        }
+        let tr = &mut self.trains[ti];
+        tr.v = (self.plans[last].limit_over(r - len, r).min(tr.dy.vmax) * 0.6).min((2.0 * tr.dy.b * (tr.ma - r - tr.dy.margin).max(0.0)).sqrt());
+        self.trip_state[fi][trip] = TripState::Agent(id);
+        self.pullouts += 1;
+        true
+    }
+
+    /// a parked train on park plan `pp` of depot `di`
+    fn spawn_parked(&mut self, feed: u32, pp: u32, di: u32, len: f32, mode: u8) -> bool {
+        let n = self.plans[pp as usize].spans.len();
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let front = self.plans[pp as usize].length;
+        self.trains.push(Train {
+            id,
+            feed,
+            trip: 0,
+            plan: pp,
+            front,
+            v: 0.0,
+            a: 0.0,
+            len,
+            dy: dyn_for(mode),
+            held: vec![false; n],
+            next: 0,
+            lo: 0,
+            ma: front,
+            stop: 0,
+            state: TState::Parked,
+            until: 0.0,
+            since: self.stime,
+            delay: 0.0,
+            player: false,
+            penalty: false,
+            held_t: 0.0,
+            dead: false,
+            cmd: 0.0,
+            emerg: false,
+            toff: 0.0,
+            dh: false,
+            legs: Vec::new(),
+            warn: 0.0,
+            ext_gap: f32::INFINITY,
+            ext_v: 0.0,
+            sight_gap: f32::INFINITY,
+            sight_v: 0.0,
+            depot: di,
+        });
+        let ti = self.trains.len() - 1;
+        if self.place(ti, front) {
+            true
+        } else {
+            self.trains.pop();
+            false
+        }
+    }
+
+    /// Depots coming into the radius get the trains that are stabled there at this time
+    /// of day (most at night, few in the peaks).
+    fn fill_depots(&mut self, t: f64) {
+        let h = (t / 3600.0) % 24.0;
+        let frac = if h < 5.0 {
+            0.85
+        } else if h < 6.5 {
+            0.6
+        } else if (6.5..9.5).contains(&h) || (15.5..18.5).contains(&h) {
+            0.2
+        } else if h < 15.5 {
+            0.4
+        } else if h < 21.0 {
+            0.45
+        } else {
+            0.7
+        };
+        let r = self.radius;
+        for di in 0..self.depots.len() {
+            let (dx0, dy0, filled, dfeeds, dgroup) = {
+                let d = &self.depots[di];
+                (d.x, d.y, d.filled, d.feeds, d.group)
+            };
+            let inside = (dx0 - self.focus.0).hypot(dy0 - self.focus.1) < r - 300.0;
+            if !inside {
+                self.depots[di].filled = false;
+                continue;
+            }
+            if filled {
+                continue;
+            }
+            self.depots[di].filled = true;
+            // representative consist: a pattern of a feed using the depot whose end is nearest
+            if self.depots[di].rep.is_none() {
+                let mut best: Option<(f64, (u32, u32, f32, u8))> = None;
+                for f in &self.feeds {
+                    if dfeeds & (1 << f.id.min(31)) == 0 {
+                        continue;
+                    }
+                    let fi = self.feeds.iter().position(|x| x.id == f.id).unwrap() as u32;
+                    for p in 0..f.pat_mode.len() {
+                        let pl = &self.plans[(f.plan0 + p as u32) as usize];
+                        if !pl.ok || mode_group(pl.mode) != dgroup || pl.stop_front.is_empty() {
+                            continue;
+                        }
+                        let q = pl.point(&self.net, pl.length);
+                        let dd = (q[0] - dx0).hypot(q[1] - dy0);
+                        if best.map_or(true, |b| dd < b.0) {
+                            best = Some((dd, (fi, p as u32, pl.len, pl.mode)));
+                        }
+                    }
+                }
+                self.depots[di].rep = best.map(|b| b.1);
+            }
+            let Some((fi, local, len, mode)) = self.depots[di].rep else { continue };
+            let edges = self.depots[di].edges.clone();
+            let mut cap = 0;
+            let mut plans = Vec::new();
+            for e in edges {
+                if let Some(pp) = self.park_plan(e, len, self.feeds[fi as usize].id, local, mode) {
+                    cap += 1;
+                    plans.push(pp);
+                }
+            }
+            let want = ((cap as f64) * frac).round() as usize;
+            let mut made = 0;
+            for (k, pp) in plans.into_iter().enumerate() {
+                if made >= want {
+                    break;
+                }
+                // spread over the tracks
+                if cap > 0 && (k * want) % cap.max(1) >= want {
+                    continue;
+                }
+                let front = self.plans[pp as usize].length;
+                if self.can_stand(pp as usize, front, len) && self.spawn_parked(fi, pp, di as u32, len, mode) {
+                    made += 1;
+                }
+            }
+        }
+    }
+
+    /// Empty-stock move from the end of the train's trip to the nearest siding / yard /
+    /// tail track ahead (within 3 km), where it is stabled (removed out of the way).
+    fn stable(&mut self, ti: usize, t: f64) -> bool {
+        let pa = self.trains[ti].plan as usize;
+        if pa >= self.n_pat_plans {
+            return false;
+        }
+        let leg = match self.stable_cache.get(&(pa as u32)) {
+            Some(v) => *v,
+            None => {
+                let v = self.plan_stable(pa);
+                self.stable_cache.insert(pa as u32, v);
+                v
+            }
+        };
+        let Some(leg) = leg else { return false };
+        let (ef, sf, df) = self.plans[pa].locate(&self.net, self.trains[ti].front);
+        let Some(nf) = self.plans[leg as usize].find(&self.net, ef, sf, df) else { return false };
+        if !self.switch_plan(ti, leg as usize, nf) {
+            return false;
+        }
+        let (fi, trip) = (self.trains[ti].feed as usize, self.trains[ti].trip as usize);
+        self.trip_state[fi][trip] = TripState::Finished;
+        let tr = &mut self.trains[ti];
+        tr.dh = true;
+        tr.stop = 0;
+        tr.state = TState::Run;
+        tr.since = t;
+        true
+    }
+
+    fn plan_stable(&mut self, pa: usize) -> Option<u32> {
+        let p = self.plan_stable_inner(pa)?;
+        self.plans.push(p);
+        Some((self.plans.len() - 1) as u32)
+    }
+
+    fn plan_stable_inner(&self, pa: usize) -> Option<Plan> {
+        use std::collections::{BinaryHeap, HashMap};
+        let net = &self.net;
+        let a = &self.plans[pa];
+        let len = a.len;
+        let group = |k: u8| if k == K_RAIL { 0 } else { 1 };
+        let g0 = group(net.e_kind[a.items[0].edge as usize]);
+        let allowed = |e: usize| group(net.e_kind[e]) == g0 && !(net.e_kind[e] == K_RAIL && net.e_svc[e] == 2);
+        let (e0, _, d0) = a.locate(net, a.length);
+        let mut dist: HashMap<(u32, i8), f32> = HashMap::new();
+        let mut prev: HashMap<(u32, i8), (u32, i8)> = HashMap::new();
+        let mut heap: BinaryHeap<(std::cmp::Reverse<u32>, u32, i8)> = BinaryHeap::new();
+        dist.insert((e0, d0), 0.0);
+        heap.push((std::cmp::Reverse(0), e0, d0));
+        let mut found: Option<((u32, i8), f32)> = None;
+        while let Some((std::cmp::Reverse(c10), e, d)) = heap.pop() {
+            let c = c10 as f32 / 10.0;
+            if c > 3000.0 {
+                break;
+            }
+            let out = 2 * e + if d > 0 { 1 } else { 0 };
+            let (x0, x1) = (net.c_off[out as usize] as usize, net.c_off[out as usize + 1] as usize);
+            let mut any = false;
+            for &inn in &net.c_to[x0..x1] {
+                let e2 = inn >> 1;
+                let d2: i8 = if inn & 1 == 0 { 1 } else { -1 };
+                if !allowed(e2 as usize) {
+                    continue;
+                }
+                any = true;
+                let l2 = net.e_len[e2 as usize];
+                // a siding / yard / pocket long enough to hold the train
+                if net.e_svc[e2 as usize] != 0 && net.e_svc[e2 as usize] != 3 && l2 >= len + 30.0 {
+                    prev.insert((e2, d2), (e, d));
+                    found = Some(((e2, d2), len + 20.0));
+                    break;
+                }
+                let c2 = c + l2;
+                if c2 < dist.get(&(e2, d2)).copied().unwrap_or(f32::INFINITY) {
+                    dist.insert((e2, d2), c2);
+                    prev.insert((e2, d2), (e, d));
+                    heap.push((std::cmp::Reverse((c2 * 10.0) as u32), e2, d2));
+                }
+            }
+            if found.is_some() {
+                break;
+            }
+            if !any && (e, d) != (e0, d0) && net.e_len[e as usize] >= 20.0 {
+                // dead end (tail track): stop at the buffer
+                found = Some(((e, d), net.e_len[e as usize] - 8.0));
+                break;
+            }
+        }
+        let (end, at) = found?;
+        let mut path = vec![end];
+        let mut k = end;
+        while k != (e0, d0) {
+            k = *prev.get(&k)?;
+            path.push(k);
+        }
+        path.reverse();
+        let rear = a.length - len - 10.0;
+        let i0 = a.items.partition_point(|it| it.base <= rear).max(1) - 1;
+        let mut items: Vec<(u32, i8)> = a.items[i0..].iter().map(|it| (it.edge, it.dir)).collect();
+        items.extend(path.into_iter().skip(1));
+        let start = (rear - a.items[i0].base).max(0.0);
+        let pre: f32 = items[..items.len() - 1].iter().map(|x| net.e_len[x.0 as usize]).sum();
+        let end_r = pre - start + at;
+        if end_r < a.length + 5.0 {
+            return None;
+        }
+        let edges: Vec<u32> = items.iter().map(|&(e, d)| 2 * e + if d > 0 { 0 } else { 1 }).collect();
+        let mut p = build_plan(net, a.feed, a.local, a.mode, len, true, start, &edges, &[end_r - len * 0.5], &[0], &self.bidir);
+        if !p.ok {
+            return None;
+        }
+        p.pshift = f32::NAN;
+        Some(p)
     }
 
     /// legs (plan indices) for a turnback from the end of plan `pa` onto plan `pb`
@@ -1677,7 +2496,7 @@ impl RailSim {
         let mut found = None;
         while let Some((std::cmp::Reverse(c10), e, d, r)) = heap.pop() {
             let c = c10 as f32 / 10.0;
-            if c > dist.get(&(e, d, r)).copied().unwrap_or(f32::INFINITY) + 0.5 || c > 8000.0 {
+            if c > dist.get(&(e, d, r)).copied().unwrap_or(f32::INFINITY) + 0.5 || c > 60000.0 {
                 continue;
             }
             if let Some(&j) = join.get(&(e, d)) {
@@ -1705,7 +2524,7 @@ impl RailSim {
                     heap.push((key(c2), e2, d2, r));
                 }
                 // change ends on a long enough track beyond the switch
-                if r < 2 && l2 >= len + 40.0 && allowed(e2 as usize, -d2) {
+                if r < 3 && l2 >= len + 40.0 && allowed(e2 as usize, -d2) {
                     let k3 = (e2, -d2, r + 1);
                     let c3 = c + len + 20.0 + 300.0 + len + 20.0;
                     if c3 < dist.get(&k3).copied().unwrap_or(f32::INFINITY) {
@@ -1716,7 +2535,7 @@ impl RailSim {
                 }
             }
             // dead end (tail track / buffer): change ends here
-            if !any && r < 2 && allowed(e as usize, -d) {
+            if !any && r < 3 && allowed(e as usize, -d) {
                 let k3 = (e, -d, r + 1);
                 let c3 = c + 300.0 + net.e_len[e as usize];
                 if c3 < dist.get(&k3).copied().unwrap_or(f32::INFINITY) {
@@ -1829,7 +2648,7 @@ impl RailSim {
             self.player = None;
         }
         if fi < self.trip_state.len() && trip < self.trip_state[fi].len() {
-            self.trip_state[fi][trip] = if done { TripState::Done } else { TripState::None };
+            self.trip_state[fi][trip] = if done { TripState::Finished } else { TripState::None };
         }
     }
 
@@ -1849,6 +2668,9 @@ impl RailSim {
             let stuck = tr.held_t > 600.0;
             if far || stuck {
                 self.remove(ti, true);
+                if let Some(ts) = self.trip_state.get_mut(self.trains[ti].feed as usize) {
+                    ts[self.trains[ti].trip as usize] = TripState::Done;
+                }
             }
         }
     }
@@ -1930,7 +2752,7 @@ impl RailSim {
             }
             self.out.extend_from_slice(&[
                 tr.feed as f32,
-                tr.trip as f32,
+                if tr.state == TState::Parked { -1.0 } else { tr.trip as f32 },
                 tr.front - tr.len * 0.5 - plan.pshift,
                 tr.v,
                 tr.a,
@@ -1943,10 +2765,17 @@ impl RailSim {
                 (n + 1) as f32,
             ]);
         }
-        // pending trips inside the radius: hidden until placed
+        // pending trips inside the radius (hidden until placed) and trips finished in the sim
+        // that the timetable still runs (hidden)
+        let t = self.stime;
         for (fi, ts) in self.trip_state.iter().enumerate() {
             for (trip, s) in ts.iter().enumerate() {
-                if let TripState::Pending(_) = s {
+                let hide = match s {
+                    TripState::Pending(_) => true,
+                    TripState::Finished => (t as i32) <= self.feeds[fi].trip_end[trip] + 60,
+                    _ => false,
+                };
+                if hide {
                     let pl = self.feeds[fi].plan0 + self.feeds[fi].trip_pattern[trip];
                     self.out.extend_from_slice(&[fi as f32, trip as f32, 0.0, 0.0, 0.0, f32::from_bits(RF_PENDING), 0.0, 0.0, self.plans[pl as usize].local as f32, 0.0, 0.0, 0.0]);
                 }
@@ -2022,6 +2851,27 @@ impl RailSim {
         let b0 = self.plans[pb].locate(&self.net, self.plans[pb].stop_front[0]);
         let tb = self.plan_turnback(pa, pb);
         format!("next {nx} state {st:?} pb {pb} ok {} A end {:?} B first {:?} turnback {:?}", self.plans[pb].ok, a_end, b0, tb)
+    }
+
+    pub fn debug_pullout(&mut self, fi: usize, trip: usize) -> String {
+        let f = &self.feeds[fi];
+        let pb = (f.plan0 + f.trip_pattern[trip]) as usize;
+        let b = &self.plans[pb];
+        let p0 = b.point(&self.net, b.stop_front[0]);
+        let (mode, local, len) = (b.mode, b.local, b.len);
+        let Some(di) = self.depot_near(fi as u32, mode_group(mode), p0[0], p0[1], 25000.0) else { return "no depot".into() };
+        let d = &self.depots[di];
+        let mut out = format!("trip {trip} first stop ({:.0},{:.0}) depot {di} at ({:.0},{:.0}) edges {} ", p0[0], p0[1], d.x, d.y, d.edges.len());
+        let edges = d.edges.clone();
+        let mut nplans = 0;
+        for e in edges.into_iter().take(10) {
+            if let Some(pp) = self.park_plan(e, len, fi as u32, local, mode) {
+                nplans += 1;
+                let r = self.plan_turnback(pp as usize, pb);
+                out += &format!("[pp {pp} -> {:?}] ", r.map(|v| v.len()));
+            }
+        }
+        out + &format!(" park plans {nplans}")
     }
 
     /// why is train `ti` held? (kind, resource, owner id / dir-lock state, span r0, front)
@@ -2461,7 +3311,7 @@ pub mod tests {
         assert_eq!(sim.overruns, 0, "authority overruns");
         assert!(mx >= 2, "trains ran concurrently ({mx})");
         // every trip reached its terminal
-        assert!(sim.trip_state[0].iter().all(|s| matches!(s, TripState::Done) || matches!(s, TripState::Agent(_))), "{:?}", sim.trip_state[0]);
+        assert!(sim.trip_state[0].iter().all(|s| matches!(s, TripState::Done | TripState::Finished | TripState::Agent(_))), "{:?}", sim.trip_state[0]);
     }
 
     #[test]
@@ -2478,7 +3328,7 @@ pub mod tests {
         assert_eq!(ov, 0);
         assert_eq!(sim.overruns, 0);
         // both completed (one after the other)
-        assert!(sim.trip_state[0].iter().all(|s| matches!(s, TripState::Done)), "{:?}", sim.trip_state[0]);
+        assert!(sim.trip_state[0].iter().all(|s| matches!(s, TripState::Done | TripState::Finished)), "{:?}", sim.trip_state[0]);
     }
 
     #[test]

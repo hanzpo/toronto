@@ -92,6 +92,8 @@ fn load() -> Option<RailSim> {
     );
     let mut sim = RailSim::default();
     sim.set_net(net);
+    let (_, nh) = read_tbn(&data().join("rail/network.bin.gz"))?;
+    let agencies = ["ttc", "go", "up", "via"];
     for (id, ag) in ["ttc", "go", "up", "via"].iter().enumerate() {
         let Some((a, _)) = read_tbn(&data().join(format!("transit/{ag}_weekday_rail.bin.gz"))) else { continue };
         if !a.contains_key("pat_redge") {
@@ -117,6 +119,25 @@ fn load() -> Option<RailSim> {
             &i32s(&a["trip_next"]),
         );
     }
+    // depots from the network header: {"group":g,"agencies":[..],"edges":[..]}
+    let (mut groups, mut masks, mut off, mut edges) = (Vec::new(), Vec::new(), vec![0u32], Vec::new());
+    if let Some(a) = nh.find("\"depots\":[") {
+        for item in nh[a..].split("{\"id\"").skip(1) {
+            let num = |k: &str| -> Option<&str> { let i = item.find(k)? + k.len(); Some(&item[i..]) };
+            let g: u8 = num("\"group\":").and_then(|r| r.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()).unwrap_or(0);
+            let ags = num("\"agencies\":[").map(|r| r.split(']').next().unwrap_or("")).unwrap_or("");
+            let mut mask = 0u32;
+            for (i, ag) in agencies.iter().enumerate() {
+                if ags.contains(&format!("\"{ag}\"")) { mask |= 1 << i; }
+            }
+            let es = num("\"edges\":[").map(|r| r.split(']').next().unwrap_or("")).unwrap_or("");
+            let list: Vec<u32> = es.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+            if mask == 0 || list.is_empty() { continue; }
+            groups.push(g); masks.push(mask); edges.extend(list); off.push(edges.len() as u32);
+        }
+    }
+    sim.set_depots(&groups, &masks, &off, &edges);
+    eprintln!("depots loaded: {}", sim.depots.len());
     Some(sim)
 }
 
@@ -141,6 +162,7 @@ fn run(sim: &mut RailSim, focus: (f64, f64), t0: f64, secs: f64, dt: f32) -> Rep
     let mut chained = 0;
     let mut last_trip: HashMap<u32, u32> = HashMap::new();
     let mut delays = Vec::new();
+    let mut cats: HashMap<String, usize> = HashMap::new();
     let (mut held_samples, mut total_samples) = (0u64, 0u64);
     while t < t0 + secs {
         sim.step(dt, t);
@@ -163,12 +185,41 @@ fn run(sim: &mut RailSim, focus: (f64, f64), t0: f64, secs: f64, dt: f32) -> Rep
                 total_samples += 1;
                 if tr.held_t > 30.0 { held_samples += 1; }
             }
+            let _ = &cats;
             if tr.state == TState::Dwell && steps % 50 == 0 {
                 delays.push(tr.delay.abs() as f64);
             }
         }
+        if steps % 50 == 0 {
+            for ti in 0..sim.trains.len() {
+                if sim.trains[ti].held_t <= 30.0 { continue; }
+                // follow to the root blocker
+                let mut cur = ti;
+                for _ in 0..40 {
+                    match sim.blocker(cur).and_then(|id| if id == 0 { None } else { sim.trains.iter().position(|t| t.id == id) }) {
+                        Some(j) if sim.trains[j].held_t > 1.0 && j != ti => cur = j,
+                        _ => break,
+                    }
+                }
+                let root_desc = { let r = &sim.trains[cur]; let p = &sim.plans[r.plan as usize]; format!(" root:{:?} stop {}/{} f{}", r.state, r.stop, p.stop_front.len(), r.feed) };
+                let _ = &root_desc;
+                let cat = match sim.blocker(cur) {
+                    None => "none".to_string(),
+                    Some(0) => "dirlock".to_string(),
+                    Some(id) => match sim.trains.iter().find(|t| t.id == id) {
+                        Some(o) => format!("{}{:?}{} v{:.0} gap{:.0}", if o.held_t > 1.0 { "held-" } else { "" }, o.state, if o.legs.is_empty() { "" } else { "+legs" }, o.v, (o.front - o.len) - sim.trains[cur].front),
+                        None => "gone".to_string(),
+                    },
+                };
+                let m = sim.plans[sim.trains[ti].plan as usize].mode;
+                *cats.entry(format!("m{} {}", m, cat)).or_insert(0usize) += 1;
+            }
+        }
         t += dt as f64;
     }
+    let mut cv: Vec<_> = cats.iter().collect();
+    cv.sort_by_key(|x| std::cmp::Reverse(*x.1));
+    eprintln!("  held causes: {:?}", &cv[..cv.len().min(14)]);
     let _ = trips_before;
     // root causes: follow blockers to a train that is not itself held
     let mut roots: HashMap<u32, usize> = HashMap::new();
@@ -235,8 +286,8 @@ fn union_morning_peak() {
     // Union Station, 7:30 - 8:30
     let r = run(&mut sim, (-120.0, -950.0), 7.5 * 3600.0, 3600.0, 0.2);
     eprintln!(
-        "union: turnbacks {} max trains {} overlaps {} overruns {} held>30s {}% chained {} mean |delay| {:.0}s  {:.3} ms/step",
-        sim.turnbacks, r.max_trains, r.overlaps, r.overruns, r.stuck, r.chained, r.mean_abs_delay, r.ms_per_step
+        "union: pullouts {} pullins {} parked {} turnbacks {} max trains {} overlaps {} overruns {} held>30s {}% chained {} mean |delay| {:.0}s  {:.3} ms/step",
+        sim.pullouts, sim.pullins, sim.trains.iter().filter(|t| t.state == TState::Parked).count(), sim.turnbacks, r.max_trains, r.overlaps, r.overruns, r.stuck, r.chained, r.mean_abs_delay, r.ms_per_step
     );
     assert_eq!(r.overlaps, 0, "train bodies overlapped");
     assert_eq!(r.overruns, 0, "a train passed the end of its authority");
@@ -257,4 +308,31 @@ fn union_bloor_weston_corridor() {
     );
     assert_eq!(r.overlaps, 0);
     assert_eq!(r.overruns, 0);
+}
+
+#[test]
+fn early_morning_pullouts() {
+    let Some(mut sim) = load() else { return };
+    // 5:00 - 7:00 around Union: blocks start from the depots
+    let r0 = run(&mut sim, (-120.0, -950.0), 5.0 * 3600.0, 60.0, 0.25);
+    let _ = r0;
+    let (i0, f0) = (sim.spawned_inside, sim.spawned_first);
+    let r = run(&mut sim, (-120.0, -950.0), 5.0 * 3600.0 + 60.0, 7140.0, 0.25);
+    eprintln!("after start-up: placed inside the radius {} (first of block {}) pull-out failures {:?}", sim.spawned_inside - i0, sim.spawned_first - f0, sim.po_fail);
+    for l in sim.pop_log.iter().take(25) { eprintln!("  pop {l}"); }
+    let parked = sim.trains.iter().filter(|t| t.state == TState::Parked).count();
+    eprintln!("morning: pullouts {} pullins {} parked {} max trains {} overlaps {} overruns {} held>30s {}%", sim.pullouts, sim.pullins, parked, r.max_trains, r.overlaps, r.overruns, r.stuck);
+    assert_eq!(r.overlaps, 0);
+    assert_eq!(r.overruns, 0);
+    assert!(sim.pullouts > 20, "few pull-outs: {}", sim.pullouts);
+}
+
+#[test]
+fn debug_tram_pullout() {
+    let Some(mut sim) = load() else { return };
+    sim.focus = (-120.0, -950.0);
+    sim.step(0.25, 5.0 * 3600.0);
+    for trip in [8usize, 15, 22] {
+        eprintln!("{}", sim.debug_pullout(0, trip));
+    }
 }

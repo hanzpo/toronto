@@ -63,12 +63,15 @@ type GraphHeader = { names?: string[] };
 let railNetLoaded: Promise<boolean> | null = null;
 let railProfile = '';
 let railLoading = false;
+let railDepots: { group: number; agencies: string[]; edges: number[] }[] = [];
 const u32 = (a: ArrayLike<number>) => (a instanceof Uint32Array ? a : Uint32Array.from(a));
 
 async function loadRailNet(): Promise<boolean> {
   const buf = await fetchBin(`${dataRoot}/rail/network.bin.gz`);
   if (!buf || !sim) return false;
-  const a = decodeTbn(buf).arrays;
+  const t = decodeTbn<{ depots?: typeof railDepots }>(buf);
+  const a = t.arrays;
+  railDepots = t.header.depots ?? [];
   sim.rail_network(
     a.n_xyz as Float32Array, a.n_flags as Uint8Array, u32(a.e_from), u32(a.e_to), u32(a.e_off), a.e_xyz as Float32Array,
     a.e_vlim as Uint8Array, a.e_len as Float32Array, a.e_kind as Uint8Array, a.e_service as Uint8Array, a.e_dir as Uint8Array,
@@ -105,6 +108,15 @@ async function loadRail(profile: string) {
         (a.trip_next as Int32Array | undefined) ?? new Int32Array(0),
       );
     }
+    // depots: feed masks follow the feed ids just assigned
+    const off = [0], edges: number[] = [], groups: number[] = [], masks: number[] = [];
+    for (const d of railDepots) {
+      let mask = 0;
+      for (const ag of d.agencies) { const i = agencies.indexOf(ag); if (i >= 0 && i < 32) mask |= 1 << i; }
+      if (!mask) continue;
+      groups.push(d.group); masks.push(mask >>> 0); edges.push(...d.edges); off.push(edges.length);
+    }
+    sim.rail_set_depots(Uint8Array.from(groups), Uint32Array.from(masks), Uint32Array.from(off), Uint32Array.from(edges));
     railProfile = profile;
     post({ type: 'railFeeds', profile, agencies });
   } catch (e) {
@@ -242,6 +254,7 @@ function tick(m: TickMsg) {
       if (m.railProfile && m.railProfile !== railProfile) void loadRail(m.railProfile);
       sim.rail_set_radius(m.railRadius ?? 0);
       if (m.railCmd) sim.rail_player_input(m.railCmd.cmd, m.railCmd.emergency);
+      if (m.camera) sim.rail_set_camera(m.camera[0], m.camera[1], m.camera[2], m.camera[3]);
       const pl = m.player;
       sim.set_obstacles(m.obst ?? new Float64Array(0));
       if (pl) manageFootprints(hf[HF.PLAYER + 1], hf[HF.PLAYER + 2]);
@@ -285,6 +298,7 @@ function tick(m: TickMsg) {
       Atomics.store(hdr, H.FAST, fast ? 1 : 0);
       const rs = sim.rail_stats();
       for (let i = 0; i < 4; i++) hf[HF.RAIL + i] = rs[i];
+      for (let i = 4; i < 7; i++) hf[HF.RAILX + i - 4] = rs[i];
       const rp = sim.rail_player_state();
       for (let i = 0; i < 14; i++) hf[HF.RAILP + i] = rp[i] ?? 0;
       const st = sim.stats();

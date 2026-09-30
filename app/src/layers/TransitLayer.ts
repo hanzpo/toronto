@@ -121,11 +121,26 @@ export class TransitLayer implements Layer {
   private evalBox: [number, number, number, number] = [0, 0, 0, 0];
   /** global trip -> rail agent record index this frame (-1: managed by the sim but not placed yet) */
   private agents = new Map<number, number>();
+  /** records of trains parked in depots */
+  private parked: number[] = [];
   private railSnap: ReturnType<RailSource['railSnapshot']> = null;
   /** rail agents drawn this frame */
   agentCount = 0;
   /** stats: cars drawn individually / vehicles held; dupes = trips drawn by more than one representation (must stay 0) */
   stats = { cars: 0, held: 0, near: 0, dupes: 0 };
+  /**
+   * Pick segments of everything drawn this frame: per car / marker [trip, ax, ay, bx, by, z]
+   * (world E/N of its two ends, elevation of the roof line) — `pickCount` entries.
+   */
+  pickSegs = new Float64Array(6 * 4096);
+  /** vehicles near the camera this / last frame (identity -> position) for the pop counter */
+  private seen = new Map<string, [number, number]>();
+  private seenPrev = new Map<string, [number, number]>();
+  private camPrev: [number, number, number, number] | null = null;
+  private popT = 0;
+  /** vehicles that appeared / vanished in plain view (< 2 km, in the view cone): must stay 0 */
+  popStats = { spawn: 0, despawn: 0, examples: [] as { kind: string; e: number; n: number; key: string }[] };
+  pickCount = 0;
   /** trip -> pose of the vehicle as drawn this frame (centre, heading, length) */
   private drawnPose = new Map<number, { x: number; y: number; z: number; heading: number; length: number }>();
   private posePool: { x: number; y: number; z: number; heading: number; length: number }[] = [];
@@ -229,6 +244,7 @@ export class TransitLayer implements Layer {
     this.pools.begin();
     for (const p of this.drawnPose.values()) this.posePool.push(p);
     this.drawnPose.clear();
+    this.pickCount = 0;
     let dupes = 0;
     this.groundN = 0;
     this.stats.near = 0;
@@ -245,6 +261,7 @@ export class TransitLayer implements Layer {
       const v = this.system.evaluate(this.lastT);
       const near = ctx.altitude < 3000;
       const rail = this.railAgents();
+      this.applyDelays(v);
       if (this.drawn.length < v.capacity) this.drawn = new Uint8Array(v.capacity);
       if (this.rdist.length < v.capacity) this.rdist = new Float64Array(v.capacity);
       this.drawn.fill(0, 0, v.count);
@@ -316,8 +333,9 @@ export class TransitLayer implements Layer {
             const prev = this.prevSpeed.get(trip) ?? sp;
             next.set(trip, sp);
             const braking = sp < 0.2 || v.state[i] === STATE_DWELL || sp < prev - 0.01;
-            this.drawConsist(shape, lay, this.rdist[i] + lay.length / 2, 1, this.routeTint[v.route[i]] ?? _white, dc > LOW_DETAIL, braking ? FLAG_BRAKE : 0, LANE_OFFSET[v.mode[i]]);
+            this.drawConsist(shape, lay, this.rdist[i] + lay.length / 2, 1, this.routeTint[v.route[i]] ?? _white, dc > LOW_DETAIL, braking ? FLAG_BRAKE : 0, LANE_OFFSET[v.mode[i]], trip);
             if (!this.notePose(trip, shape, this.rdist[i], lay.length, 1, LANE_OFFSET[v.mode[i]])) dupes++;
+            this.noteSeen('t' + trip, v.x[i], v.y[i], camE, camN);
             this.stats.near++;
             continue;
           }
@@ -327,7 +345,9 @@ export class TransitLayer implements Layer {
         if (k >= mk.capacity) continue;
         mk.setMarker(k, v.x[i], v.y[i], v.z[i], v.heading[i], color);
         counts.set(mode, k + 1);
+        this.pushPick(v.trip[i], v.x[i], v.y[i], v.z[i] + 2, v.heading[i], Math.max(sty.size[0], sty.minPixels * markerPx * dc * pxK));
         if (!this.notePoint(v.trip[i], v.x[i], v.y[i], v.z[i], v.heading[i], sty.size[0])) dupes++;
+        this.noteSeen('t' + v.trip[i], v.x[i], v.y[i], camE, camN);
       }
       this.nextSpeed = this.prevSpeed;
       this.prevSpeed = next;
@@ -336,10 +356,12 @@ export class TransitLayer implements Layer {
         const { f, u, path, oe, on } = rail;
         const adv = Math.min(0.15, Math.max(0, (clock.simMs - rail.simMs) / 1000));
         this.agentCount = 0;
-        for (const [trip, k] of this.agents) {
+        const list: [number, number][] = [...this.agents];
+        for (const k of this.parked) list.push([-1, k]);
+        for (const [trip, k] of list) {
           if (k < 0 || this.overrides.has(trip)) continue;
           const o = k * RAIL_STRIDE;
-          const pat = this.system.tripPattern(trip);
+          const pat = trip >= 0 ? this.system.tripPattern(trip) : this.system.patternIndex(rail.feeds[f[o]] ?? '', 'rail', f[o + 8]);
           const mode = pat >= 0 ? this.system.patternMode(pat) : null;
           if (!mode || (!near && !an[STYLE[mode].key])) continue;
           const route = this.system.patternRoute(pat);
@@ -356,6 +378,7 @@ export class TransitLayer implements Layer {
           if (!view.sphereEN(c[0], c[1], c[2], rad)) continue;
           this.agentCount++;
           const flags = u[o + 5];
+          this.noteSeen('a' + u[o + 9], c[0], c[1], camE, camN);
           // at-grade LRT agents are obstacles for road traffic
           if (near && (SURFACE & (1 << MODE_ID[mode])) && Math.abs(c[0] - fE) < HOLD_RADIUS && Math.abs(c[1] - fN) < HOLD_RADIUS) {
             const fp = shape.point(front, _q);
@@ -365,7 +388,7 @@ export class TransitLayer implements Layer {
             }
           }
           if (near && dc < NEAR) {
-            this.drawConsist(shape, lay, front, 1, this.routeTint[route] ?? _white, dc > LOW_DETAIL, flags & RAIL_FLAG.BRAKE ? FLAG_BRAKE : 0, 0);
+            this.drawConsist(shape, lay, front, 1, this.routeTint[route] ?? _white, dc > LOW_DETAIL, flags & RAIL_FLAG.BRAKE ? FLAG_BRAKE : 0, 0, trip);
             if (!this.notePose(trip, shape, front - lay.length / 2, lay.length, 1, 0)) dupes++;
             this.stats.near++;
           } else {
@@ -376,6 +399,7 @@ export class TransitLayer implements Layer {
             const hd = Math.atan2(d[1], d[0]);
             mk.setMarker(kk, c[0], c[1], c[2], hd, this.routeColor[route] ?? 0xffffff);
             counts.set(mode, kk + 1);
+            this.pushPick(trip, c[0], c[1], c[2] + 2, hd, Math.max(lay.length, sty.minPixels * markerPx * dc * pxK));
             if (!this.notePoint(trip, c[0], c[1], c[2], hd, lay.length)) dupes++;
           }
         }
@@ -404,6 +428,7 @@ export class TransitLayer implements Layer {
       mk.setMarker(k, o.x, o.y, o.z, o.heading, this.routeColor[o.route] ?? 0xffffff);
       counts.set(o.mode, k + 1);
     }
+    this.popCheck(ctx);
     this.pools.commit();
     this.stats.cars = this.pools.instances;
     this.stats.dupes = dupes;
@@ -411,7 +436,9 @@ export class TransitLayer implements Layer {
     if (qa) {
       qa.transitDupes = ((qa.transitDupes as number) || 0) + dupes;
       const rs = (this.traffic() as unknown as { railStats?(): number[] } | null)?.railStats?.();
-      if (rs) { qa.railAgents = rs[0]; qa.trainOverlaps = rs[1]; qa.railOverruns = rs[2]; qa.railTurnbacks = rs[3]; }
+      if (rs) { qa.railAgents = rs[0]; qa.trainOverlaps = rs[1]; qa.railOverruns = rs[2]; qa.railTurnbacks = rs[3]; qa.railPullouts = rs[4]; qa.railPullins = rs[5]; qa.railParked = rs[6]; }
+      qa.vehicleSpawnInView = this.popStats.spawn + this.popStats.despawn;
+      qa.vehicleSpawnInViewExamples = this.popStats.examples;
     }
     for (const m of MODE_LIST) {
       const mk = this.markers.get(m)!;
@@ -444,6 +471,36 @@ export class TransitLayer implements Layer {
     return this.drawnPose.get(trip) ?? null;
   }
 
+  /** trips handed back from the rail sim to the timetable: delay (s) when handed back */
+  private delays = new Map<number, { d: number; t: number }>();
+  private lastAgentDelay = new Map<number, number>();
+
+  /**
+   * A train that leaves the agent radius is drawn from the timetable again, shifted by
+   * the delay it had (recovering 6 s per minute) so it does not jump ahead.
+   */
+  private applyDelays(v: import('../transit').VehicleBuffers) {
+    const now = this.lastT;
+    for (const [trip, d] of this.lastAgentDelay) {
+      if (!this.agents.has(trip) && d > 5) this.delays.set(trip, { d, t: now });
+    }
+    this.lastAgentDelay.clear();
+    const f = this.railSnap?.f;
+    if (f) for (const [trip, k] of this.agents) if (k >= 0) this.lastAgentDelay.set(trip, f[k * RAIL_STRIDE + 6]);
+    if (!this.delays.size) return;
+    for (let i = 0; i < v.count; i++) {
+      const e = this.delays.get(v.trip[i]);
+      if (!e) continue;
+      if (this.agents.has(v.trip[i])) { this.delays.delete(v.trip[i]); continue; }
+      const d = e.d - Math.max(0, now - e.t) * 0.1;
+      if (d <= 1) { this.delays.delete(v.trip[i]); continue; }
+      const vs = this.system.vehicleAt(v.trip[i], now - d);
+      if (!vs) continue;
+      v.x[i] = vs.x; v.y[i] = vs.y; v.z[i] = vs.z; v.heading[i] = vs.heading; v.dist[i] = vs.dist; v.speed[i] = vs.speed; v.state[i] = vs.state;
+    }
+    if (this.delays.size > 2000) this.delays.clear();
+  }
+
   /** read the rail agents published by the traffic sim; fills `agents` */
   private railAgents() {
     this.agents.clear();
@@ -455,10 +512,12 @@ export class TransitLayer implements Layer {
     this.railSnap = snap;
     if (!snap || !snap.count) return null;
     const { f, u, feeds } = snap;
+    this.parked.length = 0;
     for (let k = 0; k < snap.count; k++) {
       const o = k * RAIL_STRIDE;
       const agency = feeds[f[o]];
       if (!agency) continue;
+      if (f[o + 1] < 0) { this.parked.push(k); continue; } // stabled in a depot (no trip)
       const trip = this.system.tripIndex(agency, 'rail', f[o + 1]);
       if (trip < 0) continue;
       this.agents.set(trip, u[o + 5] & RAIL_FLAG.PENDING ? -1 : k);
@@ -490,6 +549,14 @@ export class TransitLayer implements Layer {
     return [...this.agents.keys()];
   }
 
+  /** State of a rail-agent trip from the sim (null if the timetable drives it). */
+  agentInfo(trip: number): { dist: number; speed: number; delay: number; dwell: boolean; doors: boolean; deadhead: boolean } | null {
+    const k = this.agents.get(trip);
+    if (k === undefined || k < 0 || !this.railSnap) return null;
+    const o = k * RAIL_STRIDE, f = this.railSnap.f, fl = this.railSnap.u[o + 5];
+    return { dist: f[o + 2], speed: f[o + 3], delay: f[o + 6], dwell: !!(fl & RAIL_FLAG.DWELL), doors: !!(fl & RAIL_FLAG.DOORS), deadhead: !Number.isFinite(f[o + 2]) };
+  }
+
   /** Is this trip driven by the rail sim right now? */
   isAgent(trip: number): boolean {
     return this.agents.has(trip);
@@ -503,13 +570,61 @@ export class TransitLayer implements Layer {
     this.groundN++;
   }
 
-  private drawConsist(shape: PatternShape, lay: ConsistLayout, front: number, dir: 1 | -1, tint: THREE.Color, low: boolean, flags: number, lat: number) {
+  private drawConsist(shape: PatternShape, lay: ConsistLayout, front: number, dir: 1 | -1, tint: THREE.Color, low: boolean, flags: number, lat: number, trip = -1) {
     const H = (e: number, n: number) => this.engine.heightAt(e, n);
     const pose = this.pose;
     for (let c = 0; c < lay.cars.length; c++) {
       placeCar(shape, lay, c, front, H, pose, dir, lat);
       this.pools.add(lay.cars[c], low, pose.e - this.ax, pose.z, -pose.n - this.az, pose.heading, pose.pitch, tint, flags);
+      if (trip >= 0) this.pushPick(trip, pose.e, pose.n, pose.z + lay.cars[c].size[1] * 0.6, pose.heading, lay.cars[c].size[0]);
     }
+  }
+
+  private noteSeen(key: string, e: number, n: number, camE: number, camN: number) {
+    if (Math.hypot(e - camE, n - camN) < 2500) this.seen.set(key, [e, n]);
+  }
+
+  /** compare the vehicles near the camera with last frame: appearing / vanishing in view */
+  private popCheck(ctx: FrameContext) {
+    const ce = ctx.cameraPos.x, cn = -ctx.cameraPos.z;
+    const dir = this.engine.camera.getWorldDirection(_v3);
+    let fx = dir.x, fy = -dir.z;
+    const fl = Math.hypot(fx, fy) || 1; fx /= fl; fy /= fl;
+    const prev = this.camPrev;
+    this.camPrev = [ce, cn, fx, fy];
+    const cur = this.seen;
+    const old = this.seenPrev;
+    // skip camera jumps and clock jumps (scrubbing / setTimeOfDay)
+    const tJump = Math.abs(this.lastT - this.popT - ctx.simDt) > 5;
+    this.popT = this.lastT;
+    if (prev && !tJump && Math.hypot(ce - prev[0], cn - prev[1]) < 150 && ctx.simDt < 1) {
+      const inCone = (e: number, n: number, c: [number, number, number, number]) => {
+        const dx = e - c[0], dy = n - c[1], d = Math.hypot(dx, dy);
+        return d < 2000 && (d < 40 || (dx * c[2] + dy * c[3]) / d > 0.6);
+      };
+      const appeared: [string, number, number][] = [], vanished: [string, number, number][] = [];
+      for (const [k, p] of cur) if (!old.has(k) && inCone(p[0], p[1], prev) && inCone(p[0], p[1], this.camPrev)) appeared.push([k, p[0], p[1]]);
+      for (const [k, p] of old) if (!cur.has(k) && inCone(p[0], p[1], prev) && inCone(p[0], p[1], this.camPrev)) vanished.push([k, p[0], p[1]]);
+      // a representation swap (timetable <-> sim) moves the key but not the vehicle
+      const near = (a: [string, number, number], list: [string, number, number][]) => list.some((b) => Math.hypot(a[1] - b[1], a[2] - b[2]) < 40);
+      for (const a of appeared) if (!near(a, vanished)) { this.popStats.spawn++; if (this.popStats.examples.length < 20) this.popStats.examples.push({ kind: 'spawn', e: a[1], n: a[2], key: a[0] }); }
+      for (const a of vanished) if (!near(a, appeared)) { this.popStats.despawn++; if (this.popStats.examples.length < 20) this.popStats.examples.push({ kind: 'despawn', e: a[1], n: a[2], key: a[0] }); }
+    }
+    this.seenPrev = cur;
+    this.seen = old;
+    this.seen.clear();
+  }
+
+  private pushPick(trip: number, e: number, n: number, z: number, heading: number, length: number) {
+    if ((this.pickCount + 1) * 6 > this.pickSegs.length) {
+      const b = new Float64Array(this.pickSegs.length * 2);
+      b.set(this.pickSegs);
+      this.pickSegs = b;
+    }
+    const o = this.pickCount * 6, c = Math.cos(heading) * length / 2, s = Math.sin(heading) * length / 2;
+    const p = this.pickSegs;
+    p[o] = trip; p[o + 1] = e - c; p[o + 2] = n - s; p[o + 3] = e + c; p[o + 4] = n + s; p[o + 5] = z;
+    this.pickCount++;
   }
 
   private traffic(): TrafficQueries | null {
@@ -586,3 +701,4 @@ function pathShape(path: Float32Array, p0: number, n: number, oe: number, on: nu
   return new PatternShape(-1, xyz, dist);
 }
 const _white = new THREE.Color(0xffffff);
+const _v3 = new THREE.Vector3();

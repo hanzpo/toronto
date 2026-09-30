@@ -367,11 +367,37 @@ export class Sim {
         const ret = wasm.sim_rail_ptr(this.__wbg_ptr);
         return ret >>> 0;
     }
-    /**
-     * drop all agents (the timetable takes over), e.g. while sim time is being dropped
-     */
     rail_reset() {
         wasm.sim_rail_reset(this.__wbg_ptr);
+    }
+    /**
+     * drop all agents (the timetable takes over), e.g. while sim time is being dropped
+     * camera position and horizontal forward vector (spawns / removals avoid the view)
+     * @param {number} x
+     * @param {number} y
+     * @param {number} fx
+     * @param {number} fy
+     */
+    rail_set_camera(x, y, fx, fy) {
+        wasm.sim_rail_set_camera(this.__wbg_ptr, x, y, fx, fy);
+    }
+    /**
+     * depots: per depot track group and feed bit mask, storage edges [off[d], off[d+1])
+     * @param {Uint8Array} group
+     * @param {Uint32Array} feeds
+     * @param {Uint32Array} off
+     * @param {Uint32Array} edges
+     */
+    rail_set_depots(group, feeds, off, edges) {
+        const ptr0 = passArray8ToWasm0(group, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray32ToWasm0(feeds, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArray32ToWasm0(off, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passArray32ToWasm0(edges, wasm.__wbindgen_malloc);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.sim_rail_set_depots(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
     }
     /**
      * radius (m) around the focus within which rail trips run as agents; 0 = off
@@ -381,7 +407,7 @@ export class Sim {
         wasm.sim_rail_set_radius(this.__wbg_ptr, r);
     }
     /**
-     * [trains, overlaps (total), authority overruns (total), turnbacks]
+     * [trains, overlaps (total), authority overruns (total), turnbacks, pull-outs, pull-ins, parked]
      * @returns {Float64Array}
      */
     rail_stats() {

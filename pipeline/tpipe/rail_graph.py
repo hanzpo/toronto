@@ -87,6 +87,32 @@ CACHE_OSM = geo.WORK / "rail_osm.pkl"
 CACHE_GRAPH = geo.WORK / "rail_graph.pkl"
 OUT = geo.OUT / "rail"
 
+# Depots / yards / layover facilities where trains are stabled between blocks (approximate
+# location; the yard tracks are the connected yard / siding component of the right track
+# class nearest to it). Sources: Metrolinx / TTC facility lists, OSM.
+DEPOTS = [
+    # id, name, track group (0 main-line rail, 1 subway, 2 light rail, 3 tram), agencies, lat, lon
+    ("willowbrook", "Willowbrook Yard (GO)", 0, ["go"], 43.6162, -79.4998),
+    ("tmc", "Toronto Maintenance Centre (VIA)", 0, ["via"], 43.6200, -79.5080),
+    ("don", "Don Yard (GO)", 0, ["go"], 43.6525, -79.3560),
+    ("bathurst", "Bathurst North Yard (GO)", 0, ["go", "up"], 43.6415, -79.4030),
+    ("whitby", "East Rail Maintenance Facility (GO, Whitby)", 0, ["go"], 43.8660, -78.9450),
+    ("shirley", "Shirley Road layover (GO, Oshawa)", 0, ["go"], 43.8850, -78.8200),
+    ("lincolnville", "Lincolnville layover (GO)", 0, ["go"], 43.9960, -79.2300),
+    ("milton", "Milton layover (GO)", 0, ["go"], 43.5170, -79.8780),
+    ("kitchener", "Kitchener layover (GO)", 0, ["go"], 43.4560, -80.4960),
+    ("westharbour", "Hamilton / West Harbour layover (GO)", 0, ["go"], 43.2670, -79.8660),
+    ("wilson", "Wilson Yard (TTC)", 1, ["ttc"], 43.7370, -79.4540),
+    ("davisville", "Davisville Yard (TTC)", 1, ["ttc"], 43.6985, -79.3970),
+    ("greenwood", "Greenwood Yard (TTC)", 1, ["ttc"], 43.6810, -79.3280),
+    ("keele", "Keele Yard (TTC)", 1, ["ttc"], 43.6590, -79.4605),
+    ("mountdennis", "Mount Dennis MSF (Line 5)", 2, ["ttc"], 43.6890, -79.4880),
+    ("finchwest", "Finch West MSF (Line 6)", 2, ["ttc"], 43.7620, -79.5360),
+    ("roncesvalles", "Roncesvalles Carhouse (TTC)", 3, ["ttc"], 43.6394, -79.4474),
+    ("russell", "Russell Carhouse (TTC)", 3, ["ttc"], 43.6655, -79.3240),
+    ("leslie", "Leslie Barns (TTC)", 3, ["ttc"], 43.6600, -79.3310),
+]
+
 # Manual fixes (OSM ids). "join": [(node_a, node_b)] adds a track segment between two
 # nodes; "drop_ways": ways ignored; "oneway": {way: +1|-1} forces a direction.
 FIXES: dict = {"join": [], "drop_ways": [], "oneway": {}}
@@ -858,12 +884,62 @@ class RailGraph:
         n = sum(len(p) for p in self.plat)
         self.log.append(f"platforms: {n} platform extents on {sum(1 for p in self.plat if p)} edges")
 
+    # ---------------------------------------------------------------- depots
+    def depots(self) -> list[dict]:
+        """Per DEPOTS entry: the storage tracks (graph edge ids) of the nearest connected
+        yard / siding component of its track group."""
+        grp = np.where(self.e_kind == 0, 0, np.where(self.e_kind == 3, 3, np.where(self.e_kind == 2, 2, 1)))
+        store = (self.e_svc == 1) | (self.e_svc == 2)
+        # components of storage edges joined at nodes
+        parent = list(range(len(self.e_from)))
+
+        def find(a):
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = parent[a]
+            return a
+
+        for n, lst in enumerate(self.ends_at):
+            es = [e for e, _ in lst if store[e]]
+            for e in es[1:]:
+                ra, rb = find(es[0]), find(e)
+                if ra != rb:
+                    parent[ra] = rb
+        comps: dict[int, list[int]] = {}
+        for e in np.nonzero(store)[0].tolist():
+            comps.setdefault(find(e), []).append(e)
+        out = []
+        for did, name, g, ags, lat, lon in DEPOTS:
+            x, y = geo.project(lon, lat)
+            best = None
+            for c, es in comps.items():
+                if grp[es[0]] != g:
+                    continue
+                L = float(self.e_len[es].sum())
+                if L < 250.0:
+                    continue
+                d = min(float(np.hypot(self.geom[e][0][:, 0] - x, self.geom[e][0][:, 1] - y).min()) for e in es)
+                if d < 2500.0 and (best is None or d < best[0]):
+                    best = (d, es, L)
+            if best is None:
+                self.log.append(f"depot {did}: no storage tracks found")
+                continue
+            d, es, L = best
+            out.append(dict(id=did, name=name, group=g, agencies=ags, edges=sorted(es), km=round(L / 1000, 2), off=round(d)))
+        self.log.append("depots: " + ", ".join(f"{o['id']} {o['km']} km ({len(o['edges'])} tracks, {o['off']} m)" for o in out))
+        return out
+
     # ---------------------------------------------------------------- output
     def write(self, used: np.ndarray | None = None) -> dict:
         """Write data/rail/network.bin.gz. `used` = bool mask of edges to keep (default all but yards)."""
         nE = len(self.e_from)
+        dep = self.depots()
         if used is None:
-            used = ~((self.e_kind == 0) & (self.e_svc == 2))  # no freight / main-line yards
+            used = ~((self.e_kind == 0) & (self.e_svc == 2))  # no freight / main-line yards...
+            for d in dep:
+                used[d["edges"]] = True  # ...except the passenger depots
+            # keep the depots' tracks connected: main-line yard edges touching kept depot edges
+        self.depot_list = dep
         keep = np.nonzero(used)[0]
         emap = np.full(nE, -1, dtype=np.int64)
         emap[keep] = np.arange(len(keep))
@@ -917,7 +993,8 @@ class RailGraph:
         }
         self.out_map = emap
         h = self.hash()
-        size = tbn.write(OUT / "network.bin.gz", arrays, level=9, version=1, hash=h, kinds=KIND_NAMES)
+        depots = [dict(id=d["id"], name=d["name"], group=d["group"], agencies=d["agencies"], edges=[int(emap[e]) for e in d["edges"] if emap[e] >= 0]) for d in dep]
+        size = tbn.write(OUT / "network.bin.gz", arrays, level=9, version=1, hash=h, kinds=KIND_NAMES, depots=depots)
         self.log.append(f"network.bin.gz: {size/1024:.0f} KiB, {len(keep)} edges, {len(nodes)} nodes, {len(np.vstack(xyz))} vertices")
         return {"file": "network.bin.gz", "bytes": size, "hash": h, "edges": int(len(keep))}
 

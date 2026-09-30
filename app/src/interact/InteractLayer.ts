@@ -438,7 +438,13 @@ export class InteractLayer implements Layer {
     if (this.trip === null) return false;
     const vs = this.system.vehicleAt(this.trip, t);
     this.vsTmp = vs;
-    if (!vs) return false;
+    if (!vs) {
+      // outside its timetable (running late / empty-stock move) but drawn by the rail sim
+      const dv = this.transit.drawnVehicle(this.trip);
+      if (!dv) return false;
+      Object.assign(this.pose, { e: dv.x, n: dv.y, z: dv.z, heading: dv.heading, pitch: 0 });
+      return true;
+    }
     // held behind traffic? follow what is drawn, not the timetable ghost
     vs.dist = this.transit.displayDist(this.trip, vs.dist);
     if (this.path) this.path.pose(vs.dist, 6, this.pose);
@@ -632,6 +638,8 @@ export class InteractLayer implements Layer {
 
   update(ctx: FrameContext) {
     const sys = this.system;
+    const qa = (window as unknown as { __qa?: Record<string, unknown> }).__qa;
+    if (qa && !qa.pickTest) qa.pickTest = (n?: number) => this.pickTest(n);
     if (sys.tripCount > 0 && this.stopsTrips !== sys.tripCount) this.buildStops();
     this.updateStopMarks(ctx);
 
@@ -923,6 +931,37 @@ export class InteractLayer implements Layer {
   private invWorld = new THREE.Matrix4();
 
   /** Screen-space pick of vehicles and stops at client px (relative to canvas). */
+  /**
+   * QA self-test (window.__qa.pickTest): project up to `n` drawn vehicles (car midpoints)
+   * to the screen and check that pick() there returns that vehicle.
+   */
+  pickTest(n = 20): { tested: number; ok: number; fails: { trip: number; got: number | null }[] } {
+    const r = this.dom.getBoundingClientRect();
+    const cam = this.engine.camera;
+    this.invWorld.copy(cam.matrixWorld).invert();
+    const m = this.viewProj.multiplyMatrices(cam.projectionMatrix, this.invWorld).elements;
+    const ps = this.transit.pickSegs, np = this.transit.pickCount;
+    const seen = new Set<number>();
+    const fails: { trip: number; got: number | null }[] = [];
+    let tested = 0, ok = 0;
+    for (let k = 0; k < np && tested < n; k++) {
+      const o = k * 6, trip = ps[o];
+      if (seen.has(trip)) continue;
+      const X = (ps[o + 1] + ps[o + 3]) / 2, Y = ps[o + 5], Z = -(ps[o + 2] + ps[o + 4]) / 2;
+      const w = m[3] * X + m[7] * Y + m[11] * Z + m[15];
+      if (w <= 0.01) continue;
+      const sx = ((m[0] * X + m[4] * Y + m[8] * Z + m[12]) / w * 0.5 + 0.5) * r.width;
+      const sy = (-(m[1] * X + m[5] * Y + m[9] * Z + m[13]) / w * 0.5 + 0.5) * r.height;
+      if (sx < 5 || sy < 5 || sx > r.width - 5 || sy > r.height - 5) continue;
+      seen.add(trip);
+      tested++;
+      const p = this.pick(sx + r.left, sy + r.top);
+      if (p?.kind === 'vehicle' && p.trip !== undefined) ok++;
+      else fails.push({ trip, got: p?.trip ?? null });
+    }
+    return { tested, ok, fails: fails.slice(0, 10) };
+  }
+
   pick(cx: number, cy: number): PickResult | null {
     const eng = this.engine;
     const cam = eng.camera;
@@ -942,17 +981,14 @@ export class InteractLayer implements Layer {
     const a = [0, 0], b = [0, 0];
     let best: PickResult | null = null;
     let bd = PICK_PX;
-    const v = this.system.vehicles;
-    const drawn = this.transit.drawn;
-    for (let i = 0; i < v.count; i++) {
-      if (!drawn[i]) continue;
-      const L2 = DYN[MODES[v.mode[i]]].length / 2;
-      const c = Math.cos(v.heading[i]), s = Math.sin(v.heading[i]);
-      const z = v.z[i] + 2;
-      if (!proj(v.x[i] - c * L2, v.y[i] - s * L2, z, a)) continue;
-      if (!proj(v.x[i] + c * L2, v.y[i] + s * L2, z, b)) continue;
+    // every car / marker as drawn this frame (schedule-driven and sim agents alike)
+    const ps = this.transit.pickSegs, np = this.transit.pickCount;
+    for (let k = 0; k < np; k++) {
+      const o = k * 6;
+      if (!proj(ps[o + 1], ps[o + 2], ps[o + 5], a)) continue;
+      if (!proj(ps[o + 3], ps[o + 4], ps[o + 5], b)) continue;
       const d = segDist(x, y, a[0], a[1], b[0], b[1]);
-      if (d < bd) { bd = d; best = { kind: 'vehicle', trip: v.trip[i], label: '' }; }
+      if (d < bd) { bd = d; best = { kind: 'vehicle', trip: ps[o], label: '' }; }
     }
     if (this.op) {
       const p = this.pose, L2 = this.op.dyn.length / 2;

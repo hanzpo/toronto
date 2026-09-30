@@ -62,16 +62,22 @@ export class Sim {
      */
     rail_player_state(): Float64Array;
     rail_ptr(): number;
+    rail_reset(): void;
     /**
      * drop all agents (the timetable takes over), e.g. while sim time is being dropped
+     * camera position and horizontal forward vector (spawns / removals avoid the view)
      */
-    rail_reset(): void;
+    rail_set_camera(x: number, y: number, fx: number, fy: number): void;
+    /**
+     * depots: per depot track group and feed bit mask, storage edges [off[d], off[d+1])
+     */
+    rail_set_depots(group: Uint8Array, feeds: Uint32Array, off: Uint32Array, edges: Uint32Array): void;
     /**
      * radius (m) around the focus within which rail trips run as agents; 0 = off
      */
     rail_set_radius(r: number): void;
     /**
-     * [trains, overlaps (total), authority overruns (total), turnbacks]
+     * [trains, overlaps (total), authority overruns (total), turnbacks, pull-outs, pull-ins, parked]
      */
     rail_stats(): Float64Array;
     /**
@@ -161,6 +167,8 @@ export interface InitOutput {
     readonly sim_rail_player_state: (a: number) => [number, number];
     readonly sim_rail_ptr: (a: number) => number;
     readonly sim_rail_reset: (a: number) => void;
+    readonly sim_rail_set_camera: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly sim_rail_set_depots: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
     readonly sim_rail_set_radius: (a: number, b: number) => void;
     readonly sim_rail_stats: (a: number) => [number, number];
     readonly sim_rail_step: (a: number, b: number, c: number) => void;

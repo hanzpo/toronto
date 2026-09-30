@@ -363,6 +363,7 @@ export class TrafficLayer implements Layer {
   /** service profile the rail agents follow (set by the TransitLayer) */
   railProfile: 'weekday' | 'saturday' | 'sunday' | null = null;
   railEnabled = true;
+  private camDir = new THREE.Vector3();
   private railCmd: { cmd: number; emergency: boolean } | null = null;
   private railWaiters: ((ok: boolean) => void)[] = [];
 
@@ -384,10 +385,10 @@ export class TrafficLayer implements Layer {
     };
   }
 
-  /** [trains, overlaps (total), overruns (total), turnbacks] */
+  /** [trains, overlaps (total), overruns (total), turnbacks, pull-outs, pull-ins, parked] */
   railStats(): number[] {
-    if (!this.hf) return [0, 0, 0, 0];
-    return [0, 1, 2, 3].map((i) => this.hf[HF.RAIL + i]);
+    if (!this.hf) return [0, 0, 0, 0, 0, 0, 0];
+    return [...[0, 1, 2, 3].map((i) => this.hf[HF.RAIL + i]), ...[0, 1, 2].map((i) => this.hf[HF.RAILX + i])];
   }
 
   /** player train state (RAILP fields), or null when not driving a train */
@@ -735,6 +736,11 @@ export class TrafficLayer implements Layer {
     const obst = radius > 0 ? this.transitObstacles() : undefined;
     if (this.railProfile) { m.railProfile = this.railProfile; m.railRadius = this.railEnabled ? RAIL_RADIUS : 0; }
     if (this.railCmd) m.railCmd = this.railCmd;
+    {
+      const cam = this.engine.camera;
+      cam.getWorldDirection(this.camDir);
+      m.camera = [ctx.cameraPos.x, -ctx.cameraPos.z, this.camDir.x, -this.camDir.z];
+    }
     const transfer: Transferable[] = [];
     if (obst) { m.obst = obst; transfer.push(obst.buffer); }
     if (this.playerActive) {

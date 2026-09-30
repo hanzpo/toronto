@@ -339,6 +339,11 @@ impl Sim {
         self.rail.add_feed(id, pat_mode, pat_len, pat_rflags, pat_rstart, pat_redge_off, pat_redge, pat_stop_off, pat_stop_dist, pat_stop_flag, tp_off, tp_arr, tp_dwell, trip_start, trip_pattern, trip_tp, trip_next);
     }
 
+    /// depots: per depot track group and feed bit mask, storage edges [off[d], off[d+1])
+    pub fn rail_set_depots(&mut self, group: &[u8], feeds: &[u32], off: &[u32], edges: &[u32]) {
+        self.rail.set_depots(group, feeds, off, edges);
+    }
+
     pub fn rail_clear_feeds(&mut self) {
         self.rail.clear_feeds();
     }
@@ -353,6 +358,12 @@ impl Sim {
     }
 
     /// drop all agents (the timetable takes over), e.g. while sim time is being dropped
+    /// camera position and horizontal forward vector (spawns / removals avoid the view)
+    pub fn rail_set_camera(&mut self, x: f64, y: f64, fx: f64, fy: f64) {
+        let l = fx.hypot(fy);
+        self.rail.camera = if l > 1e-6 { Some((x, y, fx / l, fy / l)) } else { Some((x, y, 1.0, 0.0)) };
+    }
+
     pub fn rail_reset(&mut self) {
         self.rail.clear_trains();
     }
@@ -369,9 +380,10 @@ impl Sim {
     pub fn rail_path_ptr(&self) -> *const f32 {
         self.rail.out_path.as_ptr()
     }
-    /// [trains, overlaps (total), authority overruns (total), turnbacks]
+    /// [trains, overlaps (total), authority overruns (total), turnbacks, pull-outs, pull-ins, parked]
     pub fn rail_stats(&self) -> Vec<f64> {
-        vec![self.rail.trains.len() as f64, self.rail.overlaps as f64, self.rail.overruns as f64, self.rail.turnbacks as f64]
+        let parked = self.rail.trains.iter().filter(|t| t.state == rail::TState::Parked).count();
+        vec![self.rail.trains.len() as f64, self.rail.overlaps as f64, self.rail.overruns as f64, self.rail.turnbacks as f64, self.rail.pullouts as f64, self.rail.pullins as f64, parked as f64]
     }
 
     pub fn rail_player_attach(&mut self, feed: u32, trip: u32) -> bool {
