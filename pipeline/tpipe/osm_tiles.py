@@ -29,6 +29,7 @@ S0, S1, S2 = geo.TILE_SIZE[0], geo.TILE_SIZE[1], geo.TILE_SIZE[2]
 RES = geo.GROUND_RES
 G_BUILDING = 22
 G_WATER, G_ROAD, G_MAJOR, G_RAIL = 1, 9, 15, 10
+G_AIRFIELD = 23  # airfield grass inside aerodromes: mown, no street furniture / scattered trees
 
 # ---------------------------------------------------------------- buildings
 
@@ -449,19 +450,26 @@ def rasterize_ground(level, tx, ty):
     A = G["areas"]
     hits = np.sort(A["tree"].query(tile, predicate="intersects"))
     min_area = (px * 1.5) ** 2 if level > 0 else 0
+    aero = []
     for i in hits:
         g = A["geoms"][i]
         if level > 0 and g.area < min_area:
             continue
-        shapes.append((g, int(A["cls"][i])))
-    # waterways / runways (buffered lines)
+        c = int(A["cls"][i])
+        if c == 14:
+            aero.append(g)
+        # aerodromes: runways/taxiways/aprons (20) and the aerodrome area (14) become
+        # airfield grass (23); the paved surfaces are drawn as clean geometry by the
+        # client (layers/AirportLayer.ts from tpipe/airports.py)
+        shapes.append((g, G_AIRFIELD if c in (14, 20) else c))
+    # waterways (buffered lines); runway/taxiway lines (kind 4) are not rasterised
     RL = G["lines"]["raster_lines"]
     hit = RL["tree"].query(tile, predicate="intersects")
     attr = G["lines"]["attr"]
     for j in hit:
         li = RL["ids"][j]
         k = attr["kind"][li]
-        if k == 3:  # coastline: lakes come from great_lakes()
+        if k in (3, 4):  # coastline: lakes come from great_lakes(); 4 runway/taxiway: AirportLayer
             continue
         w = max(float(attr["width"][li]), px * (0.7 if level else 0.5))
         if level > 0 and k == 2 and attr["width"][li] < px * 0.4:
@@ -489,6 +497,9 @@ def rasterize_ground(level, tx, ty):
         return np.zeros((RES, RES), dtype=np.uint8)
     img = features.rasterize(shapes, out_shape=(RES, RES), transform=tr, fill=0, dtype="uint8",
                              all_touched=level > 0)
+    if aero:  # open ground inside an aerodrome (bare land, grass) is airfield grass too
+        m = features.rasterize([(g, 1) for g in aero], out_shape=(RES, RES), transform=tr, fill=0, dtype="uint8")
+        img[(m == 1) & np.isin(img, [0, 2])] = G_AIRFIELD
     return img[::-1].copy()  # row 0 = south
 
 
@@ -517,7 +528,7 @@ def build_tile(level, tx, ty):
             px = np.clip(((HS["cx"][hi] - x0) / s * RES).astype(int), 0, RES - 1)
             py = np.clip(((HS["cy"][hi] - y0) / s * RES).astype(int), 0, RES - 1)
             gcls = ground[py, px]
-            ok = ~np.isin(gcls, [5, 6, 17, 14])
+            ok = ~np.isin(gcls, [5, 6, 17, 14, G_AIRFIELD])
             hb, hi = hb[ok], hi[ok]
             suppress_house[np.nonzero(hmask)[0][ok]] = True
             arrays["h_xy"] = np.stack([HS["cx"][hi] - x0, HS["cy"][hi] - y0], 1).astype(np.float32).ravel()

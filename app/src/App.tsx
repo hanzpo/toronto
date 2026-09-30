@@ -24,6 +24,7 @@ function loadLayerModules() {
     interact: import('./interact/InteractLayer'),
     stations: import('./layers/StationsLayer'),
     traffic: import('./layers/TrafficLayer'),
+    airport: import('./layers/AirportLayer'),
     air: import('./layers/AirLayer'),
     debug: config.debug ? import('./render/overlay/DebugOverlayLayer') : null,
   };
@@ -69,6 +70,7 @@ export default function App() {
         if (cancelled) return;
         await engine.addLayer(new (await mods.landmarks).LandmarksLayer());
         await yieldTask();
+        await engine.addLayer(new (await mods.airport).AirportLayer());
         await yieldTask();
         { const air = new (await mods.air).AirLayer(engine.dataRoot); await engine.addLayer(air); Object.assign(window as object, { __air: air }); }
         if (mods.debug) await engine.addLayer(new (await mods.debug).DebugOverlayLayer());

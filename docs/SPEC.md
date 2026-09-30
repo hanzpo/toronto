@@ -54,7 +54,11 @@ Terrain / ground
   6 industrial · 7 farmland · 8 sand/beach · 9 road · 10 rail · 11 parking ·
   12 cemetery · 13 golf · 14 aeroway · 15 major road · 16 wetland ·
   17 institutional · 18 construction · 19 sports pitch · 20 runway/taxiway ·
-  21 platform/plaza · 22 building footprint (levels 1–2 only, far-view texture)`.
+  21 platform/plaza · 22 building footprint (levels 1–2 only, far-view texture) ·
+  23 airfield grass` (everything open inside an aerodrome: runway/taxiway/apron
+  areas, the aerodrome area itself, bare land and grass; the paved surfaces are
+  drawn by the airport layer, docs/AIR.md; no trees/lamps are scattered on it).
+  Classes 14 and 20 are no longer produced by the pipeline.
 
 Buildings (extruded footprints)
 - `b_ring_off` u32 [nB+1] — building i owns rings `[b_ring_off[i], b_ring_off[i+1])`.

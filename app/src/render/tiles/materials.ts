@@ -34,6 +34,7 @@ export const GROUND_PALETTE: Record<number, number> = {
   20: 0x8a8985, // runway / taxiway
   21: 0xd8d2c8, // platform / plaza
   22: 0xcbc6be, // building footprint (L1/L2 far-view raster)
+  23: 0xbcd6a2, // airfield grass (mown, a touch lighter than parks; paving is the airport layer)
   255: 0xd4d3c8, // outside region
 };
 
