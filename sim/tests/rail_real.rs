@@ -433,6 +433,7 @@ fn day_run(sim: &mut RailSim, feeds: Option<&[usize]>, focus: (f64, f64), radius
     let mut step = 0u64;
     let mut stuck_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut stuck_at: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let mut causes: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     while t < t1 {
         sim.step(dt, t);
         t += dt as f64;
@@ -453,14 +454,48 @@ fn day_run(sim: &mut RailSim, feeds: Option<&[usize]>, focus: (f64, f64), radius
                     let by = sim.blocker(k).map(|id| if id == 0 { "dir-lock".to_string() } else { sim.trains.iter().find(|o| o.id == id).map(|o| format!("{:?}{}", o.state, if o.dh { "-dh" } else { "" })).unwrap_or("gone".into()) }).unwrap_or_else(|| "no blocker".into());
                     let key = format!("mode {} ({:.0},{:.0}) {}by {}", sim.plans[tr.plan as usize].mode, (p[0] / 500.0).round() * 500.0, (p[1] / 500.0).round() * 500.0, if tr.dh { "dh " } else { "" }, by);
                     *stuck_at.entry(key).or_insert(0) += 1;
-                    if std::env::var("CHAIN").is_ok() && stuck_ids.len() <= 12 {
+                    // root cause of the wait
+                    let mut cur = k;
+                    let mut seen = vec![k];
+                    let cause = loop {
+                        let c = &sim.trains[cur];
+                        let bid = sim.blocker(cur);
+                        match bid {
+                            None => break if cur == k { "no blocker" } else if matches!(c.state, TState::Dwell | TState::Terminal) { "queue behind a dwelling train" } else if c.v > 0.1 { "queue behind a moving train" } else { "chain ends at a stopped train" },
+                            Some(0) => break "direction lock",
+                            Some(id) => match sim.trains.iter().position(|o| o.id == id) {
+                                None => break "owner gone (leak)",
+                                Some(j) => {
+                                    // how far is the owner's body from what it blocks?
+                                    let o = &sim.trains[j];
+                                    if o.state == TState::Parked { break "parked train"; }
+                                    if seen.contains(&j) { break "cycle"; }
+                                    let cp = &sim.plans[c.plan as usize];
+                                    let bs = if c.next < cp.spans.len() { cp.point(&sim.net, cp.spans[c.next].r0) } else { cp.point(&sim.net, c.front) };
+                                    let op = sim.plans[o.plan as usize].point(&sim.net, o.front);
+                                    if (bs[0] - op[0]).hypot(bs[1] - op[1]) > 2000.0 && o.v > 0.1 { break "held far ahead / behind by a moving train"; }
+                                    seen.push(j);
+                                    cur = j;
+                                }
+                            },
+                        }
+                    };
+                    let mode = sim.plans[tr.plan as usize].mode;
+                    *causes.entry(format!("m{mode} {cause}")).or_insert(0) += 1;
+                    let cm: Option<u8> = std::env::var("CHAIN_MODE").ok().and_then(|v| v.parse().ok());
+                    if std::env::var("CHAIN").is_ok() && cm.map_or(stuck_ids.len() <= 400 && stuck_ids.len() % 10 == 0, |m| sim.plans[tr.plan as usize].mode == m && stuck_ids.len() < 300) {
                         let mut cur = k;
                         let mut line = String::new();
                         for _ in 0..6 {
                             let c = &sim.trains[cur];
                             let q = sim.plans[c.plan as usize].point(&sim.net, c.front);
-                            line += &format!(" -> [id {} m{} {:?}{} v {:.1} held {:.0} ({:.0},{:.0}) sight {:.0} {}]", c.id, sim.plans[c.plan as usize].mode, c.state, if c.dh { " dh" } else { "" }, c.v, c.held_t, q[0], q[1], c.sight_gap, sim.why(cur).chars().take(90).collect::<String>());
-                            match sim.blocker(cur).and_then(|id| sim.trains.iter().position(|o| o.id == id)) {
+                            let dw = if matches!(c.state, TState::Dwell | TState::Terminal) { format!(" stop {} until+{:.0} trip_start+{:.0} delay {:.0}", c.stop, c.until - t, sim.feeds[c.feed as usize].trip_start[c.trip as usize] as f64 - t, c.delay) } else { String::new() };
+                            line += &format!(" -> [id {} m{} {:?}{}{} v {:.1} held {:.0} ({:.0},{:.0}) sight {:.0} {}]", c.id, sim.plans[c.plan as usize].mode, c.state, if c.dh { " dh" } else { "" }, dw, c.v, c.held_t, q[0], q[1], c.sight_gap, sim.why(cur).chars().take(60).collect::<String>());
+                            let bl = sim.blocker(cur).map(|id| if id == 0 { sim.dir_holders(cur).first().copied().unwrap_or(0) } else { id });
+                            if sim.blocker(cur) == Some(0) {
+                                line += &format!(" dir-holders {:?}", sim.dir_holders(cur));
+                            }
+                            match bl.and_then(|id| sim.trains.iter().position(|o| o.id == id)) {
                                 Some(j) if j != k => cur = j,
                                 Some(_) => { line += " (cycle)"; break; }
                                 None => break,
@@ -505,6 +540,11 @@ fn day_run(sim: &mut RailSim, feeds: Option<&[usize]>, focus: (f64, f64), radius
     let mut sv: Vec<_> = stuck_at.into_iter().collect();
     sv.sort_by_key(|x| std::cmp::Reverse(x.1));
     eprintln!("STUCK >180 s (distinct trains): {}", stuck_ids.len());
+    let mut cv: Vec<_> = causes.iter().collect();
+    cv.sort_by_key(|x| std::cmp::Reverse(*x.1));
+    for (k, c) in &cv {
+        eprintln!("  cause x{c}: {k}");
+    }
     for (k, c) in sv.iter().take(25) {
         eprintln!("  x{c} {k}");
     }
@@ -558,4 +598,50 @@ fn all_depots_and_termini_full_day() {
     eprintln!("ALL: trips {n} finished {fin} left / aborted {done}; worst all-stopped {worst:.0} s; held near a depot (samples) {held}; overlaps {} overruns {}", sim.overlaps, sim.overruns);
     assert_eq!(sim.overlaps, 0);
     assert!(worst < 180.0);
+}
+
+/// debugging: direction-lock runs (bidirectional stretches) of each feed's plans
+#[test]
+#[ignore]
+fn dir_chains() {
+    let Some(mut sim) = load() else { return };
+    sim.step(0.2, 8.0 * 3600.0);
+    let mut seen = std::collections::HashSet::new();
+    for f in &sim.feeds {
+        let np = f.pat_mode.len();
+        for p in 0..np {
+            let pl = &sim.plans[(f.plan0 as usize) + p];
+            let mut k = 0;
+            while k < pl.spans.len() {
+                let s = &pl.spans[k];
+                if s.kind == 2 && seen.insert((f.id, s.res)) {
+                    let e = &pl.spans[s.chain_end as usize];
+                    if e.r1 - s.r0 > 1500.0 {
+                        let a = pl.point(&sim.net, s.r0);
+                        let b = pl.point(&sim.net, e.r1);
+                        eprintln!("feed {} pat {} mode {} dir-run {:.0} m from ({:.0},{:.0}) to ({:.0},{:.0})", f.id, p, pl.mode, e.r1 - s.r0, a[0], a[1], b[0], b[1]);
+                    }
+                    k = s.chain_end as usize + 1;
+                    continue;
+                }
+                k += 1;
+            }
+        }
+    }
+}
+
+/// debugging: one area over a few hours (env AREA="x,y,r", HOURS="6,9", FEED=id)
+#[test]
+#[ignore]
+fn area_run() {
+    let Some(mut sim) = load() else { return };
+    let a: Vec<f64> = std::env::var("AREA").unwrap_or("-8200,3900,3000".into()).split(',').map(|x| x.parse().unwrap()).collect();
+    let h: Vec<f64> = std::env::var("HOURS").unwrap_or("6,9".into()).split(',').map(|x| x.parse().unwrap()).collect();
+    sim.step(0.2, h[0] * 3600.0);
+    let fis: Vec<usize> = match std::env::var("FEED").ok().and_then(|v| v.parse::<u32>().ok()) {
+        Some(id) => (0..sim.feeds.len()).filter(|&k| sim.feeds[k].id == id).collect(),
+        None => (0..sim.feeds.len()).collect(),
+    };
+    let (worst, n, fin, done, held, _ex) = day_run(&mut sim, Some(&fis), (a[0], a[1]), a[2], h[0] * 3600.0, h[1] * 3600.0);
+    eprintln!("AREA: trips {n} finished {fin} left {done}; worst all-stopped {worst:.0} s; held near depot {held}; overlaps {}", sim.overlaps);
 }

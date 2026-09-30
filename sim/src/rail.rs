@@ -625,6 +625,8 @@ pub struct Train {
     /// depot it is parked in / heading for (NONE otherwise)
     pub depot: u32,
     pub horn: bool,
+    /// service time until which the train does not reserve further ahead (lock breaker)
+    pub backoff_until: f64,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -704,6 +706,8 @@ pub struct RailSim {
     pub stuck_removed: u32,
     /// empty-stock moves removed to break a head-on lock with a waiting train
     pub dh_yield: u32,
+    /// deadlock cycles broken (back-offs and empty trains taken out)
+    pub locks_broken: u32,
     pub stuck_log: Vec<String>,
     pub overruns: u32,
     pub player: Option<u32>,
@@ -768,6 +772,7 @@ impl Default for RailSim {
             overlaps: 0,
             stuck_removed: 0,
             dh_yield: 0,
+            locks_broken: 0,
             stuck_log: Vec::new(),
             overruns: 0,
             player: None,
@@ -1010,9 +1015,21 @@ impl RailSim {
             }
             let s = plan.spans[k];
             if s.kind == SP_DIR {
+                let entering = !t.held[k];
                 for q in k..=s.chain_end as usize {
                     if plan.spans[q].kind == SP_DIR && !t.held[q] && !want.contains(&q) {
                         want.push(q);
+                    }
+                }
+                // entering a track used both ways (single line, stub terminal): the route is set
+                // through to its far end or not at all, so a train never stands on it facing
+                // one that must come out (the classic single-line / terminal deadlock)
+                let (c0, c1) = (s.r0, plan.spans[s.chain_end as usize].r1);
+                if entering && c1 - c0 < 4000.0 && signalled(plan.mode) {
+                    for (q, x) in plan.spans.iter().enumerate() {
+                        if x.kind != SP_DIR && x.r0 < c1 - 0.5 && x.r1 > c0 + 0.5 && !t.held[q] && !want.contains(&q) {
+                            want.push(q);
+                        }
                     }
                 }
             }
@@ -1072,6 +1089,22 @@ impl RailSim {
         }
     }
 
+    /// the group starting at span `k` has room behind it for train `ti`'s body (no vehicle
+    /// body on its route within its length + 4 m past the group's end)
+    fn can_clear_group(&self, ti: usize, plan_i: usize, k: usize) -> bool {
+        let p = &self.plans[plan_i];
+        let g = p.spans[k];
+        if !(g.g0 as usize..g.g1 as usize).any(|q| p.spans[q].kind == SP_JUNCTION) {
+            return true;
+        }
+        let end = (g.g0 as usize..g.g1 as usize).map(|q| p.spans[q].r1).fold(0.0f32, f32::max);
+        if end >= p.length - 1.0 {
+            return true;
+        }
+        let len = self.trains[ti].len;
+        self.body_free(ti, plan_i, end, (end + len + 4.0).min(p.length))
+    }
+
     /// release spans behind the tail, reserve ahead, update the authority
     fn authority(&mut self, ti: usize) {
         let (front, len, v, b, plan_i) = {
@@ -1093,19 +1126,29 @@ impl RailSim {
         }
         // reserve ahead: braking distance + a sighting margin
         // the player sees further (signals clear well ahead when the line is free)
+        let on_sight = !signalled(self.plans[plan_i].mode);
         let look = if self.trains[ti].player {
             v * v / b + 1500.0
         } else if self.trains[ti].state == TState::Parked {
             0.0
+        } else if on_sight {
+            // streetcars claim a junction only as they come up to it (like a road vehicle at an
+            // intersection), never while dwelling a block away: the crossing stays free for
+            // the other line meanwhile
+            if matches!(self.trains[ti].state, TState::Dwell | TState::Terminal) { 25.0 } else { v * v / (2.0 * b) + 25.0 }
         } else {
             v * v / (2.0 * b) + (v * 12.0).max(250.0)
         };
+        let backing_off = self.stime < self.trains[ti].backoff_until;
         loop {
             let k = self.trains[ti].next;
             if k >= n {
                 break;
             }
             let sp = self.plans[plan_i].spans[k];
+            if backing_off && !self.trains[ti].held[k] && sp.r0 > front + 0.5 {
+                break;
+            }
             if self.trains[ti].held[k] {
                 self.trains[ti].next += 1;
                 continue;
@@ -1115,6 +1158,12 @@ impl RailSim {
                 continue;
             }
             if sp.r0 > front + look {
+                break;
+            }
+            // on sight into a junction: only when the way out is clear for the whole body, so a
+            // streetcar never stands inside a crossing waiting for the car ahead (and the other
+            // line waiting for it)
+            if on_sight && !self.can_clear_group(ti, plan_i, k) {
                 break;
             }
             if !self.try_group(ti, k) {
@@ -1204,6 +1253,7 @@ impl RailSim {
             sight_v: 0.0,
             depot: NONE,
             horn: false,
+            backoff_until: 0.0,
         };
         if let Some(k) = dwell_at {
             let (_, dep) = f.times(trip, k);
@@ -1427,6 +1477,7 @@ impl RailSim {
             self.pullout_pass(t);
             self.spawn_pass(t);
             self.handoff();
+            self.break_locks(t);
             self.check();
         }
         self.sight();
@@ -1671,8 +1722,17 @@ impl RailSim {
             }
             let fi = tr.feed as usize;
             if !tr.legs.is_empty() {
-                // turnback: change ends onto the next leg
-                if t >= tr.since + 20.0 {
+                // turnback: change ends onto the next leg. An empty train about to enter its
+                // first platform waits here (in the yard / on the tail track) until it is due,
+                // rather than standing early on a platform the line needs
+                let last_leg_ready = tr.legs.len() > 1 || tr.dh == false || {
+                    let f = &self.feeds[fi];
+                    let start = f.trip_start.get(tr.trip as usize).copied().unwrap_or(0) as f64;
+                    let lp = &self.plans[tr.legs[0] as usize];
+                    let vdh = (0.6 * tr.dy.vmax + 3.0).clamp(8.0, 25.0);
+                    t >= start - (lp.length as f64 / vdh as f64 + 60.0)
+                };
+                if t >= tr.since + 20.0 && last_leg_ready {
                     let leg = self.trains[ti].legs[0];
                     let (plan_a, front, len) = (self.trains[ti].plan as usize, self.trains[ti].front, self.trains[ti].len);
                     let (er, sr, dr) = self.plans[plan_a].locate(&self.net, front - len);
@@ -2182,6 +2242,10 @@ impl RailSim {
                 }
             };
             let Some(legs) = legs else { continue };
+            // the way in must not run into / through a parked train
+            if legs.iter().any(|&lp| self.plans[lp as usize].spans.iter().any(|s| s.kind != SP_DIR && { let o = self.owner[s.res as usize]; o != NONE && self.trains.iter().any(|x| x.id == o && x.state == TState::Parked) })) {
+                continue;
+            }
             let (ef, sf, df) = self.plans[pa].locate(&self.net, self.trains[ti].front);
             let Some(nf) = self.plans[legs[0] as usize].find(&self.net, ef, sf, df) else { continue };
             if !self.switch_plan(ti, legs[0] as usize, nf) {
@@ -2259,6 +2323,12 @@ impl RailSim {
                 }
             };
             if let Some(l) = legs {
+                // the way out must not run through another parked train
+                let me = self.trains[k].id;
+                let blocked = l.iter().any(|&lp| self.plans[lp as usize].spans.iter().any(|s| s.kind != SP_DIR && { let o = self.owner[s.res as usize]; o != NONE && o != me && self.trains.iter().any(|x| x.id == o && x.state == TState::Parked) }));
+                if blocked {
+                    continue;
+                }
                 found = Some((k, l));
                 break;
             }
@@ -2301,10 +2371,25 @@ impl RailSim {
         };
         let pa = self.trains[ti].plan as usize;
         // leave early enough: empty-stock speed ~ 8 m/s, a minute per change of ends
+        // (arriving just in time: a train waiting early at its first platform blocks the line;
+        // empty stock runs at ~60 % of line speed, ~11 m/s in yards and on leads)
         let dist: f32 = legs.iter().map(|&l| self.plans[l as usize].length).sum();
-        let need = dist as f64 / 8.0 + 60.0 * legs.len() as f64 + 90.0;
+        let vdh = (0.6 * dyn_for(mode).vmax + 3.0).clamp(8.0, 25.0) * 0.85;
+        let need = dist as f64 / vdh as f64 + 40.0 * legs.len() as f64 + 45.0;
         if t < start - need {
             return true; // not yet (the parked train waits)
+        }
+        // the departure platform must be free (or being left): a train still dwelling there
+        // for an earlier departure would keep this one queued on the depot lead, blocking every
+        // move behind it
+        {
+            let b = &self.plans[pb];
+            let sf = b.stop_front[0];
+            let me = self.trains[ti].id;
+            let busy = b.spans.iter().any(|s| s.kind != SP_DIR && s.r0 < sf && s.r1 > sf - len && { let o = self.owner[s.res as usize]; o != NONE && o != me });
+            if busy && t < start + 60.0 {
+                return true;
+            }
         }
         let (ef, sf, df) = self.plans[pa].locate(&self.net, self.trains[ti].front);
         let Some(nf) = self.plans[legs[0] as usize].find(&self.net, ef, sf, df) else { return false };
@@ -2386,7 +2471,7 @@ impl RailSim {
             id, feed: fi as u32, trip: trip as u32, plan: last as u32, front: r, v: 0.0, a: 0.0, len, dy: dyn_for(mode),
             held: vec![false; n], next: 0, lo: 0, ma: r, stop: 0, state: TState::Run, until: 0.0, since: t, delay: 0.0,
             player: false, penalty: false, held_t: 0.0, dead: false, cmd: 0.0, emerg: false, toff, dh: false, legs: Vec::new(),
-            warn: 0.0, ext_gap: f32::INFINITY, ext_v: 0.0, sight_gap: f32::INFINITY, sight_v: 0.0, depot: NONE, horn: false,
+            warn: 0.0, ext_gap: f32::INFINITY, ext_v: 0.0, sight_gap: f32::INFINITY, sight_v: 0.0, depot: NONE, horn: false, backoff_until: 0.0,
         });
         let ti = self.trains.len() - 1;
         if !self.place(ti, r) {
@@ -2441,6 +2526,7 @@ impl RailSim {
             sight_v: 0.0,
             depot: di,
             horn: false,
+            backoff_until: 0.0,
         });
         let ti = self.trains.len() - 1;
         if self.place(ti, front) {
@@ -2859,6 +2945,86 @@ impl RailSim {
         }
     }
 
+    /// Lock breaker: trains waiting on each other in a cycle (each holds what the next one
+    /// needs) for more than 45 s. A member whose contested resource lies ahead of its own
+    /// body gives back everything it reserved ahead and stays put for 30 s, so the others can
+    /// go first; an empty-stock member with nothing to give back is taken out of service
+    /// (out of sight, or after 5 minutes).
+    fn break_locks(&mut self, t: f64) {
+        let n = self.trains.len();
+        for ti in 0..n {
+            if self.trains[ti].dead || self.trains[ti].held_t < 45.0 {
+                continue;
+            }
+            // follow the wait-for chain
+            let mut cyc = vec![ti];
+            let mut cur = ti;
+            let mut closed = false;
+            for _ in 0..12 {
+                let Some(id) = self.blocker(cur).filter(|&id| id != 0) else { break };
+                let Some(j) = self.trains.iter().position(|o| o.id == id && !o.dead) else { break };
+                if j == ti {
+                    closed = true;
+                    break;
+                }
+                if cyc.contains(&j) || self.trains[j].held_t < 20.0 && !matches!(self.trains[j].state, TState::Dwell | TState::Terminal | TState::Parked) {
+                    break;
+                }
+                cyc.push(j);
+                cur = j;
+            }
+            if !closed || cyc.len() < 2 {
+                continue;
+            }
+            // a member that can back off: the resource its predecessor waits for is reserved
+            // ahead of its own body
+            let mut done = false;
+            for w in 0..cyc.len() {
+                let j = cyc[w];
+                let pred = cyc[(w + cyc.len() - 1) % cyc.len()];
+                let tr = &self.trains[j];
+                if tr.player || tr.state == TState::Parked {
+                    continue;
+                }
+                let pj = &self.plans[tr.plan as usize];
+                let front = tr.front;
+                // resources pred waits for
+                let pp = &self.plans[self.trains[pred].plan as usize];
+                let pn = self.trains[pred].next;
+                if pn >= pp.spans.len() {
+                    continue;
+                }
+                let g = pp.spans[pn];
+                let need: Vec<u32> = (g.g0 as usize..g.g1 as usize).map(|q| pp.spans[q].res).collect();
+                let ahead: Vec<usize> = (0..pj.spans.len()).filter(|&k| tr.held[k] && pj.spans[k].r0 > front + 0.5 && pj.spans[k].kind != SP_DIR).collect();
+                if ahead.iter().any(|&k| need.contains(&pj.spans[k].res)) {
+                    for k in ahead {
+                        self.release_span(j, k);
+                    }
+                    let tr = &mut self.trains[j];
+                    let pj = &self.plans[tr.plan as usize];
+                    let tail = tr.front - tr.len;
+                    tr.next = (0..pj.spans.len()).find(|&k| !tr.held[k] && pj.spans[k].r1 >= tail).unwrap_or(pj.spans.len());
+                    tr.backoff_until = t + 30.0;
+                    self.locks_broken += 1;
+                    done = true;
+                    break;
+                }
+            }
+            if done {
+                continue;
+            }
+            // nothing to give back: an empty-stock member leaves service
+            if let Some(&j) = cyc.iter().find(|&&j| self.trains[j].dh && self.trains[j].id != self.keep && !self.trains[j].player) {
+                let q = self.plans[self.trains[j].plan as usize].point(&self.net, self.trains[j].front);
+                if !self.in_view(q[0], q[1]) || self.trains[j].held_t > 300.0 {
+                    self.remove(j, true);
+                    self.locks_broken += 1;
+                }
+            }
+        }
+    }
+
     /// trains that left the radius go back to the timetable; stuck trains far away too
     fn handoff(&mut self) {
         let r = self.radius + 800.0;
@@ -3067,6 +3233,35 @@ impl RailSim {
             }
         }
         None
+    }
+
+    /// debugging: trains holding the direction lock that blocks train `ti`
+    pub fn dir_holders(&self, ti: usize) -> Vec<u32> {
+        let tr = &self.trains[ti];
+        let p = &self.plans[tr.plan as usize];
+        if tr.next >= p.spans.len() {
+            return Vec::new();
+        }
+        let g = p.spans[tr.next];
+        let mut out = Vec::new();
+        for k in g.g0 as usize..g.g1 as usize {
+            let s0 = p.spans[k];
+            if s0.kind != SP_DIR {
+                continue;
+            }
+            for q in k..=s0.chain_end as usize {
+                let s = p.spans[q];
+                if s.kind == SP_DIR && !tr.held[q] && !self.span_free(&s, tr.id) {
+                    for o in &self.trains {
+                        let op = &self.plans[o.plan as usize];
+                        if !o.dead && o.id != tr.id && op.spans.iter().enumerate().any(|(j, x)| o.held[j] && x.kind == SP_DIR && x.res == s.res) && !out.contains(&o.id) {
+                            out.push(o.id);
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// debugging: what happens at the end of train `ti`'s trip
