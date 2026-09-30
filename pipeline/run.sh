@@ -43,3 +43,4 @@ uv run python -m tpipe.landmarks
 
 # 5. Air traffic (needs raw/air/sd: vradarserver standing-data, see docs/AIR.md)
 uv run python -m tpipe.air
+uv run python -m tpipe.airports
