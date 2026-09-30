@@ -1226,7 +1226,6 @@ export function buildRail(a: Record<string, TypedArray>, terr: Terrain, level: n
           // abutment never stands in the air with the track floating behind it
           for (let k = 0; k < nv; k++) if (!(run.vf[k] & V_BRIDGE)) {
             run.pl[k] = run.pr[k] = hwB + 0.2; run.sw[k] = 0;
-            if (c <= 2 && !(run.vf[k] & (V_EMBED | V_TUNNEL))) run.vf[k] |= V_GRADED; // drawn at z: fill where raised
           }
           embankment(b, { ...P, lift: 0.03 }, 0, 0, terr);
           for (const [k0, k1] of vRanges(run, (k) => (run.vf[k] & V_BRIDGE) !== 0)) {
