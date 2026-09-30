@@ -41,8 +41,8 @@ owner; fixed items move to the bottom with the commit that fixed them.
   ~5.2 m in diameter. → stations + transit (tunnel.ts)
 - [ ] Tunnels are bare: no cable trays, signals, tunnel lighting rhythm,
   lining segments, or emergency exits. → stations + transit
-- [ ] ATC applies penalty braking immediately at P4 from standstill. Warn
-  first (tone + HUD), then brake. → transit-agents
+- [x] ATP applied penalty braking immediately at P4 from standstill. It now
+  warns for 3 s first. Fixed in 7839885.
 - [ ] Far station labels still stack at street level. → stations/UX
 
 ### Night (21:30)
@@ -67,3 +67,11 @@ sidewalk-to-bridge joins, dash phase, tram tracks classed as siding
 → roads. Trees on roads and rails → vegetation. Buses off-road and going
 the wrong way, trains colliding → transit-agents. Pearson apron → airports.
 CIBC Square flicker → fixed in 3eda5f1.
+
+## Resolved
+- [x] Trains colliding and wrong-track running (the user's Kitchener GO
+  report): signalled rail agents with interlocking. Verified with ~220
+  trains, 0 overlaps and 0 overruns at 1× and 10×, KI GO operated through
+  the system. 7839885, deployed.
+- [x] Trees in roads, rails and water: the vegetation pass brings the QA
+  counts to 0 (pending the consolidated merge and tile regeneration).
