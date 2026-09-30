@@ -244,12 +244,13 @@ export function buildCibcSquare(ctx: BuildCtx) {
     tower(P, t2, 0, 241, 'cibcGlass')
   }
   // 141 Bay: same architecture on the north site (OSM lacks its tower parts).
+  // One tower centred on the site: the copied south pair (74 m deep) didn't fit
+  // the 70 m site and overlapped the neighbouring building, which flickered.
   const north = part(ctx, 'north', rect(90, 50, 20, 135))
   const nb = bbox(north)
   const sb = bbox([...t1, ...t2])
-  const dx = nb.x0 + 6 - sb.x0, dy = nb.cy - sb.cy + 6
-  tower(P, movePoly(t1, dx, dy), 0, 229, 'cibcGlass')
-  tower(P, movePoly(t2, dx, dy), 0, 243, 'cibcGlass')
+  const tb = bbox(t2)
+  tower(P, movePoly(t2, nb.cx - tb.cx, nb.cy - tb.cy), 0, 243, 'cibcGlass')
   tower(P, north, 0, 22, 'glassGrey')
   // Elevated park over the rail corridor, between the two sites.
   const parkY0 = bbox([...t1, ...t2]).y1 + 25, parkY1 = nb.y0 - 2
