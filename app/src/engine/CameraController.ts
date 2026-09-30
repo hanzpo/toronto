@@ -240,6 +240,24 @@ export class CameraController {
     return { lift: best };
   }
 
+  private occTmp: CamState = { e: 0, n: 0, h: 0, dist: 0, heading: 0, pitch: 0 };
+  /**
+   * Chase / third-person rigs: fraction (0..1] of the segment focus → eye the
+   * camera can use without entering a building or dipping under the terrain
+   * (same ray march as the orbit camera, ~1.5 m off walls). 1 = unobstructed.
+   */
+  occlusion(fe: number, fn: number, fh: number, ee: number, en: number, eh: number): number {
+    const dx = ee - fe, dn = en - fn, dh = eh - fh;
+    const hz = Math.hypot(dx, dn);
+    const d = Math.hypot(hz, dh);
+    if (d < 0.5) return 1;
+    const c = this.occTmp;
+    c.e = fe; c.n = fn; c.h = fh; c.dist = d;
+    c.heading = Math.atan2(-dx, -dn);
+    c.pitch = Math.atan2(dh, hz);
+    return Math.min(1, this.freeFraction(c));
+  }
+
   /**
    * Fraction of the orbit distance the camera can sit at without being inside
    * a building volume or below the terrain between it and the focus. The ray

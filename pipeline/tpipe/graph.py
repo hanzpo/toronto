@@ -93,8 +93,8 @@ def _merge_micro(E_geo, E_way, E_from, E_to, E_len):
     keep = []
     for k, (g, a, b, L) in enumerate(zip(E_geo, E_from, E_to, E_len)):
         ra, rb = find(a), find(b)
-        if ra == rb:
-            continue
+        if ra == rb and L < MICRO:
+            continue   # the contracted micro link itself (closed loops -- bus turnarounds -- stay)
         if ra == a:
             pos.setdefault(a, g[0].copy())
         if rb == b:

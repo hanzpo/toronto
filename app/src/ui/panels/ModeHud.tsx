@@ -211,16 +211,18 @@ function WalkHud() {
 function DriveHud() {
   useTick(8);
   const ia = getInteract();
-  const tr = getEngine()?.layers.find((l) => l.id === 'traffic') as unknown as { getPlayer?(): { speed: number; roadName: string | null; onRoad: boolean } | null } | undefined;
+  const tr = getEngine()?.layers.find((l) => l.id === 'traffic') as unknown as { getPlayer?(): { speed: number; roadName: string | null; onRoad: boolean; surface: number; damage: number } | null } | undefined;
   const p = tr?.getPlayer?.();
+  const where = !p ? '' : p.surface === 2 ? ' · on the sidewalk' : p.surface === 0 ? ' · off road' : '';
+  const dmg = p ? Math.round(p.damage * 100) : 0;
   return (
     <>
       <div className="ridehud panel">
         <div className="drive-speed"><b>{p ? kmh(Math.abs(p.speed)) : 0}</b><small>km/h</small></div>
-        <div className="op-title"><small>Driving{p && !p.onRoad ? ' · off road' : ''}</small><b>{p?.roadName ?? '—'}</b></div>
+        <div className="op-title"><small>Driving{where}{dmg >= 5 ? ` · damage ${dmg}%` : ''}</small><b>{p?.roadName ?? '—'}</b></div>
         <button className="op-exit" onClick={() => ia?.exit()}><Icon.exit />Exit car<kbd>Esc</kbd></button>
       </div>
-      <div className="walkhud"><div className="op-keys"><Keys k={['W', 'S']} t="Throttle / brake" /><Keys k={['A', 'D']} t="Steer" /><Keys k={['Space']} t="Handbrake" /><Keys k={['Scroll']} t="Zoom" /></div></div>
+      <div className="walkhud"><div className="op-keys"><Keys k={['W', 'S']} t="Throttle / brake" /><Keys k={['A', 'D']} t="Steer" /><Keys k={['Space']} t="Handbrake" /><Keys k={['H']} t="Horn" /><Keys k={['F']} t="Get out" /><Keys k={['Scroll']} t="Zoom" /></div></div>
     </>
   );
 }
@@ -235,6 +237,10 @@ function ModeBar() {
       <button className={`act ${placing ? 'on' : ''}`} onClick={() => (placing ? useInteract.getState().set({ placing: false }) : ia?.startPlacing())} title="Drop a pedestrian on the map">
         <Icon.walk />
         {placing ? 'Click the map…' : 'Walk'}
+      </button>
+      <button className="act" onClick={() => void ia?.driveNearFocus()} title="Take over a car near the centre of the view (prefers the biggest road). You can also click any car or pedestrian.">
+        <Icon.wheel />
+        Drive
       </button>
     </div>
   );

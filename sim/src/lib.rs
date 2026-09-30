@@ -318,7 +318,34 @@ impl Sim {
     pub fn player_step(&mut self, dt: f32, throttle: f32, brake: f32, steer: f32, handbrake: bool, ground_z: f32) {
         self.w.player_step(dt, throttle, brake, steer, handbrake, ground_z);
     }
+    /// The walking player at (e, n, elev) with body radius r (≤ 0: not walking): cars brake
+    /// and honk for them. `dt` = real seconds since the last call (horn timers).
+    pub fn set_walker(&mut self, e: f64, n: f64, z: f32, r: f32, dt: f32) {
+        self.w.set_walker(e, n, z, r, dt);
+    }
+    /// Remove the pedestrian nearest (e, n) within r m (the player takes their place).
+    pub fn remove_ped_near(&mut self, e: f64, n: f64, r: f64) -> bool {
+        let mut best: Option<(usize, f64)> = None;
+        for (i, p) in self.w.peds.list.iter().enumerate() {
+            let d = (p.pos[0] - e).hypot(p.pos[1] - n);
+            if !p.dead && d < r && best.map_or(true, |b| d < b.1) {
+                best = Some((i, d));
+            }
+        }
+        match best {
+            Some((i, _)) => {
+                self.w.peds.list[i].dead = true;
+                true
+            }
+            None => false,
+        }
+    }
+    /// [curb jolt (m/s), collision impulse (m/s), surface (0 off-road, 1 road, 2 sidewalk)] since the last call
+    pub fn player_events(&mut self) -> Vec<f32> {
+        self.w.player_events().to_vec()
+    }
     /// [active, e, n, elev, heading, speed, pitch, onRoad, tileX, tileY, edgeIdx, carId, structure, bump]
+    /// onRoad: 0 off-road, 1 carriageway, 2 sidewalk (see player_events)
     pub fn player_state(&self) -> Vec<f64> {
         match &self.w.player {
             None => vec![0.0; 14],
@@ -332,7 +359,7 @@ impl Sim {
                     p.h as f64,
                     p.v as f64,
                     p.p as f64,
-                    if p.on_road { 1.0 } else { 0.0 },
+                    p.surface as f64,
                     tx,
                     ty,
                     ei,

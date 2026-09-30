@@ -27,9 +27,21 @@ import {
 import { CAR_LENGTH, carLowGeometries, carPalette, carVariantsForKind, pedestrianGeometries, pedestrianLowGeometry, shirtPalette, type CarVariant } from './traffic/models';
 import { CongestionOverlay } from './traffic/congestion';
 import { GroundSampler } from './traffic/ground';
+import { Smoke } from './traffic/smoke';
+import { carHorn, crash, curbThump } from '../interact/audio';
 
 export interface PlayerInput { throttle: number; brake: number; steer: number; handbrake: boolean }
-export interface PlayerState { e: number; n: number; elev: number; heading: number; speed: number; pitch: number; onRoad: boolean; roadName: string | null; carId: number }
+export interface PlayerState {
+  e: number; n: number; elev: number; heading: number; speed: number; pitch: number; onRoad: boolean; roadName: string | null; carId: number;
+  /** 0 off-road, 1 carriageway, 2 sidewalk */
+  surface: number;
+  /** accumulated collision damage 0..1 (smoke from 0.3) */
+  damage: number;
+  /** drawn pose (with curb jolts, sidewalk lift): the chase camera follows this */
+  drawZ: number;
+}
+/** oriented box: centre E/N, heading (rad CCW from +E), half length / half width */
+export interface SolidBox { e: number; n: number; h: number; hl: number; hw: number }
 export interface TrafficStats { cars: number; peds: number; targetCars: number; targetPeds: number; stepMs: number; stepAvgMs: number; fillMs: number; substeps: number; tiles: number; pendingTiles: number; fast: boolean }
 
 /** anything exposing transit stop positions (TransitLayer) */
@@ -46,7 +58,7 @@ interface StreetSignals {
 
 const HIDE_ALTITUDE = 6000;
 const KINDS = 6;
-const DRIVE_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space']);
+const DRIVE_KEYS = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'KeyH']);
 /** body half widths per kind (m), matching the sim */
 const HALF_W = [0.92, 0.9, 0.98, 1.01, 1.0, 1.25];
 /** road surface above the terrain (roads.ts lift ≈ 0.03 + (9 − class)·0.004) */
@@ -273,6 +285,14 @@ export class TrafficLayer implements Layer {
   private waiters: ((ok: boolean) => void)[] = [];
   private statsLog = 0;
   private visible = true;
+  // player effects
+  private walkerBody: [number, number, number, number] | null = null;
+  private fx = { curbT: 9, curbA: 0, hitT: 9, hitA: 0, surface: 1, lift: 0, yawRate: 0, lastH: NaN, lastV: 0, accel: 0 };
+  private damage = 0;
+  private drawnPlayer = { e: NaN, n: NaN, z: NaN, h: 0 };
+  private smoke: Smoke | null = null;
+  private hornAt = new Map<number, number>();
+  private hornBudget = 0;
 
   constructor(stops: StopSource | null = null) {
     this.stopSource = stops;
@@ -306,6 +326,7 @@ export class TrafficLayer implements Layer {
     }
     this.pedsLo = new Pool(packPed(pedestrianLowGeometry()), pm, MAX_PEDS, this.group, 'pedestriansLo', 3);
     this.pedsLo.mesh.castShadow = false;
+    this.smoke = new Smoke(this.group);
     this.congestion = new CongestionOverlay(engine);
     this.congestion.bind((m) => this.post(m));
 
@@ -340,6 +361,15 @@ export class TrafficLayer implements Layer {
         if (m.ok !== undefined) {
           this.setPlayerMode(m.ok);
           this.waiters.splice(0).forEach((f) => f(m.ok!));
+        }
+        break;
+      case 'playerFx':
+        this.fx.surface = m.surface;
+        if (m.curb > 0.8) { this.fx.curbT = 0; this.fx.curbA = m.curb; curbThump(m.curb / 6); }
+        if (m.hit > 1.2) {
+          this.fx.hitT = 0; this.fx.hitA = m.hit;
+          this.damage = Math.min(1, this.damage + Math.max(0, m.hit - 2.5) / 20);
+          crash(m.hit / 12);
         }
         break;
       case 'railFeeds': this.railFeeds = m.agencies; this.railFeedsProfile = m.profile; break;
@@ -482,7 +512,7 @@ export class TrafficLayer implements Layer {
 
   /** Convert the AI car nearest to (e, n) into the player car. */
   takeOverNearestCar(e: number, n: number, radius = 40): Promise<boolean> {
-    const id = this.pickCar(e, n, radius);
+    const id = this.pickCar(e, n, Math.min(radius, 25)) ?? this.pickCarMajor(e, n, Math.max(radius, 150));
     if (id === null) return Promise.resolve(false);
     return this.request({ type: 'takeOver', id });
   }
@@ -500,7 +530,85 @@ export class TrafficLayer implements Layer {
   getPlayer(): PlayerState | null {
     if (!this.playerActive || !this.hf || !this.hf[HF.PLAYER]) return null;
     const p = this.hf, b = HF.PLAYER;
-    return { e: p[b + 1], n: p[b + 2], elev: p[b + 3], heading: p[b + 4], speed: p[b + 5], pitch: p[b + 6], onRoad: !!p[b + 7], roadName: this.roadName, carId: p[b + 11] };
+    const d = this.drawnPlayer;
+    return {
+      e: p[b + 1], n: p[b + 2], elev: p[b + 3], heading: p[b + 4], speed: p[b + 5], pitch: p[b + 6], onRoad: p[b + 7] === 1, roadName: this.roadName, carId: p[b + 11],
+      surface: p[b + 7], damage: this.damage, drawZ: Number.isFinite(d.z) && Math.hypot(d.e - p[b + 1], d.n - p[b + 2]) < 5 ? d.z : p[b + 3],
+    };
+  }
+
+  /** The walking player (AI cars brake and honk for them); null when not walking. */
+  setWalker(e: number, n: number, elev: number, radius: number) {
+    this.walkerBody = [e, n, elev, radius];
+  }
+  clearWalker() { this.walkerBody = null; }
+
+  /** Cars and surface transit vehicles near (e, n) as oriented boxes (walker collisions). */
+  solidsNear(e: number, n: number, r: number, out: SolidBox[] = []): SolidBox[] {
+    out.length = 0;
+    const q = this.carGrid();
+    if (q && q.count) {
+      for (let gx = Math.floor((e - r - 6) / 20); gx <= Math.floor((e + r + 6) / 20); gx++) {
+        for (let gy = Math.floor((n - r - 6) / 20); gy <= Math.floor((n + r + 6) / 20); gy++) {
+          const list = this.qGrid.get(gx * 100003 + gy);
+          if (!list) continue;
+          for (const i of list) {
+            if (Math.hypot(q.e[i] - e, q.n[i] - n) > r + q.hl[i] + 1) continue;
+            out.push({ e: q.e[i], n: q.n[i], h: q.h[i], hl: q.hl[i], hw: q.hw[i] });
+          }
+        }
+      }
+    }
+    for (const g of this.gv) {
+      const c = Math.cos(g.heading), s = Math.sin(g.heading);
+      const ce = g.e - c * g.length / 2, cn = g.n - s * g.length / 2;
+      if (Math.hypot(ce - e, cn - n) > r + g.length / 2 + 1) continue;
+      out.push({ e: ce, n: cn, h: g.heading, hl: g.length / 2, hw: g.width / 2 });
+    }
+    return out;
+  }
+
+  /**
+   * Car to take over near (e, n): prefers the highest-class road (motorway over
+   * arterial over side street) — each class step down costs `perClass` m.
+   */
+  pickCarMajor(e: number, n: number, radius = 150, perClass = 55): number | null {
+    const snap = this.snapshot();
+    if (!snap) return null;
+    const { f, u, count, oe, on } = snap;
+    let best = Infinity, id: number | null = null;
+    for (let i = 0; i < count; i++) {
+      const o = i * CAR_STRIDE;
+      const dx = f[o] + oe - e, dy = f[o + 1] + on - n;
+      const d = Math.hypot(dx, dy);
+      if (d > radius) continue;
+      const meta = u[o + 6];
+      if ((meta >>> 16) & CAR_FLAG.PLAYER) continue;
+      const cls = (meta >>> 24) & 7;
+      const score = d + cls * perClass;
+      if (score < best) { best = score; id = u[o + 7]; }
+    }
+    return id;
+  }
+
+  /** Pedestrian nearest (e, n) within `radius` m: position, heading, body / shirt colour index. */
+  pickPed(e: number, n: number, radius = 3): { e: number; n: number; z: number; heading: number; colour: number } | null {
+    const snap = this.snapshot();
+    if (!snap) return null;
+    const { pf, pu, pedCount, oe, on } = snap;
+    let bd = radius, out: { e: number; n: number; z: number; heading: number; colour: number } | null = null;
+    for (let i = 0; i < pedCount; i++) {
+      const o = i * PED_STRIDE;
+      const pe = pf[o] + oe, pn = pf[o + 1] + on;
+      const d = Math.hypot(pe - e, pn - n);
+      if (d < bd) { bd = d; out = { e: pe, n: pn, z: pf[o + 2], heading: pf[o + 3], colour: pu[o + 5] & 0xff }; }
+    }
+    return out;
+  }
+
+  /** Remove the simulated pedestrian at (e, n) (the player takes their place). */
+  removePedNear(e: number, n: number) {
+    this.post({ type: 'removePed', e, n });
   }
 
   /** Hand the car back to the AI (or remove it when off-road). */
@@ -632,6 +740,9 @@ export class TrafficLayer implements Layer {
     this.playerActive = on;
     if (on && !was) {
       this.keyboard = true;
+      this.damage = 0;
+      this.fx.curbT = this.fx.hitT = 9;
+      this.fx.lastH = NaN;
       if (this.chaseCamera) {
         this.engine.controls.follow(() => {
           const p = this.getPlayer();
@@ -652,6 +763,12 @@ export class TrafficLayer implements Layer {
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     if (e.code === 'Escape') { this.releasePlayer(); return; }
     if (!DRIVE_KEYS.has(e.code)) return;
+    if (e.code === 'KeyH') {
+      if (!e.repeat) carHorn(0.9, 0.92);
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
     this.keys.add(e.code);
     this.keyboard = true;
     e.preventDefault();
@@ -785,6 +902,7 @@ export class TrafficLayer implements Layer {
     const obst = radius > 0 ? this.transitObstacles() : undefined;
     if (this.railProfile) { m.railProfile = this.railProfile; m.railRadius = this.railEnabled ? RAIL_RADIUS : 0; }
     if (this.railCmd) m.railCmd = this.railCmd;
+    if (this.walkerBody) m.walker = this.walkerBody;
     const qa = (window as unknown as { __qa?: Record<string, unknown> }).__qa;
     if (qa && this.hf) {
       qa.carsTarget = Math.round(this.hf[HF.TARGET_CARS]); qa.carsActive = this.hf[HF.CARS];
@@ -979,6 +1097,12 @@ export class TrafficLayer implements Layer {
       } else {
         z = structure || !Number.isFinite(gc) ? simZ + (structure ? 0.1 : 0.04) : gc + ROAD_LIFT;
       }
+      if (player) {
+        const fx = this.playerFx(ctx.dt, e, n, h, v, structure);
+        z += fx[0]; pitch += fx[1]; roll += fx[2];
+        const dp = this.drawnPlayer;
+        dp.e = e; dp.n = n; dp.z = z; dp.h = h;
+      } else if (flags & CAR_FLAG.HORN) this.honk(id, e, n, camE, camN, ctx.time);
       // basis (E, N, U): forward F, right R (rolled), up = R × F
       const cp = Math.cos(pitch), sp = Math.sin(pitch);
       const Fx = ch * cp, Fy = sh * cp, Fz = sp;
@@ -1003,15 +1127,41 @@ export class TrafficLayer implements Layer {
     this.zoff = nextZ; this.zoffNext = prevZ;
     for (const p of this.cars) p.commit();
     for (const p of this.carsLo) p.commit();
+    {
+      // smoke from the hood of a damaged player car
+      const dp = this.drawnPlayer;
+      const on = this.playerActive && Number.isFinite(dp.e);
+      const hc = Math.cos(dp.h), hs = Math.sin(dp.h);
+      this.smoke?.update(ctx.dt, on ? this.damage : 0, dp.e + hc * 1.7, dp.n + hs * 1.7, dp.z + 1.0, ax, az, [0.5, 0.3]);
+    }
 
     const { pf, pu, pedCount } = snap;
     for (const p of this.peds) p.count = 0;
     const pedsLo = this.pedsLo!;
     pedsLo.count = 0;
     const pedNear2 = (PED_NEAR * view.scale) ** 2, pedFar2 = (PED_FAR * view.scale) ** 2;
+    // pedestrians step out of the way of the player's car (display only: a
+    // smooth field around its path, so they part ahead of it and step back after)
+    const dp = this.drawnPlayer;
+    const pv = this.playerActive && Number.isFinite(dp.e) ? this.hf[HF.PLAYER + 5] : 0;
+    const dodge = Math.abs(pv) > 2.5;
+    const dc = Math.cos(dp.h) * Math.sign(pv), ds = Math.sin(dp.h) * Math.sign(pv);
+    const reach = 4 + Math.abs(pv) * 1.5, ramp = 2 + Math.abs(pv) * 0.45;
     for (let i = 0; i < pedCount; i++) {
       const o = i * PED_STRIDE;
-      const e = pf[o] + snap.oe, n = pf[o + 1] + snap.on;
+      let e = pf[o] + snap.oe, n = pf[o + 1] + snap.on;
+      let dodgeW = 0, dodgeH = 0;
+      if (dodge) {
+        const dx = e - dp.e, dy = n - dp.n;
+        const a = dx * dc + dy * ds, b = -dx * ds + dy * dc;
+        if (a > -4.5 && a < reach && Math.abs(b) < 3.6) {
+          const w = THREE.MathUtils.clamp((reach - a) / ramp, 0, 1) * THREE.MathUtils.clamp((a + 4.5) / 3, 0, 1);
+          const side = b > 0.05 ? 1 : b < -0.05 ? -1 : (i & 1 ? 1 : -1);
+          const off = side * (3.6 - Math.abs(b)) * w;
+          e += -ds * off; n += dc * off;
+          dodgeW = w; dodgeH = Math.atan2(dc * side, -ds * side);
+        }
+      }
       const dp2 = view.dist2EN(e, n, pf[o + 2]);
       if (dp2 > pedFar2 || !view.sphereEN(e, n, pf[o + 2] + 1, 3)) continue;
       const meta = pu[o + 5];
@@ -1020,7 +1170,7 @@ export class TrafficLayer implements Layer {
       const structure = (meta >> 16) & 1;
       const pool = dp2 > pedNear2 ? pedsLo : this.peds[colour % this.peds.length];
       const k = pool.count++;
-      const h = pf[o + 3];
+      const h = dodgeW > 0.3 ? dodgeH : pf[o + 3];
       const ch = Math.cos(h), sh = Math.sin(h);
       const g = structure ? NaN : G.at(e, n);
       // on the raised sidewalk except while crossing the carriageway
@@ -1035,13 +1185,70 @@ export class TrafficLayer implements Layer {
       const ca = pool.col.array as Float32Array;
       ca[k * 4] = c.r; ca[k * 4 + 1] = c.g; ca[k * 4 + 2] = c.b; ca[k * 4 + 3] = 0;
       const an = pool.extra!.array as Float32Array;
-      an[k * 3] = pf[o + 4]; an[k * 3 + 1] = h; an[k * 3 + 2] = state === 0 || state === 2 ? 1 : 0;
+      an[k * 3] = pf[o + 4] * (1 + dodgeW); an[k * 3 + 1] = h; an[k * 3 + 2] = state === 0 || state === 2 || dodgeW > 0.3 ? 1 : 0;
     }
     for (const p of this.peds) p.commit();
     pedsLo.commit();
   }
 
+  /** Visual offsets of the player car (dz, pitch, roll): sidewalk lift, curb jolts, rough ground, body roll / squat. */
+  private playerFx(dt: number, e: number, n: number, h: number, v: number, structure: boolean): [number, number, number] {
+    const fx = this.fx;
+    fx.curbT += dt; fx.hitT += dt;
+    const surf = this.hf ? this.hf[HF.PLAYER + 7] : 1;
+    // raised sidewalk (the ground sampler has the bare terrain + road lift)
+    const lift = structure ? 0 : surf === 2 ? WALK_LIFT - ROAD_LIFT : surf === 0 ? -0.03 : 0;
+    fx.lift += (lift - fx.lift) * Math.min(1, dt * (lift > fx.lift ? 30 : 14));
+    let dz = fx.lift, dp = 0, dr = 0;
+    // curb: a sharp kick that rings out
+    if (fx.curbT < 1) {
+      const A = Math.min(1.4, fx.curbA / 5), k = Math.exp(-fx.curbT * 7);
+      dz += A * 0.07 * k * Math.sin(fx.curbT * 26);
+      dp += A * 0.05 * k * Math.cos(fx.curbT * 26);
+      dr += A * 0.03 * k * Math.sin(fx.curbT * 19 + 1);
+    }
+    if (fx.hitT < 1) {
+      const A = Math.min(1, fx.hitA / 8), k = Math.exp(-fx.hitT * 9);
+      dz += A * 0.05 * k * Math.sin(fx.hitT * 40);
+      dr += A * 0.04 * k * Math.sin(fx.hitT * 33);
+    }
+    // rough surfaces rattle with speed
+    if (surf !== 1 && !structure) {
+      const r = Math.min(1, Math.abs(v) / 8) * (surf === 0 ? 0.022 : 0.012);
+      const t = performance.now() / 1000;
+      dz += r * (Math.sin(t * 31 + e) * 0.6 + Math.sin(t * 47 + n) * 0.4);
+      dp += r * 0.5 * Math.sin(t * 23);
+    }
+    // weight transfer: squat / dive, roll out of turns
+    if (dt > 0) {
+      if (Number.isFinite(fx.lastH)) {
+        const yr = Math.atan2(Math.sin(h - fx.lastH), Math.cos(h - fx.lastH)) / dt;
+        fx.yawRate += (THREE.MathUtils.clamp(yr, -3, 3) - fx.yawRate) * Math.min(1, dt * 6);
+        fx.accel += (THREE.MathUtils.clamp((v - fx.lastV) / dt, -12, 8) - fx.accel) * Math.min(1, dt * 5);
+      }
+      fx.lastH = h; fx.lastV = v;
+    }
+    dr += -THREE.MathUtils.clamp(v * fx.yawRate * 0.0075, -0.07, 0.07);
+    dp += THREE.MathUtils.clamp(fx.accel * 0.006, -0.06, 0.04);
+    return [dz, dp, dr];
+  }
+
+  /** an AI car's horn near the camera (throttled per car and overall) */
+  private honk(id: number, e: number, n: number, camE: number, camN: number, time: number) {
+    const d = Math.hypot(e - camE, n - camN);
+    if (d > 90) return;
+    const last = this.hornAt.get(id) ?? -1e9;
+    if (time - last < 2) return;
+    this.hornBudget = Math.max(this.hornBudget, time - 1);
+    if (this.hornBudget > time + 0.5) return; // ≤ ~2 horns per second overall
+    this.hornBudget += 0.5;
+    this.hornAt.set(id, time);
+    if (this.hornAt.size > 200) this.hornAt.clear();
+    carHorn(1 - d / 90, 0.85 + hash01(id) * 0.35);
+  }
+
   dispose() {
+    this.smoke?.dispose();
     window.removeEventListener('keydown', this.onKeyDown, { capture: true });
     window.removeEventListener('keyup', this.onKeyUp, { capture: true });
     window.removeEventListener('blur', this.onBlur);

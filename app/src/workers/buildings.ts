@@ -5,8 +5,9 @@
 //
 // Per-vertex attributes (besides position / normal / colour):
 //   fac   vec4  u (m along the wall), h (m above the building base), L (wall length m), H (wall top above base m)
-//   fcode vec2  code = style + 16·front + 64·seed(0..255), unit width (m) of the shop / lobby rhythm
+//   fcode vec2  code = style + 16·front + 64·seed(0..255) + 16384·use, unit width (m) of the shop / lobby rhythm
 // front: 0 plain · 1 storefront band · 2 office lobby · 3 loading doors
+// use (night occupancy schedule, facadeMaterial.ts): see USE below
 import earcut from 'earcut';
 import type { TypedArray } from '../data/tbn';
 import type { MeshBuf } from './meshing';
@@ -19,6 +20,31 @@ export const ST = {
   PARKING: 8, LOFT: 9, BLANK: 10, HOUSE: 11, MODERN: 12, ROOF: 13, CANOPY: 14, AWNING: 15,
 } as const;
 const F_NONE = 0, F_SHOP = 1, F_LOBBY = 2, F_DOCK = 3;
+/** occupancy class for lit windows (must match facadeMaterial.ts) */
+export const USE = { RES: 0, OFFICE: 1, RETAIL: 2, CIVIC: 3, HOTEL: 4, H24: 5, INDUSTRY: 6, PARKING: 7 } as const;
+
+/** what the building is used for, for the lit-window schedule: OSM kind first, then style / district */
+function useOf(kind: number, style: number, H: number, gcls: number, core: boolean, r: number): number {
+  switch (kind) {
+    case 1: case 2: return USE.RES;
+    case 3: return USE.OFFICE;
+    case 4: return USE.RETAIL;
+    case 5: case 11: return USE.INDUSTRY;
+    case 6: case 7: case 8: return USE.CIVIC;
+    case 9: case 10: return USE.H24;
+    case 13: return USE.HOTEL;
+    case 14: return USE.PARKING;
+    case 12: return USE.CIVIC;
+    default:
+      // untagged: condo-looking towers are homes; downtown glass / ribbon towers mostly offices
+      if (style === ST.CONDO || style === ST.HOUSE) return USE.RES;
+      if (style === ST.METAL) return USE.INDUSTRY;
+      if (style === ST.GLASS || style === ST.RIBBON) return core ? (r < 0.7 ? USE.OFFICE : USE.RES) : (r < 0.45 ? USE.OFFICE : USE.RES);
+      if (gcls === 5 && H < 14) return r < 0.5 ? USE.RETAIL : USE.RES;
+      if (gcls === 6) return USE.INDUSTRY;
+      return USE.RES;
+  }
+}
 
 // --------------------------------------------------------------------------- helpers
 
@@ -119,6 +145,79 @@ function insetOuterRings(xy: Float32Array, ringOff: Uint32Array, vertOff: Uint32
   return out;
 }
 
+/**
+ * Party walls: outer-ring edges that run along another building's edge (≤ 0.8 m apart,
+ * anti-parallel, sharing ≥ 2 of 3 sample points). Rowhouses, main-street blocks and downtown infill share them;
+ * where one building rises above its neighbour the exposed part is a blank fire wall, never a
+ * row of windows. Towers (> 30 m) over a much lower podium / neighbour, walls over a low
+ * one-storey addition and walls that face a street keep their windows.
+ * Returns a flag per vertex (the edge from that vertex to the next) of the outer rings.
+ */
+function partyWalls(xy: Float32Array, ringOff: Uint32Array, vertOff: Uint32Array, H: Float32Array): Uint8Array {
+  const flags = new Uint8Array(xy.length / 2);
+  const nB = ringOff.length - 1;
+  const C = 16;
+  const grid = new Map<number, number[]>(); // cell → [building, vertex] pairs
+  const key = (i: number, j: number) => (i + 512) * 4096 + (j + 512);
+  const edges: number[] = []; // b, k, k2
+  const orient = new Int8Array(nB); // +1 CCW outer ring, −1 CW
+  for (let b = 0; b < nB; b++) {
+    const r0 = ringOff[b];
+    if (ringOff[b + 1] <= r0) continue;
+    const s = vertOff[r0], e = vertOff[r0 + 1];
+    orient[b] = ringArea(xy, s, e) >= 0 ? 1 : -1;
+    for (let k = s; k < e; k++) {
+      const k2 = k + 1 < e ? k + 1 : s;
+      const id = edges.length / 3;
+      edges.push(b, k, k2);
+      const x0 = Math.min(xy[k * 2], xy[k2 * 2]) - 1, x1 = Math.max(xy[k * 2], xy[k2 * 2]) + 1;
+      const y0 = Math.min(xy[k * 2 + 1], xy[k2 * 2 + 1]) - 1, y1 = Math.max(xy[k * 2 + 1], xy[k2 * 2 + 1]) + 1;
+      for (let j = Math.floor(y0 / C); j <= Math.floor(y1 / C); j++)
+        for (let i = Math.floor(x0 / C); i <= Math.floor(x1 / C); i++) {
+          const c = grid.get(key(i, j));
+          if (c) c.push(id); else grid.set(key(i, j), [id]);
+        }
+    }
+  }
+  const nE = edges.length / 3;
+  for (let a = 0; a < nE; a++) {
+    const b = edges[a * 3], k = edges[a * 3 + 1], k2 = edges[a * 3 + 2];
+    const ax = xy[k * 2], ay = xy[k * 2 + 1], bx = xy[k2 * 2], by = xy[k2 * 2 + 1];
+    const L = Math.hypot(bx - ax, by - ay);
+    if (L < 2) continue;
+    const ux = (bx - ax) / L * orient[b], uy = (by - ay) / L * orient[b];
+    let covered = 0;
+    for (const t of [0.25, 0.5, 0.75]) {
+      const px = ax + (bx - ax) * t, py = ay + (by - ay) * t;
+      const c = grid.get(key(Math.floor(px / C), Math.floor(py / C)));
+      if (!c) continue;
+      let hit = false;
+      for (const o of c) {
+        const ob = edges[o * 3];
+        if (ob === b) continue;
+        // a tower over a much lower neighbour keeps its windows on that side
+        if (H[b] > 30 && H[ob] < H[b] * 0.6) continue;
+        // … and so does a building behind a low shop / garage addition (≤ 8 m, under half its height)
+        if (H[ob] < 8 && H[ob] < H[b] * 0.5) continue;
+        const ok = edges[o * 3 + 1], ok2 = edges[o * 3 + 2];
+        const cx = xy[ok * 2], cy = xy[ok * 2 + 1], dx = xy[ok2 * 2] - cx, dy = xy[ok2 * 2 + 1] - cy;
+        const l = Math.hypot(dx, dy);
+        if (l < 1) continue;
+        // the neighbour must be outside this wall: shared edges run opposite ways round the two
+        // CCW rings (a part stacked on a podium runs the same way: same facade, not a party wall)
+        if ((ux * dx + uy * dy) * orient[ob] / l > -0.99) continue;
+        const q = ((px - cx) * dx + (py - cy) * dy) / (l * l);
+        if (q < -0.02 || q > 1.02) continue;
+        if (Math.abs((px - cx) * dy - (py - cy) * dx) / l > 0.8) continue;
+        hit = true; break;
+      }
+      if (hit) covered++;
+    }
+    if (covered >= 2) flags[k] = 1;
+  }
+  return flags;
+}
+
 // --------------------------------------------------------------------------- builder with facade attributes
 
 export type RGB = [number, number, number];
@@ -127,7 +226,7 @@ export class FBuilder {
   pos: Float32Array; nrm: Int8Array; col: Uint8Array; fac: Float32Array; fcd: Float32Array; idx: Uint32Array;
   nv = 0; ni = 0;
   // current facade record applied to new vertices
-  u = 0; h0 = 0; L = 0; H = 0; code = 0; unit = 0;
+  u = 0; h0 = 0; L = 0; H = 0; code = 0; unit = 0; use = 0;
   constructor(vcap: number, icap: number) {
     this.pos = new Float32Array(vcap * 3); this.nrm = new Int8Array(vcap * 4); this.col = new Uint8Array(vcap * 4);
     this.fac = new Float32Array(vcap * 4); this.fcd = new Float32Array(vcap * 2); this.idx = new Uint32Array(icap);
@@ -146,7 +245,7 @@ export class FBuilder {
     this.nrm[i * 4] = Math.round(nx * 127); this.nrm[i * 4 + 1] = Math.round(ny * 127); this.nrm[i * 4 + 2] = Math.round(nz * 127);
     this.col[i * 4] = c[0]; this.col[i * 4 + 1] = c[1]; this.col[i * 4 + 2] = c[2]; this.col[i * 4 + 3] = 255;
     this.fac[i * 4] = u; this.fac[i * 4 + 1] = y - this.h0; this.fac[i * 4 + 2] = this.L; this.fac[i * 4 + 3] = this.H;
-    this.fcd[i * 2] = this.code; this.fcd[i * 2 + 1] = this.unit;
+    this.fcd[i * 2] = this.code + 16384 * this.use; this.fcd[i * 2 + 1] = this.unit;
     return i;
   }
   t(a: number, b: number, c: number) {
@@ -378,12 +477,14 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
   // laneways: garage doors on the walls of garages / sheds that face one
   const alleys = level === 0 ? new SegIndex(alleySegs(a, originE, originN, names), 8) : null;
   const b = new FBuilder(nB * 24, nB * 48);
+  const party = level === 0 ? partyWalls(xy0, ringOff, vertOff, H) : null;
   let count = 0;
   const flat: number[] = [];
   const holes: number[] = [];
   const edgeFront: number[] = [];
   const edgeUnit: number[] = [];
   const edgeD: number[] = [];
+  const edgeCurb: number[] = [];
   for (let i = 0; i < nB; i++) {
     const osm = OSM ? OSM[i] : 0;
     if (suppress.size && suppress.has(osm)) continue;
@@ -426,6 +527,7 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
     const wc = shade(wallRGB, vari);
     const seed = h & 255;
     b.h0 = base; b.H = height; b.unit = 0;
+    b.use = useOf(kind, st.style, height, gcls, core, rnd(h, 8));
     const codeOf = (style: number, front: number) => style + 16 * front + 64 * seed;
     let roofType = ROOFT ? ROOFT[i] : 0;
     const bottom = minH > 0.5 ? base + minH : base - 2.5;
@@ -436,12 +538,12 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
     const roofCode = codeOf(ST.ROOF, 0);
 
     // ---- which outer edges front a street (storefront / lobby / loading), level 0 only
-    edgeFront.length = 0; edgeUnit.length = 0; edgeD.length = 0;
+    edgeFront.length = 0; edgeUnit.length = 0; edgeD.length = 0; edgeCurb.length = 0;
     const ccwOuter = ringArea(xy, va, vb) > 0;
     const wantShops = level === 0 && roads && minH < 0.5 && height >= 3.2 && kind !== 1 && kind !== 11 && kind !== 14 && kind !== 15;
     const wantGarage = alleys && st.style === ST.BLANK && minH < 0.5 && height < 6 && area < 90;
     for (let k = va; k < vb; k++) {
-      edgeFront.push(F_NONE); edgeUnit.push(0); edgeD.push(0);
+      edgeFront.push(F_NONE); edgeUnit.push(0); edgeD.push(0); edgeCurb.push(-1);
       if (wantGarage) {
         const k2 = k + 1 < vb ? k + 1 : va;
         let x0 = xy[k * 2], y0 = xy[k * 2 + 1], x1 = xy[k2 * 2], y1 = xy[k2 * 2 + 1];
@@ -462,6 +564,7 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
       const retail = kind === 4 || (gcls === 5 && !old);
       const f = frontage(roads!, mx, my, nx, ny, ex, ey, L / 2, retail ? 75 : 16);
       if (!f) continue;
+      edgeCurb[k - va] = f.d;
       let fr = F_NONE;
       let unit = 5 + rnd(h, 10 + k - va) * 2.5;
       if (kind === 4) { fr = F_SHOP; if (area > 2500) unit = 14 + rnd(h, 11) * 16; }
@@ -564,12 +667,24 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
         let x0 = xy[k * 2], n0 = xy[k * 2 + 1], x1 = xy[k2 * 2], n1 = xy[k2 * 2 + 1];
         if (outwardFlip) { [x0, x1] = [x1, x0]; [n0, n1] = [n1, n0]; }
         b.L = Math.hypot(x1 - x0, n1 - n0);
-        const fr = rr === r0 ? edgeFront[k - s] : F_NONE;
-        b.unit = rr === r0 ? edgeUnit[k - s] : 0;
+        // a wall shared with a lower building in front of it (a one-storey shop addition on a main
+        // street) still faces the street: its upper floors keep their windows
+        let isParty = rr === r0 && party !== null && party[k] === 1;
+        if (isParty && roads && b.L > 3) {
+          const ex = (x1 - x0) / b.L, ey = (n1 - n0) / b.L;
+          if (frontage(roads, (x0 + x1) / 2, (n0 + n1) / 2, ey, -ex, ex, ey, b.L / 2, 40)) isParty = false;
+        }
+        const fr = rr === r0 && !isParty ? edgeFront[k - s] : F_NONE;
+        // unit −1 = party wall: blank (no windows / shop band), see facadeMaterial
+        b.unit = isParty ? -1 : rr === r0 ? edgeUnit[k - s] : 0;
         b.code = codeOf(st.style, fr);
         wall(b, x0, n0, x1, n1, bottom, wallTop + par, bottom, wallTop + par, wc);
         // storefronts / lobbies meet the sidewalk: pave the frontage from the wall to the curb
-        if ((fr === F_SHOP || fr === F_LOBBY) && terr && rr === r0) apron(b, x0, n0, x1, n1, Math.min(edgeD[k - s] - 0.2, 5), terr, seed);
+        if ((fr === F_SHOP || fr === F_LOBBY) && terr && rr === r0) apron(b, x0, n0, x1, n1, Math.min(edgeD[k - s] - 0.2, 5), terr, seed, fr);
+        // built-up street walls without a storefront: the property-line strip between the
+        // sidewalk and the face is paved too (was bare land-use ground, a white band on Queen W)
+        else if (fr === F_NONE && terr && rr === r0 && edgeCurb[k - s] > 0.6 && edgeCurb[k - s] < 6.5 && (old || core || gcls === 5 || kind === 4))
+          apron(b, x0, n0, x1, n1, edgeCurb[k - s] - 0.2, terr, seed, F_NONE);
         if (fr === F_SHOP && level === 0) shopFront(b, x0, n0, x1, n1, base, b.L, b.unit, h, st.style, old, kind, area, seed, shopDistrict(originE + cx0, originN + cy0) ? 0.65 : old ? 0.38 : 0.12);
       }
     }
@@ -627,22 +742,26 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
   return { mesh: b.finish(), count, items };
 }
 
-const PAVING: RGB = [184, 180, 172];
+const PAVING: RGB = [170, 167, 161]; // the sidewalk concrete (roadMaterial concrete × 0.86)
 
-/** paved strip in front of a storefront wall (draped on the terrain, just under the sidewalk top) */
-function apron(b: FBuilder, x0: number, n0: number, x1: number, n1: number, d: number, terr: { at(e: number, n: number): number }, seed: number) {
+/**
+ * Paved strip in front of a street wall (draped on the terrain, just under the sidewalk top).
+ * Facade attributes: u along the wall, h = distance from the wall face (m), L = wall length,
+ * H = 998 (paving, not a roof deck), front = the wall's front so the shader can throw the
+ * storefront / lobby light spill onto it at night.
+ */
+function apron(b: FBuilder, x0: number, n0: number, x1: number, n1: number, d: number, terr: { at(e: number, n: number): number }, seed: number, front: number) {
   if (d < 0.6) return;
   const L = Math.hypot(x1 - x0, n1 - n0);
   const ex = (x1 - x0) / L, en = (n1 - n0) / L, ne = en, nn = -ex;
   const segs = Math.max(1, Math.ceil(L / 8));
   const h0 = b.h0, code = b.code, H = b.H;
-  b.code = ST.ROOF + 64 * seed; b.H = 999;
+  b.code = ST.ROOF + 16 * front + 64 * seed; b.H = 998; // 998: sidewalk apron (999: roof paint, rooftops.ts)
   for (let k = 0; k < segs; k++) {
     const u0 = (L * k) / segs, u1 = (L * (k + 1)) / segs;
-    const P = (u: number, o: number) => { const e = x0 + ex * u + ne * o, n = n0 + en * u + nn * o; return [e, terr.at(e, n) + 0.1, n]; };
+    const P = (u: number, o: number) => { const e = x0 + ex * u + ne * o, n = n0 + en * u + nn * o; return [e, terr.at(e, n) + 0.1, n, u, Math.max(0, o)]; };
     const A = P(u0, -0.05), B = P(u1, -0.05), C = P(u1, d), D = P(u0, d);
-    b.h0 = Math.min(A[1], B[1]);
-    const ids = [A, B, C, D].map((p) => b.v(p[0], p[1], -p[2], 0, 1, 0, PAVING, 0));
+    const ids = [A, B, C, D].map((p) => { b.h0 = p[1] - p[4]; return b.v(p[0], p[1], -p[2], 0, 1, 0, PAVING, p[3]); });
     // CCW seen from above in E,N: outward normal is to the right of travel → A,B,C,D is clockwise; flip
     b.t(ids[0], ids[2], ids[1]); b.t(ids[0], ids[3], ids[2]);
   }

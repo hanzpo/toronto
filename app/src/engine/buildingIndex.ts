@@ -121,6 +121,67 @@ export class BuildingIndex {
     }
     return best;
   }
+  /**
+   * Circle (centre e, n; radius r) against the footprints of buildings whose
+   * volume spans elevation h: the displacement (E, N) that pushes the circle
+   * out of every footprint it overlaps (from inside: to the nearest wall),
+   * or null when it touches none. Neighbouring tiles are searched near a
+   * border (footprints belong to the tile holding their centroid).
+   */
+  pushOut(e: number, n: number, h: number, r: number): [number, number] | null {
+    const S = this.tiles.manifest?.tileSize[0];
+    if (!S) return null;
+    const tx0 = Math.floor(e / S), ty0 = Math.floor(n / S);
+    let px = 0, py = 0, hit = false;
+    const M = 120;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const tx = tx0 + dx, ty = ty0 + dy;
+      if (dx || dy) {
+        // only near that tile's rect
+        if (e < tx * S - M || e > (tx + 1) * S + M || n < ty * S - M || n > (ty + 1) * S + M) continue;
+      }
+      const t = this.tiles.tiles.get(`0/${tx}/${ty}`);
+      if (!t || !t.collide) continue;
+      const fb = t.collide;
+      const g = this.grid(fb, S);
+      const x = e + px - tx * S, y = n + py - ty * S;
+      const cl = (v: number) => Math.max(0, Math.min(g.n - 1, Math.floor(v / CELL)));
+      const c0x = cl(x - r), c1x = cl(x + r), c0y = cl(y - r), c1y = cl(y + r);
+      const seen = new Set<number>();
+      for (let cy = c0y; cy <= c1y; cy++) for (let cx = c0x; cx <= c1x; cx++) {
+        const k = cy * g.n + cx;
+        for (let j = g.start[k]; j < g.start[k + 1]; j++) {
+          const i = g.items[j];
+          if (seen.has(i)) continue;
+          seen.add(i);
+          if (h > fb.top[i] || h < fb.bottom[i] - 0.5) continue;
+          const qx = e + px - tx * S, qy = n + py - ty * S;
+          if (qx < g.bb[4 * i] - r || qx > g.bb[4 * i + 2] + r || qy < g.bb[4 * i + 1] - r || qy > g.bb[4 * i + 3] + r) continue;
+          const a = fb.off[i], b = fb.off[i + 1];
+          let bd = Infinity, bx = 0, by = 0;
+          for (let v = a; v < b; v++) {
+            const w = v + 1 < b ? v + 1 : a;
+            const x0 = fb.xy[2 * v], y0 = fb.xy[2 * v + 1], ex = fb.xy[2 * w] - x0, ey = fb.xy[2 * w + 1] - y0;
+            const L2 = ex * ex + ey * ey;
+            const u = L2 > 0 ? Math.max(0, Math.min(1, ((qx - x0) * ex + (qy - y0) * ey) / L2)) : 0;
+            const cx2 = x0 + ex * u, cy2 = y0 + ey * u;
+            const d = Math.hypot(qx - cx2, qy - cy2);
+            if (d < bd) { bd = d; bx = cx2; by = cy2; }
+          }
+          const ins = inside(fb.xy, a, b, qx, qy);
+          if (!ins && bd >= r) continue;
+          let nx = qx - bx, ny = qy - by;
+          const l = Math.hypot(nx, ny) || 1;
+          nx /= l; ny /= l;
+          if (ins) { nx = -nx; ny = -ny; }
+          const push = ins ? bd + r : r - bd;
+          px += nx * push; py += ny * push;
+          hit = true;
+        }
+      }
+    }
+    return hit ? [px, py] : null;
+  }
 }
 
 function inside(xy: Float32Array, a: number, b: number, x: number, y: number): boolean {

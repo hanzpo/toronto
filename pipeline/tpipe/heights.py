@@ -105,7 +105,10 @@ def contained_hidden(d: dict) -> np.ndarray:
     pts = shapely.point_on_surface(polys)
     pairs = tree.query(pts, predicate="within")  # [inner idx, container idx]
     a, c = pairs
-    m = (a != c) & ~part[a] & ~part[c] & (area[c] >= area[a]) & (h[c] + 0.5 >= h[a])
+    # pieces of one multipolygon (same OSM id, one record per outer ring) are never duplicates
+    # of each other: an island outer ring sits inside its sibling's courtyard, not on top of it
+    oid = d["id"]
+    m = (a != c) & (oid[a] != oid[c]) & ~part[a] & ~part[c] & (area[c] >= area[a]) & (h[c] + 0.5 >= h[a])
     a, c = a[m], c[m]
     hidden = np.zeros(len(nring), dtype=bool)
     if len(a):

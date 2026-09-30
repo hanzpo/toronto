@@ -316,7 +316,18 @@ export class Sim {
         return ret >>> 0;
     }
     /**
+     * [curb jolt (m/s), collision impulse (m/s), surface (0 off-road, 1 road, 2 sidewalk)] since the last call
+     * @returns {Float32Array}
+     */
+    player_events() {
+        const ret = wasm.sim_player_events(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
      * [active, e, n, elev, heading, speed, pitch, onRoad, tileX, tileY, edgeIdx, carId, structure, bump]
+     * onRoad: 0 off-road, 1 carriageway, 2 sidewalk (see player_events)
      * @returns {Float64Array}
      */
     player_state() {
@@ -593,6 +604,17 @@ export class Sim {
         wasm.sim_remove_footprints(this.__wbg_ptr, tx, ty);
     }
     /**
+     * Remove the pedestrian nearest (e, n) within r m (the player takes their place).
+     * @param {number} e
+     * @param {number} n
+     * @param {number} r
+     * @returns {boolean}
+     */
+    remove_ped_near(e, n, r) {
+        const ret = wasm.sim_remove_ped_near(this.__wbg_ptr, e, n, r);
+        return ret !== 0;
+    }
+    /**
      * @param {number} tx
      * @param {number} ty
      */
@@ -660,6 +682,18 @@ export class Sim {
      */
     set_view(e, n, radius, ped_radius) {
         wasm.sim_set_view(this.__wbg_ptr, e, n, radius, ped_radius);
+    }
+    /**
+     * The walking player at (e, n, elev) with body radius r (≤ 0: not walking): cars brake
+     * and honk for them. `dt` = real seconds since the last call (horn timers).
+     * @param {number} e
+     * @param {number} n
+     * @param {number} z
+     * @param {number} r
+     * @param {number} dt
+     */
+    set_walker(e, n, z, r, dt) {
+        wasm.sim_set_walker(this.__wbg_ptr, e, n, z, r, dt);
     }
     /**
      * signalised approaches: [dE, dN, bearing, halfWidth, light]* (light 0 green, 1 amber, 2 red)

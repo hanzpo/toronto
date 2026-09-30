@@ -20,6 +20,9 @@ use crate::peds::Peds;
 use crate::rng::Rng;
 use crate::signal::Light;
 
+mod player;
+pub use player::{SURF_OFF, SURF_ROAD, SURF_WALK};
+
 pub const F_COMMIT: u8 = 1;
 pub const F_PLAYER: u8 = 2;
 pub const F_DEAD: u8 = 4;
@@ -119,6 +122,16 @@ pub struct Player {
     pub structure: bool,
     /// last collision impulse (m/s), for effects
     pub bump: f32,
+    /// lateral velocity (m/s, + left), yaw rate (rad/s), longitudinal acceleration (m/s²)
+    pub vy: f32,
+    pub r: f32,
+    pub ax: f32,
+    /// surface under the car (SURF_*)
+    pub surface: u8,
+    pub curb_cool: f32,
+    /// effect events since the last `player_events`: curb jolt, collision impulse (m/s)
+    pub ev_curb: f32,
+    pub ev_hit: f32,
 }
 
 /// Quadratic junction path: stop line of the in-lane → start of the out-lane.
@@ -299,6 +312,12 @@ pub struct World {
     ob_box: Vec<(u32, [[f32; 2]; NS])>,
     /// building outlines for player collisions
     pub fp: Footprints,
+    /// the walking player: (E, N, elevation, radius) — cars brake for them
+    pub walker: Option<(f64, f64, f32, f32)>,
+    /// lane footprints of the player's bodies (walker / player car) this tick
+    body_links: Vec<ObLink>,
+    /// honking AI cars: (id, cycle time left)
+    horns: Vec<(u32, f32)>,
     ped_boxes: Vec<(u32, [[f32; 2]; NS], u8)>,
     /// accumulated ms per phase [validate sort occ accel lanechg advance spawn peds]
     pub prof: [f64; 8],
@@ -445,6 +464,9 @@ impl World {
             ob_links: Vec::new(),
             ob_box: Vec::new(),
             fp: Footprints::default(),
+            walker: None,
+            body_links: Vec::new(),
+            horns: Vec::new(),
             ped_boxes: Vec::new(),
             prof: [0.0; 8],
             bus_pats: std::collections::HashMap::new(),
@@ -1350,6 +1372,7 @@ impl World {
                 self.ob_box.push((nd, pts));
             }
         }
+        self.add_player_bodies(&mut near);
         self.tmp = near;
         self.ob_links.sort_by_key(|o| o.link);
     }
@@ -3164,7 +3187,7 @@ impl World {
     /// Fill `out_cars` with render records relative to (oe, on).
     /// Record: [dE, dN, elev, heading, pitch, speed, meta(u32 bits), id(u32 bits)]
     /// meta: kind | color << 8 | flags << 16 | ground << 24
-    ///   flags: 1 brake, 2 player, 4 indicator left, 8 indicator right
+    ///   flags: 1 brake, 2 player, 4 indicator left, 8 indicator right, 32 horn
     ///   ground: road class (bits 0-2) | 8 on a bridge/in a tunnel (elevation from the graph)
     pub fn write_cars(&mut self, oe: f64, on: f64) {
         self.update_paths();
@@ -3207,6 +3230,9 @@ impl World {
                         Turn::Right => 8,
                         _ => 0,
                     };
+                }
+                if self.horn_on(c.id) {
+                    f |= 32;
                 }
                 (pose, c.v, f, l.class.min(7) as u32 | if structure { 8 } else { 0 })
             };
@@ -3314,7 +3340,7 @@ impl World {
             next2: NONE,
         });
         self.bp.push([BoxPath::NONE; 2]);
-        self.player = Some(Player { x: pose.x, y: pose.y, z: pose.z, h: pose.h, p: pose.p, v: 0.0, steer: 0.0, on_road: true, edge: eid, id, placed: true, structure, bump: 0.0 });
+        self.player = Some(Player::new(pose, 0.0, eid, id, structure));
         true
     }
 
@@ -3333,7 +3359,7 @@ impl World {
         c.lc_from = NO_LANE;
         let edge = self.g.links[c.link as usize].edge;
         let v = c.v;
-        self.player = Some(Player { x: pose.x, y: pose.y, z: pose.z, h: pose.h, p: pose.p, v, steer: 0.0, on_road: true, edge, id, placed: true, structure, bump: 0.0 });
+        self.player = Some(Player::new(pose, v, edge, id, structure));
         true
     }
 
@@ -3366,204 +3392,6 @@ impl World {
             self.cars.swap_remove(i);
             self.bp.swap_remove(i);
         }
-    }
-
-    /// Kinematic bicycle model + collisions (AI cars, transit, buildings) + road snapping.
-    /// `dt` is real time.
-    pub fn player_step(&mut self, dt: f32, throttle: f32, brake: f32, steer_in: f32, handbrake: bool, ground_z: f32) {
-        let Some(pi) = self.player_index() else {
-            self.player = None;
-            return;
-        };
-        let dt = dt.min(0.05);
-        let mut near = std::mem::take(&mut self.tmp);
-        let p = self.player.as_mut().unwrap();
-        const WHEELBASE: f32 = 2.8;
-        const VMAX: f32 = 39.0;
-        let max_steer = 0.55 / (1.0 + p.v.abs() / 11.0);
-        let target = steer_in.clamp(-1.0, 1.0) * max_steer;
-        p.steer += (target - p.steer) * (dt * 7.0).min(1.0);
-        let mut a = 0.0f32;
-        if throttle > 0.0 {
-            a += if p.v < -0.2 { 8.0 * throttle } else { throttle * 4.6 * (1.0 - (p.v / VMAX).powi(2)).max(0.0) + 0.0 };
-        }
-        if brake > 0.0 {
-            if p.v > 0.3 {
-                a -= 9.0 * brake;
-            } else if p.v > -6.0 {
-                a -= 2.5 * brake;
-            }
-        }
-        // rolling resistance + aero drag
-        a -= 0.00045 * p.v * p.v.abs() + if throttle == 0.0 && brake == 0.0 { 0.25 * p.v.signum() } else { 0.0 };
-        if handbrake {
-            a -= 7.0 * p.v.signum();
-        }
-        let nv = (p.v + a * dt).clamp(-6.0, VMAX);
-        p.v = if p.v.signum() != nv.signum() && throttle == 0.0 && p.v != 0.0 && !(brake > 0.0 && p.v <= 0.3) { 0.0 } else { nv };
-        if p.v.abs() < 0.05 && throttle == 0.0 && brake == 0.0 {
-            p.v = 0.0;
-        }
-        let yaw = p.v / WHEELBASE * p.steer.tan() * if handbrake { 1.5 } else { 1.0 };
-        p.h = wrap_pi(p.h + yaw * dt);
-        p.x += (p.v * p.h.cos() * dt) as f64;
-        p.y += (p.v * p.h.sin() * dt) as f64;
-        p.bump *= (-dt * 4.0).exp();
-        self.player_collide(pi);
-        // road snapping (elevation, lane for the AI)
-        let p = self.player.as_ref().unwrap();
-        let (px, py, pz, ph) = (p.x, p.y, p.z, p.h);
-        self.g.edges_near(px, py, 14.0, &mut near);
-        let mut best: Option<(u32, f32, f32, f32, f32, f32)> = None; // edge, s, lat, z, hdg, score
-        for &eid in &near {
-            let ed = &self.g.edges[eid as usize];
-            if !ed.alive {
-                continue;
-            }
-            let (s, lat, z, hdg) = self.g.project_on_edge(eid, px, py);
-            if lat.abs() > ed.half_w + 1.2 {
-                continue;
-            }
-            let dz = (z - pz).abs();
-            if dz > 4.0 {
-                continue;
-            }
-            let score = lat.abs() / ed.half_w.max(1.0) + dz;
-            if best.map_or(true, |b| score < b.5) {
-                best = Some((eid, s, lat, z, hdg, score));
-            }
-        }
-        self.tmp = near;
-        let (tz, tp, structure) = if let Some((eid, s, lat, z, hdg, _)) = best {
-            let ed = &self.g.edges[eid as usize];
-            let fwd = (ph - hdg).cos() >= 0.0;
-            let link = if fwd { ed.links[0] } else { ed.links[1] };
-            let pose = self.g.edge_pose(ed, s, 0.0, !fwd);
-            let structure = ed.flags & (FLAG_BRIDGE | FLAG_TUNNEL) != 0;
-            let c = &mut self.cars[pi];
-            if link != NONE {
-                let l = &self.g.links[link as usize];
-                let ls = if fwd { s } else { l.len - s };
-                let lat_dir = if fwd { lat } else { -lat };
-                let mut lane = 0u8;
-                let mut bd = f32::INFINITY;
-                for k in 0..l.lanes {
-                    let d = (self.g.lane_offset(l, k) - lat_dir).abs();
-                    if d < bd {
-                        bd = d;
-                        lane = k;
-                    }
-                }
-                c.link = link;
-                c.lgen = l.gen;
-                c.lane = lane;
-                // `s` is the front bumper; the player position is the body centre
-                c.s = (ls + PLAYER_HL).clamp(0.0, l.len - 0.01);
-            } else {
-                c.link = NONE;
-            }
-            let p = self.player.as_mut().unwrap();
-            p.on_road = true;
-            p.edge = eid;
-            (z, pose.p, structure)
-        } else {
-            let p = self.player.as_mut().unwrap();
-            p.on_road = false;
-            self.cars[pi].link = NONE;
-            (ground_z, 0.0, false)
-        };
-        let p = self.player.as_mut().unwrap();
-        if !p.placed {
-            p.z = tz;
-        }
-        p.placed = true;
-        p.structure = structure;
-        p.z += (tz - p.z) * (dt * 10.0).min(1.0);
-        p.p += (tp - p.p) * (dt * 6.0).min(1.0);
-        let c = &mut self.cars[pi];
-        c.a = a;
-        c.v = p.v.max(0.0);
-        c.pose = Pose { x: p.x, y: p.y, z: p.z, h: p.h, p: p.p };
-    }
-
-    /// Resolve overlaps of the player car with AI cars, transit and buildings:
-    /// push it out and bounce with a small impulse.
-    fn player_collide(&mut self, pi: usize) {
-        let p = self.player.as_ref().unwrap();
-        let (mut x, mut y, h, mut v) = (p.x, p.y, p.h, p.v);
-        let mut bump = 0.0f32;
-        let (hs, hc) = h.sin_cos();
-        let mut hit_ai: Vec<usize> = Vec::new();
-        let mut resolve = |x: &mut f64, y: &mut f64, v: &mut f32, other: &Obb| {
-            let me = Obb { x: *x, y: *y, h, hl: PLAYER_HL, hw: PLAYER_HW };
-            if let Some((ax, pen)) = obb_overlap(&me, other) {
-                *x += (ax.0 * (pen + 0.02)) as f64;
-                *y += (ax.1 * (pen + 0.02)) as f64;
-                // velocity component into the other body
-                let vn = *v * (hc * ax.0 + hs * ax.1);
-                if vn < 0.0 {
-                    bump = bump.max(-vn);
-                    *v = -*v * 0.25;
-                }
-                true
-            } else {
-                false
-            }
-        };
-        for (j, c) in self.cars.iter().enumerate() {
-            if j == pi || c.flags & F_DEAD != 0 || !c.posed {
-                continue;
-            }
-            if (c.pose.x - x).powi(2) + (c.pose.y - y).powi(2) > 144.0 {
-                continue;
-            }
-            let ob = Obb { x: c.pose.x, y: c.pose.y, h: c.pose.h, hl: c.len * 0.5, hw: HALF_W[c.kind as usize % idm::KINDS] };
-            if resolve(&mut x, &mut y, &mut v, &ob) {
-                hit_ai.push(j);
-            }
-        }
-        for o in &self.obst {
-            let (os, oc) = o.h.sin_cos();
-            let (cx, cy) = (o.x - (oc * o.len * 0.5) as f64, o.y - (os * o.len * 0.5) as f64);
-            if (cx - x).powi(2) + (cy - y).powi(2) > ((o.len * 0.5 + 6.0) as f64).powi(2) {
-                continue;
-            }
-            resolve(&mut x, &mut y, &mut v, &Obb { x: cx, y: cy, h: o.h, hl: o.len * 0.5, hw: o.w * 0.5 });
-        }
-        // buildings: three circles along the body
-        if self.fp.count > 0 {
-            for _ in 0..2 {
-                let mut total = (0.0f32, 0.0f32);
-                for k in [-1.5f32, 0.0, 1.5] {
-                    let (cx, cy) = (x as f32 + hc * k, y as f32 + hs * k);
-                    if let Some(pu) = self.fp.push_circle(cx, cy, PLAYER_HW + 0.05) {
-                        total.0 += pu.0;
-                        total.1 += pu.1;
-                    }
-                }
-                let l = total.0.hypot(total.1);
-                if l < 1e-4 {
-                    break;
-                }
-                x += total.0 as f64;
-                y += total.1 as f64;
-                let vn = v * (hc * total.0 + hs * total.1) / l;
-                if vn < 0.0 {
-                    bump = bump.max(-vn);
-                    v = -v * 0.2;
-                }
-            }
-        }
-        for j in hit_ai {
-            let c = &mut self.cars[j];
-            c.v = 0.0;
-            c.lc_cool = 3.0;
-        }
-        let p = self.player.as_mut().unwrap();
-        p.x = x;
-        p.y = y;
-        p.v = v;
-        p.bump = p.bump.max(bump);
     }
 
     pub fn player_road(&self) -> Option<(i32, i32, u32)> {
@@ -3599,7 +3427,7 @@ mod tests {
     use super::*;
     use crate::graph::tests::load_cross;
 
-    fn world_with_cross(flags: u8, classes: [u8; 4]) -> World {
+    pub(crate) fn world_with_cross(flags: u8, classes: [u8; 4]) -> World {
         let mut w = World::new(7, 2000, 100);
         load_cross(&mut w.g, flags, classes);
         w.focus = (512.0, 512.0);

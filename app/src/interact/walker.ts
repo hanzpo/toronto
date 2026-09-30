@@ -1,107 +1,102 @@
-// Pedestrian avatar: a stylised figure walked with WASD, height from terrain.
-import * as THREE from 'three/webgpu';
+// The walking player: third-person movement relative to the camera (WASD,
+// Shift to run), jointed pedestrian avatar (avatar.ts) animated by speed,
+// collisions with the solid world (walkCollide.ts), feet on the terrain /
+// raised sidewalk.
+import type * as THREE from 'three/webgpu';
+import { Avatar } from './avatar';
+
+export interface WalkEnv {
+  heightAt(e: number, n: number): number;
+  /** push the body circle out of solids; returns the resolved position */
+  collide(e: number, n: number, h: number, r: number): { e: number; n: number; push: number };
+  /** 1 carriageway, 2 sidewalk, 0 other */
+  surface(e: number, n: number): number;
+}
+
+const WALK = 1.55;
+const RUN = 5.4;
+/** body radius (m) */
+export const WALKER_R = 0.32;
+/** raised sidewalk / road surface above the terrain (TrafficLayer ROAD_LIFT / WALK_LIFT) */
+const LIFT = [0.03, 0.06, 0.2];
 
 export class Walker {
-  readonly group = new THREE.Group();
+  readonly avatar: Avatar;
   e = 0;
   n = 0;
   h = 0;
   /** facing, rad CCW from +E */
   heading = Math.PI / 2;
   speed = 0;
-  private phase = 0;
-  private legL: THREE.Object3D;
-  private legR: THREE.Object3D;
-  private armL: THREE.Object3D;
-  private armR: THREE.Object3D;
-  private body: THREE.Object3D;
+  /** surface under the feet (see WalkEnv.surface) */
+  surface = 0;
+  private lift = 0.03;
+  private lastSpeed = 0;
+  private surfAcc = 1;
 
-  constructor() {
-    const mat = (c: number) => new THREE.MeshStandardNodeMaterial({ color: c, roughness: 0.7 });
-    const jacket = mat(0xd9412b), pants = mat(0x2b3140), skin = mat(0xe0b08c), shoe = mat(0x1a1a1a), bag = mat(0x3d5a80);
-    const g = this.group;
-    g.name = 'walker';
-    const body = new THREE.Group();
-    const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.2, 0.42, 4, 10), jacket);
-    torso.position.y = 1.22;
-    torso.scale.set(1, 1, 0.75);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.13, 16, 12), skin);
-    head.position.y = 1.64;
-    const hat = new THREE.Mesh(new THREE.SphereGeometry(0.135, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2), mat(0x222831));
-    hat.position.y = 1.66;
-    const pack = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.36, 0.14), bag);
-    pack.position.set(0, 1.25, 0.2);
-    body.add(torso, head, hat, pack);
-    this.body = body;
-    const limb = (len: number, r: number, m: THREE.Material, foot?: THREE.Material) => {
-      const pivot = new THREE.Group();
-      const l = new THREE.Mesh(new THREE.CapsuleGeometry(r, len, 3, 8), m);
-      l.position.y = -len / 2 - r;
-      pivot.add(l);
-      if (foot) {
-        const f = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.07, 0.24), foot);
-        f.position.set(0, -len - 2 * r, -0.05);
-        pivot.add(f);
-      }
-      return pivot;
-    };
-    this.legL = limb(0.62, 0.075, pants, shoe); this.legL.position.set(-0.1, 0.86, 0);
-    this.legR = limb(0.62, 0.075, pants, shoe); this.legR.position.set(0.1, 0.86, 0);
-    this.armL = limb(0.46, 0.055, jacket); this.armL.position.set(-0.27, 1.45, 0);
-    this.armR = limb(0.46, 0.055, jacket); this.armR.position.set(0.27, 1.45, 0);
-    body.add(this.legL, this.legR, this.armL, this.armR);
-    g.add(body);
-    // soft ground marker so the figure reads from further away
-    const ring = new THREE.Mesh(new THREE.RingGeometry(0.45, 0.6, 32).rotateX(-Math.PI / 2), new THREE.MeshBasicNodeMaterial({ color: 0xffd23f, transparent: true, opacity: 0.8, depthWrite: false }));
-    ring.position.y = 0.05;
-    g.add(ring);
-    g.traverse((o) => { if ((o as THREE.Mesh).isMesh) o.castShadow = true; });
+  constructor(body = 0, shirt = 7) {
+    this.avatar = new Avatar(body, shirt);
   }
+
+  get group(): THREE.Group { return this.avatar.group; }
 
   place(e: number, n: number, h: number, heading = this.heading) {
     this.e = e; this.n = n; this.h = h; this.heading = heading;
+    this.speed = 0;
+    this.surfAcc = 1;
     this.sync();
   }
 
   /**
    * move: forward/right in camera frame; yaw = camera heading (rad CCW from +E).
    */
-  step(dt: number, fwd: number, right: number, yaw: number, run: boolean, heightAt: (e: number, n: number) => number) {
+  step(dt: number, fwd: number, right: number, yaw: number, run: boolean, env: WalkEnv) {
+    dt = Math.min(dt, 0.05);
     const len = Math.hypot(fwd, right);
-    const target = len > 0 ? (run ? 5.2 : 1.6) : 0;
-    this.speed += (target - this.speed) * (1 - Math.exp(-dt * 8));
+    const target = len > 0 ? (run ? RUN : WALK) : 0;
+    // accelerate briskly, stop a bit quicker than you start
+    const rate = target > this.speed ? (run ? 3.2 : 6) : 9;
+    this.speed += (target - this.speed) * (1 - Math.exp(-dt * rate));
+    if (this.speed < 0.02 && target === 0) this.speed = 0;
+    const h0 = this.heading;
     if (len > 0) {
       const dirE = Math.cos(yaw) * fwd + Math.sin(yaw) * right;
       const dirN = Math.sin(yaw) * fwd - Math.cos(yaw) * right;
       const want = Math.atan2(dirN, dirE);
       let d = want - this.heading;
       d = Math.atan2(Math.sin(d), Math.cos(d));
-      this.heading += d * (1 - Math.exp(-dt * 12));
+      // sharp reversals turn on the spot; running turns are wider
+      this.heading += d * (1 - Math.exp(-dt * (run ? 7 : 11)));
     }
-    this.e += Math.cos(this.heading) * this.speed * dt;
-    this.n += Math.sin(this.heading) * this.speed * dt;
-    const g = heightAt(this.e, this.n);
-    this.h += (g - this.h) * (1 - Math.exp(-dt * 15));
-    this.phase += this.speed * dt * (run ? 2.0 : 3.6);
+    const ne = this.e + Math.cos(this.heading) * this.speed * dt;
+    const nn = this.n + Math.sin(this.heading) * this.speed * dt;
+    const r = env.collide(ne, nn, this.h, WALKER_R);
+    const moved = Math.hypot(r.e - this.e, r.n - this.n);
+    this.e = r.e; this.n = r.n;
+    // walking into a wall: the legs slow down to what actually moves
+    if (dt > 0 && r.push > 0.002) this.speed = Math.min(this.speed, Math.max(moved / dt, this.speed * 0.6));
+    this.surfAcc += dt;
+    if (this.surfAcc > 0.15) { this.surfAcc = 0; this.surface = env.surface(this.e, this.n); }
+    // step up the curb quickly, down it a little softer
+    const want = LIFT[this.surface] ?? 0.03;
+    this.lift += (want - this.lift) * (1 - Math.exp(-dt * (want > this.lift ? 25 : 12)));
+    const g = env.heightAt(this.e, this.n) + this.lift;
+    this.h += (g - this.h) * (1 - Math.exp(-dt * 18));
+    const turn = dt > 0 ? Math.atan2(Math.sin(this.heading - h0), Math.cos(this.heading - h0)) / dt : 0;
+    const accel = dt > 0 ? (this.speed - this.lastSpeed) / dt : 0;
+    this.lastSpeed = this.speed;
+    this.avatar.animate(dt, this.speed, accel, turn);
     this.sync();
   }
 
   private sync() {
     const g = this.group;
     g.position.set(this.e, this.h, -this.n);
-    // model faces -z; heading CCW from +E → rotation about y
-    g.rotation.y = this.heading - Math.PI / 2;
-    const sw = Math.sin(this.phase) * Math.min(1, this.speed / 1.6) * 0.6;
-    this.legL.rotation.x = sw; this.legR.rotation.x = -sw;
-    this.armL.rotation.x = -sw * 0.8; this.armR.rotation.x = sw * 0.8;
-    this.body.position.y = Math.abs(Math.cos(this.phase)) * 0.04 * Math.min(1, this.speed);
+    // model faces +x; heading CCW from +E → rotation about y
+    g.rotation.y = this.heading;
   }
 
   dispose() {
-    this.group.traverse((o) => {
-      const m = o as THREE.Mesh;
-      if (m.isMesh) { m.geometry.dispose(); (m.material as THREE.Material).dispose(); }
-    });
-    this.group.removeFromParent();
+    this.avatar.dispose();
   }
 }

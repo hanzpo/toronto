@@ -68,7 +68,12 @@ export class Sim {
     ped_count(): number;
     ped_ptr(): number;
     /**
+     * [curb jolt (m/s), collision impulse (m/s), surface (0 off-road, 1 road, 2 sidewalk)] since the last call
+     */
+    player_events(): Float32Array;
+    /**
      * [active, e, n, elev, heading, speed, pitch, onRoad, tileX, tileY, edgeIdx, carId, structure, bump]
+     * onRoad: 0 off-road, 1 carriageway, 2 sidewalk (see player_events)
      */
     player_state(): Float64Array;
     player_step(dt: number, throttle: number, brake: number, steer: number, handbrake: boolean, ground_z: number): void;
@@ -125,6 +130,10 @@ export class Sim {
     rail_step(dt: number, tod: number): void;
     release_player(): void;
     remove_footprints(tx: number, ty: number): void;
+    /**
+     * Remove the pedestrian nearest (e, n) within r m (the player takes their place).
+     */
+    remove_ped_near(e: number, n: number, r: number): boolean;
     remove_tile(tx: number, ty: number): void;
     set_fast(fast: boolean): void;
     /**
@@ -149,6 +158,11 @@ export class Sim {
      * focus point (world E/N), car radius and pedestrian radius (m)
      */
     set_view(e: number, n: number, radius: number, ped_radius: number): void;
+    /**
+     * The walking player at (e, n, elev) with body radius r (≤ 0: not walking): cars brake
+     * and honk for them. `dt` = real seconds since the last call (horn timers).
+     */
+    set_walker(e: number, n: number, z: number, r: number, dt: number): void;
     /**
      * signalised approaches: [dE, dN, bearing, halfWidth, light]* (light 0 green, 1 amber, 2 red)
      */
@@ -209,6 +223,7 @@ export interface InitOutput {
     readonly sim_overlap_counts: (a: number) => [number, number];
     readonly sim_ped_count: (a: number) => number;
     readonly sim_ped_ptr: (a: number) => number;
+    readonly sim_player_events: (a: number) => [number, number];
     readonly sim_player_state: (a: number) => [number, number];
     readonly sim_player_step: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly sim_rail_add_feed: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number, a1: number, b1: number, c1: number, d1: number, e1: number, f1: number, g1: number, h1: number) => void;
@@ -233,6 +248,7 @@ export interface InitOutput {
     readonly sim_rail_step: (a: number, b: number, c: number) => void;
     readonly sim_release_player: (a: number) => void;
     readonly sim_remove_footprints: (a: number, b: number, c: number) => void;
+    readonly sim_remove_ped_near: (a: number, b: number, c: number, d: number) => number;
     readonly sim_remove_tile: (a: number, b: number, c: number) => void;
     readonly sim_set_fast: (a: number, b: number) => void;
     readonly sim_set_majors: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => void;
@@ -240,6 +256,7 @@ export interface InitOutput {
     readonly sim_set_stops: (a: number, b: number, c: number) => void;
     readonly sim_set_time: (a: number, b: number, c: number) => void;
     readonly sim_set_view: (a: number, b: number, c: number, d: number, e: number) => void;
+    readonly sim_set_walker: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly sim_signal_count: (a: number) => number;
     readonly sim_signal_plans: (a: number) => [number, number];
     readonly sim_signal_ptr: (a: number) => number;

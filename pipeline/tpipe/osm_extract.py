@@ -216,18 +216,6 @@ class Collector:
         self.tr_lat = array("d")
 
     # ---- helpers
-    def _rings(self, a, lon, lat, ringlen) -> int:
-        n = 0
-        for outer in a.outer_rings():
-            k = self._ring(outer, lon, lat, ringlen)
-            if k:
-                n += 1
-            for inner in a.inner_rings(outer):
-                if self._ring(inner, lon, lat, ringlen):
-                    n += 1
-            break  # buildings/landcover: first outer ring is enough for buildings
-        return n
-
     def _all_rings(self, a, lon, lat, ringlen, nring, cls_arr, cls, id_arr, oid) -> None:
         # each outer ring (with its holes) becomes its own polygon record
         for outer in a.outer_rings():
@@ -260,17 +248,15 @@ class Collector:
         bval = t.get("building")
         part = t.get("building:part")
         if (bval and bval != "no") or (part and part != "no"):
-            n = self._rings(a, self.b_lon, self.b_lat, self.b_ringlen)
-            if not n:
-                return
-            self.b_nring.append(n)
-            self.b_id.append(oid)
-            self.b_part.append(1 if (part and part != "no" and not bval) else 0)
-            self.b_height.append(_metres(t.get("height")))
-            self.b_min.append(_metres(t.get("min_height")))
-            self.b_levels.append(_metres(t.get("building:levels")))
-            self.b_minlevel.append(_metres(t.get("building:min_level")))
-            self.b_roofh.append(_metres(t.get("roof:height")))
+            # Every outer ring of a building multipolygon is its own footprint record (same
+            # tags, same id), carrying the inner rings libosmium assigns to it by containment.
+            # Keeping only the first outer ring lost e.g. most of Pearson T3 (r8883468).
+            is_part = 1 if (part and part != "no" and not bval) else 0
+            height = _metres(t.get("height"))
+            mn = _metres(t.get("min_height"))
+            levels = _metres(t.get("building:levels"))
+            minlevel = _metres(t.get("building:min_level"))
+            roofh = _metres(t.get("roof:height"))
             kind = BUILDING_KIND.get(bval or part or "", 0)
             if kind == 0:
                 if t.get("amenity") in ("place_of_worship",):
@@ -285,10 +271,28 @@ class Collector:
                     kind = 3
                 elif t.get("tourism") == "hotel":
                     kind = 13
-            self.b_kind.append(kind)
-            self.b_roof.append(ROOF.get(t.get("roof:shape", ""), 0))
-            self.b_color.append(_colour(t.get("building:colour") or t.get("colour")))
-            self.b_tag.append(bval or "part")
+            roof = ROOF.get(t.get("roof:shape", ""), 0)
+            color = _colour(t.get("building:colour") or t.get("colour"))
+            btag = bval or "part"
+            for outer in a.outer_rings():
+                if not self._ring(outer, self.b_lon, self.b_lat, self.b_ringlen):
+                    continue
+                n = 1
+                for inner in a.inner_rings(outer):
+                    if self._ring(inner, self.b_lon, self.b_lat, self.b_ringlen):
+                        n += 1
+                self.b_nring.append(n)
+                self.b_id.append(oid)
+                self.b_part.append(is_part)
+                self.b_height.append(height)
+                self.b_min.append(mn)
+                self.b_levels.append(levels)
+                self.b_minlevel.append(minlevel)
+                self.b_roofh.append(roofh)
+                self.b_kind.append(kind)
+                self.b_roof.append(roof)
+                self.b_color.append(color)
+                self.b_tag.append(btag)
             return
         cls = _ground_class(t)
         if cls:

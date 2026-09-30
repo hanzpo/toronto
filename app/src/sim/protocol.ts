@@ -14,7 +14,7 @@
 //     f64[8]  STEP_MS   wasm time for the last tick (step + output), ms
 //     f64[9]  STEP_AVG  exponential average of STEP_MS
 //     f64[10] TARGET_CARS   f64[11] TARGET_PEDS
-//     f64[12..26) PLAYER    [active, e, n, elev, heading, speed, pitch, onRoad, tileX, tileY, edgeIdx, carId, structure, bump]
+//     f64[12..26) PLAYER    [active, e, n, elev, heading, speed, pitch, surface (0 off-road, 1 road, 2 sidewalk), tileX, tileY, edgeIdx, carId, structure, bump]
 //     f64[26..30) RAIL      [trains, overlaps (total, must stay 0), authority overruns (total), turnbacks]
 //     f64[30..44) RAILP     player train: see Sim.rail_player_state (sim/src/rail.rs)
 //     f64[44..47) RAILX     [pull-outs, pull-ins (totals), parked trains]
@@ -87,7 +87,7 @@ export const RAILP = { ACTIVE: 0, FEED: 1, TRIP: 2, CENTRE: 3, V: 4, A: 5, AHEAD
 /** order of the counts in the 'overlaps' message (sim World::overlap_causes) */
 export const OVERLAP_CAUSES = ['spawn', 'laneChange', 'shortLink', 'junctionCrossing', 'sameLane', 'adjacentLanes', 'merge', 'other', 'junctionFollowing', 'structureVsStreet'] as const;
 
-export const CAR_FLAG = { BRAKE: 1, PLAYER: 2, LEFT: 4, RIGHT: 8 } as const;
+export const CAR_FLAG = { BRAKE: 1, PLAYER: 2, LEFT: 4, RIGHT: 8, HORN: 32 } as const;
 export const PED_STATE = { WALK: 0, WAIT: 1, CROSS: 2, IDLE: 3 } as const;
 
 export interface TickMsg {
@@ -108,6 +108,8 @@ export interface TickMsg {
   originE: number;
   originN: number;
   player?: { throttle: number; brake: number; steer: number; handbrake: boolean; groundZ: number };
+  /** the walking player [E, N, elevation, body radius]: AI cars brake and honk for them */
+  walker?: [number, number, number, number];
   /** surface transit near the focus as moving obstacles (OB_STRIDE floats each), or absent */
   obst?: Float64Array;
   /** transit service profile the renderer shows (rail agents follow the same timetable) */
@@ -137,6 +139,8 @@ export type ToWorker =
   | { type: 'spawnPlayer'; e: number; n: number; heading: number }
   | { type: 'takeOver'; id: number }
   | { type: 'releasePlayer' }
+  /** the player takes this pedestrian's place: remove the one nearest (e, n) */
+  | { type: 'removePed'; e: number; n: number }
   | { type: 'majors' }
   | { type: 'railPlayer'; feed: number; trip: number }
   | { type: 'railRelease' }
@@ -146,6 +150,8 @@ export type FromWorker =
   | { type: 'ready' }
   | { type: 'error'; message: string }
   | { type: 'player'; roadName: string | null; ok?: boolean }
+  /** player car effects since the last tick: curb jolt / collision impulse (m/s across), surface (0 off-road, 1 road, 2 sidewalk) */
+  | { type: 'playerFx'; curb: number; hit: number; surface: number }
   | { type: 'majorsGeom'; off: Uint32Array; xyz: Float32Array; cls: Uint8Array; names: string[]; name: Uint16Array }
   | { type: 'majorsRatio'; ratio: Uint8Array; tod: number }
   /** rail feeds loaded for agents: feed id = index, agency ids */

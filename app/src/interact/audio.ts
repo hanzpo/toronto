@@ -48,3 +48,44 @@ export function horn(mode: string) {
 export function beep() {
   tone(1760, 0, 0.12, 'square', 0.03);
 }
+
+/** short filtered noise burst (impacts); strength 0..1 */
+function noise(t0: number, dur: number, freq: number, gain: number) {
+  const c = ac();
+  if (!c) return;
+  const n = Math.floor(c.sampleRate * dur);
+  const buf = c.createBuffer(1, n, c.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / n, 2.2);
+  const src = c.createBufferSource();
+  src.buffer = buf;
+  const f = c.createBiquadFilter();
+  f.type = 'lowpass';
+  f.frequency.value = freq;
+  const g = c.createGain();
+  g.gain.value = gain;
+  src.connect(f).connect(g).connect(c.destination);
+  src.start(c.currentTime + t0);
+}
+
+/** tyres hitting a curb */
+export function curbThump(strength: number) {
+  const s = Math.min(1, strength);
+  tone(70, 0, 0.18, 'sine', 0.12 * s + 0.03);
+  noise(0, 0.12, 900, 0.1 * s);
+}
+
+/** body panel crunch */
+export function crash(strength: number) {
+  const s = Math.min(1, strength);
+  noise(0, 0.35 + 0.3 * s, 2400, 0.12 + 0.25 * s);
+  tone(95, 0, 0.3, 'triangle', 0.1 * s);
+}
+
+/** car horn; volume 0..1 (distance), pitch varies per car */
+export function carHorn(volume: number, pitch = 1) {
+  const v = Math.max(0, Math.min(1, volume));
+  if (v < 0.03) return;
+  tone(415 * pitch, 0, 0.45, 'sawtooth', 0.035 * v);
+  tone(349 * pitch, 0, 0.45, 'sawtooth', 0.035 * v);
+}

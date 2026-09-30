@@ -30,7 +30,8 @@ actually laid out instead of rasterising OSM lines into blocky pixels:
   client docks them to the parked aircraft's door); apron floodlight masts;
   service-road paths for moving GSE.
 - terminal massing: aeroway terminal / hangar footprints the tile buildings miss
-  (multipolygon terminals such as Pearson T3).
+  (fallback: multipolygon terminals such as Pearson T3 are in the tiles in full since
+  osm_extract keeps every outer ring).
 
 Output: app/public/data/air/{surfaces.bin.gz, airside.bin.gz, airside_roads.json}
 (TBN1, layout in docs/AIR.md).
@@ -1163,10 +1164,13 @@ def build_group(g, drape, stands_json, roads=None, tile_bld=None):
 
 
 # --------------------------------------------------------------------------- terminal massing
-# The tile pipeline keeps only the first outer ring of a building multipolygon, so large
+# Until 2026-09-30 osm_extract kept only the first outer ring of a building multipolygon, so
 # terminals mapped as multipolygon relations (Pearson T3: relation 8883468, two outer rings)
-# come out as a fragment or not at all. Aeroway terminal / hangar footprints that the level-0
-# tile buildings (and landmark models) don't cover are extruded here instead.
+# came out as a fragment. The extractor now emits every outer ring as its own footprint with
+# the same OSM id, so this is only a fallback: a terminal / hangar whose OSM id is already in
+# the level-0 tiles with (nearly) its whole footprint is skipped outright; anything the tile
+# buildings (and landmark models) still don't cover (tiles built by an older extract,
+# aeroway=terminal without building=*) is extruded here.
 
 TERMINAL_H = {"terminal": 17.0, "hangar": 15.0}
 
@@ -1202,13 +1206,20 @@ def load_tile_buildings(bbox):
 
 
 def missing_buildings(g, tile_bld):
-    polys, suppressed = tile_bld
+    polys, suppressed, tile_ids = tile_bld
     tree = shapely.STRtree(polys) if polys else None
+    by_id = {}
+    for p, i in zip(polys, tile_ids):
+        by_id.setdefault(i, []).append(p)
     out = []
     for b in g["bl"]:
-        if osm_ref(b["id"]) in suppressed:
+        ref = osm_ref(b["id"])
+        if ref in suppressed:
             continue  # drawn by a landmark model (Pearson T1)
         geom = b["g"]
+        own = by_id.get(ref)
+        if own and shapely.area(shapely.intersection(unary_union(own), geom)) >= 0.9 * geom.area:
+            continue  # the tile buildings carry the whole footprint (all outer rings)
         near = [polys[i] for i in tree.query(geom)] if tree is not None else []
         cov = unary_union(near).buffer(1.0) if near else Polygon()
         miss = geom.difference(cov).buffer(-2.0, join_style="mitre").buffer(2.0, join_style="mitre")
@@ -1325,7 +1336,8 @@ def main():
             tb = None
             if g["bl"]:
                 x0_, y0_, x1_, y1_ = unary_union([b["g"] for b in g["bl"]]).bounds
-                tb = (load_tile_buildings((x0_ - 50, y0_ - 50, x1_ + 50, y1_ + 50))[0], suppressed)
+                tpolys, tids = load_tile_buildings((x0_ - 50, y0_ - 50, x1_ + 50, y1_ + 50))
+                tb = (tpolys, suppressed, tids)
             res = build_group(g, drape, stands_for(g.get("icao"), air), roads.get(key), tb)
         except Exception as e:  # keep going: one broken aerodrome shouldn't sink the region
             print(f"  ! {key}: {e}")

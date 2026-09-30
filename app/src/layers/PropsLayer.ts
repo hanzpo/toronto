@@ -16,6 +16,8 @@ import { useApp } from '../state/store';
 import type { PropsBuf } from '../workers/props';
 import { K, PSTRIDE } from '../workers/props';
 import * as G from './props/geometry';
+import { LOT_TYPES, lotOccupancy } from './parkingOcc';
+import { clock } from '../state/clock';
 import { CAR_VARIANTS, carLowGeometries, carPalette } from './traffic/models';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -285,8 +287,13 @@ export class PropsLayer implements Layer {
   /** CPU range per pool (m); matches the shader fade window of its material */
   private range = new Map<Pool, number>();
   private nearAt = new THREE.Vector3(Infinity, 0, 0);
+  /** parked-car occupancy per lot type (parkingOcc.ts), refreshed ~1 Hz; a change re-picks the cars */
+  private lotOcc = new Float32Array(LOT_TYPES).fill(-1);
+  private lotOccAt = 0;
   private nearDirty = true;
   private stopsAt = new THREE.Vector3(Infinity, 0, 0);
+  /** TTC stop poles / shelters placed around the camera (world E/N boxes, for walker collisions) */
+  readonly stopSolids: { e: number; n: number; h: number; hl: number; hw: number }[] = [];
   private stops: { x: Float64Array; y: Float64Array; mode: Uint8Array; n: number; trips: number } | null = null;
   private stopGrid = new Map<number, number[]>();
 
@@ -370,6 +377,11 @@ export class PropsLayer implements Layer {
     }
     for (const [k, rec] of this.tiles) if (!want.has(k)) this.remove(rec);
     for (const t of eng.tiles.drawn) if (want.has(t.key) && !this.tiles.has(t.key) && t.props) this.add(t.key, t.tx * t.S, t.ty * t.S, t.props);
+    if (performance.now() - this.lotOccAt > 1000) {
+      this.lotOccAt = performance.now();
+      const p = clock.parts(), o = lotOccupancy(p.secOfDay, p.weekday, new Float32Array(LOT_TYPES));
+      if (o.some((v, i) => Math.abs(v - this.lotOcc[i]) > 0.01)) { this.lotOcc.set(o); this.nearDirty = true; }
+    }
     if (this.nearDirty || Math.hypot(cam.x - this.nearAt.x, cam.z - this.nearAt.z) > 20 || Math.abs(cam.y - this.nearAt.y) > 30) this.rebuild(cam);
     if (Math.hypot(cam.x - this.stopsAt.x, cam.z - this.stopsAt.z) > 40 || (ctx.frame % 120 === 0 && !this.stops)) this.rebuildStops(cam, ctx.altitude);
     for (const p of this.allPools()) p.flush();
@@ -474,7 +486,11 @@ export class PropsLayer implements Layer {
         if (Math.abs(dx) > RMAX || Math.abs(dy) > RMAX) continue;
         const d = Math.hypot(dx, dy, z - H);
         let p: Pool | null;
-        if (k === K.CAR) p = d < NEAR_CARS ? this.carNear[(p0 | 0) % this.carNear.length] : this.pools.carFar;
+        if (k === K.CAR) {
+          // sx = 2 + 2·lot type + rank (workers/props.ts carTag): parked only while rank < occupancy
+          if (sx >= 2) { const ty = Math.floor((sx - 2) / 2); if (sx - 2 - 2 * ty >= (this.lotOcc[ty] ?? 1)) continue; }
+          p = d < NEAR_CARS ? this.carNear[(p0 | 0) % this.carNear.length] : this.pools.carFar;
+        }
         else p = this.poolFor(k, p0, p1);
         if (!p || d > (this.range.get(p) ?? 300)) continue;
         const X = ox + x, Z = -(on + y);
@@ -534,6 +550,7 @@ export class PropsLayer implements Layer {
   private rebuildStops(cam: THREE.Vector3, alt: number) {
     this.stopsAt.copy(cam);
     this.stopPoles.clear(); this.stopShelters.clear();
+    this.stopSolids.length = 0;
     if (alt > 500 || !this.loadStops() || !this.stops) return;
     const o = this.engine.anchor.origin;
     const E = cam.x, Nn = -cam.z;
@@ -544,6 +561,8 @@ export class PropsLayer implements Layer {
       const s = p.count++;
       p.owners[s] = dummy; p.mesh.count = p.count;
       this.put(p, s, x - o.x, z, -y - o.z, a, 1, 1, 1);
+      const shelter = p === this.stopShelters;
+      this.stopSolids.push({ e: x, n: y, h: a, hl: shelter ? 0.85 : 0.07, hw: shelter ? 1.95 : 0.07 });
     };
     for (let gi = Math.floor((E - STOP_R) / 200); gi <= Math.floor((E + STOP_R) / 200); gi++) {
       for (let gj = Math.floor((Nn - STOP_R) / 200); gj <= Math.floor((Nn + STOP_R) / 200); gj++) {

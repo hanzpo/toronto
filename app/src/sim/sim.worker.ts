@@ -275,9 +275,15 @@ function tick(m: TickMsg) {
       if (m.busPullout) for (const b of m.busPullout) sim.bus_pullout(b.trip, b.pat, b.len, b.arr, b.dep, b.gx, b.gy);
       if (m.busSpawn) for (const b of m.busSpawn) { const r = sim.bus_spawn(b.trip, b.pat, b.len, b.front, b.v, b.arr, b.dep); hf[HF.BUSX + Math.min(r, 5)]++; }
       const pl = m.player;
+      const wk = m.walker;
+      sim.set_walker(wk ? wk[0] : 0, wk ? wk[1] : 0, wk ? wk[2] : 0, wk ? wk[3] : 0, m.realDt);
       sim.set_obstacles(m.obst ?? new Float64Array(0));
       if (pl) manageFootprints(hf[HF.PLAYER + 1], hf[HF.PLAYER + 2]);
-      if (pl && m.simDt > 0) sim.player_step(m.realDt, pl.throttle, pl.brake, pl.steer, pl.handbrake, pl.groundZ);
+      if (pl && m.simDt > 0) {
+        sim.player_step(m.realDt, pl.throttle, pl.brake, pl.steer, pl.handbrake, pl.groundZ);
+        const ev = sim.player_events();
+        if (ev[0] > 0 || ev[1] > 0) post({ type: 'playerFx', curb: ev[0], hit: ev[1], surface: ev[2] });
+      }
       let remaining = Math.min(m.simDt, 3600);
       sim.set_time(m.tod - remaining, m.weekday);
       let k = 0;
@@ -523,6 +529,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
         break;
       }
       case 'releasePlayer': sim?.release_player(); playerInfo(); break;
+      case 'removePed': sim?.remove_ped_near(m.e, m.n, 3); break;
       case 'majors': await loadMajors(); break;
       case 'railPlayer': post({ type: 'railPlayer', ok: sim?.rail_player_attach(m.feed, m.trip) ?? false }); break;
       case 'railRelease': sim?.rail_player_release(); break;

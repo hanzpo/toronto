@@ -132,7 +132,9 @@ Buildings (extruded footprints)
   concrete frame part-way up with a tower crane, workers/urban.ts).
 - `b_roof` u8 — `0 flat · 1 gabled · 2 hipped · 3 dome · 4 pyramidal · 5 skillion`.
 - `b_color` u32 — `0xRRGGBB` from `building:colour`, 0 = unset.
-- `b_osm` f64 — OSM id (ways positive, relations negative).
+- `b_osm` f64 — OSM id (ways positive, relations negative). A building
+  multipolygon yields one footprint per outer ring (each with the inner rings
+  inside it), all with the same id (`tpipe.multipoly_audit` counts them).
 
 Houses (instanced archetypes, level 0 only)
 - `h_xy` f32 [2n] centre · `h_angle` f32 (rad, CCW from +E, long axis) ·
@@ -244,6 +246,11 @@ hash. Full definition in `docs/RAIL.md`.
 "rotation": rad, "suppress": [osmIds...] }]` — `rotation` is CCW about +y from
 the model's canonical orientation; `suppress` lists OSM building ids the tile
 renderer must skip because the custom model replaces them.
+Optional per-landmark extras (local frame, `pipeline/tpipe/landmarks.py`):
+`holes` (courtyards, open ground), `covered` (covered roadway: `clear` height,
+ground-floor masses `lower`, `columns` off the lanes, curb `canopy`; the QA
+road check counts only `lower` + `columns`), `op` (Ontario Place pods and
+bridges), `lanes` (Distillery paving + catwalks).
 
 ## Road graph (`data/graph/{tx}_{ty}.bin.gz`, level-0 grid)
 

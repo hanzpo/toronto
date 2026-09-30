@@ -1520,9 +1520,14 @@ def run_block(G, core, halo):
         # source way per new vertex: from the vertex map
         vw = np.zeros(len(Q), np.int64)
         vw[vmap] = VW
+        # a vertex between the images of original vertices i-1 and i lies on segment (i-1, i),
+        # which belongs to the way of vertex i: label every vertex by the NEXT mapped vertex
+        # (labelling by the previous one shifted way boundaries past filleted nodes and cut the
+        # first segment off ways -> missing graph edges)
         mapped = np.zeros(len(Q), bool)
         mapped[vmap] = True
-        idx = np.maximum.accumulate(np.where(mapped, np.arange(len(Q)), 0))
+        nxt = np.where(mapped, np.arange(len(Q)), len(Q) - 1)
+        idx = np.minimum.accumulate(nxt[::-1])[::-1]
         vw = vw[idx]
         S.vway = vw
         S.nodes = dict()

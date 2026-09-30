@@ -16,7 +16,8 @@ import { pathForTrip, type PatternPath, type Pose } from './path';
 import { DYN, EB, MAX_NOTCH, TrainOperator } from './operate';
 import { RAILP } from '../sim/protocol';
 import { TunnelBuilder } from './tunnel';
-import { Walker } from './walker';
+import { Walker, WALKER_R } from './walker';
+import { WalkCollider, type Box } from './walkCollide';
 import { useInteract, type CamMode, type WalkInfo } from './state';
 import { beep, doorChime, doorsOpen, horn } from './audio';
 
@@ -31,7 +32,13 @@ interface TrafficApi {
   pickCar?(e: number, n: number, r: number): unknown;
   takeOverNearestCar?(e: number, n: number): Promise<boolean> | boolean;
   takeOverCar?(id: number): Promise<boolean> | boolean;
-  getPlayer?(): { e: number; n: number; elev?: number; heading?: number; speed?: number; roadName?: string | null } | null;
+  getPlayer?(): { e: number; n: number; elev?: number; heading?: number; speed?: number; roadName?: string | null; drawZ?: number } | null;
+  pickCarMajor?(e: number, n: number, radius?: number, perClass?: number): number | null;
+  pickPed?(e: number, n: number, radius?: number): { e: number; n: number; z: number; heading: number; colour: number } | null;
+  removePedNear?(e: number, n: number): void;
+  setWalker?(e: number, n: number, elev: number, radius: number): void;
+  clearWalker?(): void;
+  solidsNear?(e: number, n: number, r: number, out?: Box[]): Box[];
   setPlayerInput?(inp: { throttle: number; brake: number; steer: number; handbrake?: boolean }): void;
   releasePlayer?(): void;
   // player train in the signalled rail sim
@@ -42,10 +49,11 @@ interface TrafficApi {
 }
 
 export interface PickResult {
-  kind: 'vehicle' | 'stop' | 'car';
+  kind: 'vehicle' | 'stop' | 'car' | 'ped';
   trip?: number;
   stop?: number;
   car?: unknown;
+  ped?: { e: number; n: number; z: number; heading: number; colour: number };
   label: string;
   sub?: string;
 }
@@ -66,6 +74,15 @@ export class InteractLayer implements Layer {
   private hiRoute: number | null = null;
   readonly tunnel: TunnelBuilder;
   private walker: Walker | null = null;
+  private walkerLook = '';
+  private collider: WalkCollider | null = null;
+  private movers: Box[] = [];
+  private eyeBoxes: Box[] = [];
+  /** third-person camera: smoothed free fraction of the boom (walls pull it in fast, it eases back out) */
+  private boom = 1;
+  /** chase camera: smoothed yaw (rad CCW from +E) trailing the car's direction of travel */
+  private chaseYaw = NaN;
+  private chaseZ = NaN;
 
   // camera rig
   mode: CamMode = 'free';
@@ -237,21 +254,29 @@ export class InteractLayer implements Layer {
     return true;
   }
 
-  /** Spawn the pedestrian at a point. */
-  walkAt(e: number, n: number) {
+  /**
+   * Spawn the pedestrian at a point. `as`: look (body type / shirt index of a
+   * simulated pedestrian taken over) and facing (rad CCW from +E).
+   */
+  walkAt(e: number, n: number, as?: { body?: number; shirt?: number; heading?: number }) {
     this.leave(false);
+    const look = `${as?.body ?? 0}:${as?.shirt ?? 7}`;
+    if (this.walker && this.walkerLook !== look) { this.walker.dispose(); this.walker = null; }
     if (!this.walker) {
-      this.walker = new Walker();
+      this.walker = new Walker(as?.body ?? 0, as?.shirt ?? 7);
+      this.walkerLook = look;
       this.engine.scene.add(this.walker.group);
     }
+    this.collider ??= new WalkCollider(this.engine);
     this.walker.group.visible = true;
     const h = this.engine.heightAt(e, n);
     // face the way the camera looks
     const cam = this.engine.controls.cur;
-    this.walker.place(e, n, h, Math.PI / 2 - cam.heading);
+    this.walker.place(e, n, h, as?.heading ?? Math.PI / 2 - cam.heading);
     this.yaw = this.walker.heading;
-    this.pitch = 0.28;
-    this.dist = 7;
+    this.pitch = 0.22;
+    this.dist = 5.5;
+    this.boom = 1;
     this.mode = 'walk';
     this.view = 'chase';
     this.enterRig();
@@ -267,6 +292,7 @@ export class InteractLayer implements Layer {
     this.attach(trip, 'ride', 'ride');
     this.boardedFromWalk = true;
     if (w) w.group.visible = false;
+    this.traffic()?.clearWalker?.();
     this.toast(`Boarded — press E to get off at a stop · ] to speed up time`);
   }
 
@@ -302,8 +328,10 @@ export class InteractLayer implements Layer {
     const tr = this.traffic();
     if (!tr?.takeOverNearestCar) { this.toast('Traffic simulation not loaded yet'); return false; }
     let ok = false;
-    if (carId === undefined && tr.pickCar) {
-      const id = tr.pickCar(e, n, 120);
+    if (carId === undefined) {
+      // walking: the car right next to you; otherwise prefer the biggest road nearby
+      const near = this.mode === 'walk' ? tr.pickCar?.(e, n, 25) : null;
+      const id = typeof near === 'number' ? near : tr.pickCarMajor ? tr.pickCarMajor(e, n, 150) : tr.pickCar?.(e, n, 120);
       if (typeof id === 'number') carId = id;
     }
     try {
@@ -314,11 +342,43 @@ export class InteractLayer implements Layer {
     this.mode = 'drive';
     this.view = 'chase';
     this.drivingCar = true;
-    this.yaw = 0; this.pitch = 0.22; this.dist = 16;
+    this.yaw = 0; this.pitch = 0.2; this.dist = 9.5;
+    this.chaseYaw = NaN; this.chaseZ = NaN; this.boom = 1;
     this.enterRig();
     useInteract.getState().set({ mode: 'drive', trip: null, walk: null });
-    this.toast('Driving — W/S throttle/brake, A/D steer, Space handbrake, Esc to exit');
+    this.toast('Driving — W/S throttle / brake / reverse, A/D steer, Space handbrake, H horn, F get out, Esc exit');
     return true;
+  }
+
+  /**
+   * Take over a car near the camera focus, preferring the highest-class road:
+   * the further out the view, the wider the search and the stronger the
+   * preference (a motorway in view beats the side street under the cursor).
+   */
+  driveNearFocus(): Promise<boolean> {
+    const c = this.engine.controls.cur;
+    const tr = this.traffic();
+    const radius = THREE.MathUtils.clamp(c.dist * 0.8, 150, 500);
+    const id = tr?.pickCarMajor?.(c.e, c.n, radius, 60 + c.dist * 0.1);
+    return this.takeOverCar(c.e, c.n, typeof id === 'number' ? id : undefined);
+  }
+
+  /** Take a simulated pedestrian's place and walk on as them. */
+  takeOverPed(ped: { e: number; n: number; heading: number; colour: number }) {
+    this.traffic()?.removePedNear?.(ped.e, ped.n);
+    this.walkAt(ped.e, ped.n, { body: ped.colour % 4, shirt: ped.colour % 12, heading: ped.heading });
+    this.toast('Walking — WASD, Shift to run, F to take a car, E to board');
+  }
+
+  /** Get out of the car and continue on foot beside it. */
+  private getOut() {
+    const p = this.traffic()?.getPlayer?.();
+    if (!p) return;
+    const hd = p.heading ?? 0;
+    // driver's side (left of travel), clear of the body
+    const e = p.e - Math.sin(hd) * 1.9 + Math.cos(hd) * 0.6, n = p.n + Math.cos(hd) * 1.9 + Math.sin(hd) * 0.6;
+    this.walkAt(e, n, { heading: hd + Math.PI / 2 });
+    this.yaw = hd;
   }
 
   /** Enter "click the ground to place the walker" mode. */
@@ -374,6 +434,8 @@ export class InteractLayer implements Layer {
 
   private enterRig() {
     this.engine.controls.enabled = false;
+    this.hover = null;
+    if (this.tip) this.renderTip();
     this.camSmooth = null;
     this.lookYaw = 0; this.lookPitch = 0;
     this.applyFov();
@@ -390,6 +452,8 @@ export class InteractLayer implements Layer {
   private leave(restore: boolean, keepWalker = false) {
     const prev = this.mode;
     if (prev === 'free') { if (!keepWalker) this.hideWalker(); return; }
+    // what we were looking at, before the walker / car goes away
+    const focus = restore ? this.focusPoint() : null;
     if (this.op) {
       if (this.op.external) this.traffic()?.railPlayerRelease?.();
       this.transit.overrides.delete(this.op.info.trip);
@@ -400,8 +464,7 @@ export class InteractLayer implements Layer {
       try { this.traffic()?.releasePlayer?.(); } catch { /* ignore */ }
       this.drivingCar = false;
     }
-    if (!keepWalker && prev !== 'walk') this.hideWalker();
-    if (prev === 'walk' && !keepWalker) this.hideWalker();
+    if (!keepWalker) this.hideWalker();
     this.boardedFromWalk = false;
     this.tunnel.setPath(null, 'subway', 0);
     const cam = this.engine.camera;
@@ -410,9 +473,9 @@ export class InteractLayer implements Layer {
     this.tripInfo = null;
     this.path = null;
     this.applyFov();
-    if (restore) {
+    if (restore && focus) {
       // free camera looking at what we were looking at
-      const f = this.focusPoint();
+      const f = focus;
       const dx = f.e - cam.position.x, dn = f.n + cam.position.z, dh = cam.position.y - f.h;
       const d = Math.max(20, Math.hypot(dx, dn, dh));
       const heading = Math.atan2(dx, dn);
@@ -427,10 +490,15 @@ export class InteractLayer implements Layer {
 
   private hideWalker() {
     if (this.walker) this.walker.group.visible = false;
+    this.traffic()?.clearWalker?.();
   }
 
   private focusPoint(): { e: number; n: number; h: number } {
     if (this.walker?.group.visible) return { e: this.walker.e, n: this.walker.n, h: this.walker.h };
+    if (this.mode === 'drive') {
+      const p = this.traffic()?.getPlayer?.();
+      if (p) return { e: p.e, n: p.n, h: p.elev ?? this.engine.heightAt(p.e, p.n) };
+    }
     const p = this.pose;
     const g = this.engine.heightAt(p.e, p.n);
     return { e: p.e, n: p.n, h: Math.max(p.z, g) };
@@ -497,7 +565,19 @@ export class InteractLayer implements Layer {
       const fwd = (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0) - (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0);
       const right = (k.has('KeyD') || k.has('ArrowRight') ? 1 : 0) - (k.has('KeyA') || k.has('ArrowLeft') ? 1 : 0);
       const run = k.has('ShiftLeft') || k.has('ShiftRight');
-      this.walker.step(dt, fwd, right, this.yaw, run, (e, n) => this.engine.heightAt(e, n));
+      const w = this.walker;
+      const tr = this.traffic();
+      const col = this.collider!;
+      this.movers = tr?.solidsNear?.(w.e, w.n, 8, this.movers) ?? [];
+      const props = this.engine.layers.find((l) => l.id === 'props') as unknown as { stopSolids?: Box[] } | undefined;
+      col.extra = props?.stopSolids ?? [];
+      w.step(dt, fwd, right, this.yaw, run, {
+        heightAt: (e, n) => this.engine.heightAt(e, n),
+        collide: (e, n, h, r) => col.resolve(e, n, h, r, this.movers),
+        surface: (e, n) => col.surface(e, n),
+      });
+      // AI traffic brakes (and honks) for the player in its lane
+      tr?.setWalker?.(w.e, w.n, w.h, WALKER_R + 0.2);
     }
   }
 
@@ -511,19 +591,26 @@ export class InteractLayer implements Layer {
 
     if (this.mode === 'walk' && this.walker) {
       const w = this.walker;
-      // orbit behind the walker; yaw is the camera's look direction
+      // third person: orbit behind the walker (yaw = look direction), over the right shoulder
+      const run = THREE.MathUtils.clamp((w.speed - 2) / 3, 0, 1);
       const cp = Math.cos(this.pitch);
-      const d = this.dist;
-      const le = w.e, ln = w.n, lz = w.h + 1.6;
-      let ee = le - Math.cos(this.yaw) * cp * d, en = ln - Math.sin(this.yaw) * cp * d;
-      let ez = lz + Math.sin(this.pitch) * d;
-      ez = Math.max(ez, H(ee, en) + 0.6);
-      // slightly over the right shoulder
-      ee += Math.sin(this.yaw) * 0.6; en -= Math.cos(this.yaw) * 0.6;
+      const d = this.dist * (1 + 0.18 * run);
+      const le = w.e + Math.sin(this.yaw) * -0.45, ln = w.n - Math.cos(this.yaw) * -0.45, lz = w.h + 1.55;
+      const ee = w.e - Math.cos(this.yaw) * cp * d + Math.sin(this.yaw) * 0.55;
+      const en = w.n - Math.sin(this.yaw) * cp * d - Math.cos(this.yaw) * 0.55;
+      let ez = Math.max(lz + Math.sin(this.pitch) * d, H(ee, en) + 0.5);
+      // never look out from inside a car / bus: lift the eye over its roof
+      const tr = this.traffic();
+      if (tr?.solidsNear) {
+        for (const b of tr.solidsNear(ee, en, 0.6, this.eyeBoxes)) {
+          const c = Math.cos(b.h), sn = Math.sin(b.h), dx = ee - b.e, dn = en - b.n;
+          if (Math.abs(dx * c + dn * sn) < b.hl + 0.6 && Math.abs(-dx * sn + dn * c) < b.hw + 0.6) ez = Math.max(ez, H(ee, en) + (b.hl > 4 ? 3.8 : 2.2));
+        }
+      }
       eye = [ee, en, ez];
-      look = [le + Math.cos(this.yaw) * 4, ln + Math.sin(this.yaw) * 4, lz];
-      this.setCam(eye, look, dt, 18);
-      this.syncCtl(le, ln, w.h, d);
+      look = [le + Math.cos(this.yaw) * 3, ln + Math.sin(this.yaw) * 3, lz - 0.1];
+      this.setCam(eye, look, dt, 14, [w.e, w.n, lz]);
+      this.syncCtl(w.e, w.n, w.h, d);
       return;
     }
 
@@ -531,14 +618,31 @@ export class InteractLayer implements Layer {
       const p = this.traffic()?.getPlayer?.();
       if (!p) { this.exit(); return; }
       const hd = p.heading ?? 0;
-      const z = p.elev ?? H(p.e, p.n);
-      const yaw = hd + this.yaw;
+      const v = p.speed ?? 0;
+      const z = p.drawZ ?? p.elev ?? H(p.e, p.n);
+      // GTA-style chase: the boom trails the car's heading (lagging more at speed
+      // so turns and slides show), stretches with speed, recentres after a look-around
+      if (!Number.isFinite(this.chaseYaw)) this.chaseYaw = hd;
+      const lag = 2.2 + Math.min(Math.abs(v), 30) * 0.05;
+      const dy = Math.atan2(Math.sin(hd - this.chaseYaw), Math.cos(hd - this.chaseYaw));
+      this.chaseYaw += dy * (1 - Math.exp(-dt * lag));
+      if (this.time - this.lastLook > 2 && !this.down) this.yaw *= Math.exp(-dt * 1.2);
+      if (!Number.isFinite(this.chaseZ) || Math.abs(this.chaseZ - z) > 20) this.chaseZ = z;
+      this.chaseZ += (z - this.chaseZ) * (1 - Math.exp(-dt * 5));
+      const yaw = this.chaseYaw + this.yaw;
+      const dist = this.dist * (1 + Math.min(Math.abs(v), 40) * 0.012);
       const cp = Math.cos(this.pitch);
-      eye = [p.e - Math.cos(yaw) * cp * this.dist, p.n - Math.sin(yaw) * cp * this.dist, z + 1.5 + Math.sin(this.pitch) * this.dist];
+      const fz = this.chaseZ + 1.4;
+      eye = [p.e - Math.cos(yaw) * cp * dist, p.n - Math.sin(yaw) * cp * dist, fz + 0.4 + Math.sin(this.pitch) * dist];
       eye[2] = Math.max(eye[2], H(eye[0], eye[1]) + 1);
-      look = [p.e + Math.cos(hd) * 6, p.n + Math.sin(hd) * 6, z + 1.5];
-      this.setCam(eye, look, dt, 6);
-      this.syncCtl(p.e, p.n, z, this.dist);
+      const ahead = 4 + Math.min(Math.abs(v), 30) * 0.25;
+      look = [p.e + Math.cos(this.chaseYaw) * ahead, p.n + Math.sin(this.chaseYaw) * ahead, fz];
+      this.setCam(eye, look, dt, 10, [p.e, p.n, fz]);
+      this.syncCtl(p.e, p.n, z, dist);
+      // a touch wider at speed
+      const cam = this.engine.camera;
+      const fov = 55 + Math.min(10, Math.max(0, Math.abs(v) - 8) * 0.3);
+      if (Math.abs(cam.fov - fov) > 0.05) { cam.fov += (fov - cam.fov) * Math.min(1, dt * 3); cam.updateProjectionMatrix(); }
       return;
     }
 
@@ -615,7 +719,12 @@ export class InteractLayer implements Layer {
     this.tunnel.update(s);
   }
 
-  private setCam(eye: [number, number, number], look: [number, number, number], dt: number, rate: number) {
+  /**
+   * Smooth the camera towards eye / look. `clip`: the subject (E, N, elev) the
+   * boom hangs from — the eye is pulled in so no building or terrain gets
+   * between it and the subject (instantly in, easing back out).
+   */
+  private setCam(eye: [number, number, number], look: [number, number, number], dt: number, rate: number, clip?: [number, number, number]) {
     let c = this.camSmooth;
     if (!c) c = this.camSmooth = { e: eye[0], n: eye[1], z: eye[2], le: look[0], ln: look[1], lz: look[2] };
     const k = 1 - Math.exp(-dt * rate);
@@ -624,7 +733,19 @@ export class InteractLayer implements Layer {
     c.e += (eye[0] - c.e) * k; c.n += (eye[1] - c.n) * k; c.z += (eye[2] - c.z) * k;
     c.le += (look[0] - c.le) * k; c.ln += (look[1] - c.ln) * k; c.lz += (look[2] - c.lz) * k;
     const cam = this.engine.camera;
-    cam.position.set(c.e, c.z, -c.n);
+    let ce = c.e, cn = c.n, cz = c.z;
+    if (clip) {
+      const f = this.engine.controls.occlusion(clip[0], clip[1], clip[2], ce, cn, cz);
+      this.boom = f < this.boom ? f : this.boom + (f - this.boom) * (1 - Math.exp(-dt * 1.8));
+      if (this.boom < 0.999) {
+        ce = clip[0] + (ce - clip[0]) * this.boom;
+        cn = clip[1] + (cn - clip[1]) * this.boom;
+        cz = clip[2] + (cz - clip[2]) * this.boom;
+        // a pulled-in camera looks a little down at the subject
+        cz = Math.max(cz, clip[2] + 0.3 * (1 - this.boom));
+      }
+    }
+    cam.position.set(ce, cz, -cn);
     cam.up.set(0, 1, 0);
     cam.lookAt(c.le, c.lz, -c.ln);
     cam.updateMatrixWorld();
@@ -1058,8 +1179,12 @@ export class InteractLayer implements Layer {
       if (gh) {
         const mpp = Math.max(0.5, eng.controls.cur.dist / eng.ctx.pixelScale);
         try {
-          const car = tr.pickCar(gh.e, gh.n, PICK_PX * mpp);
-          if (car !== null && car !== undefined && car !== -1) best = { kind: 'car', car, label: 'Car', sub: 'click to take over' };
+          const car = tr.pickCar(gh.e, gh.n, Math.max(2.5, PICK_PX * mpp));
+          if (car !== null && car !== undefined && car !== -1) best = { kind: 'car', car, label: 'Car', sub: 'click to drive it' };
+          else {
+            const ped = tr.pickPed?.(gh.e, gh.n, Math.max(1.2, PICK_PX * 0.6 * mpp));
+            if (ped) best = { kind: 'ped', ped, label: 'Pedestrian', sub: 'click to walk as them' };
+          }
         } catch { /* ignore */ }
       }
     }
@@ -1120,6 +1245,8 @@ export class InteractLayer implements Layer {
     } else if (p.kind === 'car') {
       const g = this.engine.pickGround(cx, cy);
       if (g) void this.takeOverCar(g.e, g.n, typeof p.car === 'number' ? p.car : undefined);
+    } else if (p.kind === 'ped' && p.ped) {
+      this.takeOverPed(p.ped);
     }
   }
 
@@ -1167,6 +1294,7 @@ export class InteractLayer implements Layer {
     e.preventDefault();
     const f = Math.exp(Math.max(-300, Math.min(300, e.deltaY)) * 0.0015);
     if (this.mode === 'walk') this.dist = Math.max(2.5, Math.min(60, this.dist * f));
+    else if (this.mode === 'drive') this.dist = Math.max(5, Math.min(80, this.dist * f));
     else if (this.view === 'chase') this.dist = Math.max(12, Math.min(3000, this.dist * f));
     else {
       const cam = this.engine.camera;
@@ -1232,7 +1360,11 @@ export class InteractLayer implements Layer {
       }
       return;
     }
-    if (this.mode === 'drive') return; // the TrafficLayer reads the driving keys
+    if (this.mode === 'drive') {
+      // the TrafficLayer reads the driving keys; F gets out and walks
+      if (code === 'KeyF' && !e.repeat) { this.getOut(); consume(); }
+      return;
+    }
     if (code === 'KeyT' && this.trip !== null) { this.operate(this.trip); consume(); }
   };
 

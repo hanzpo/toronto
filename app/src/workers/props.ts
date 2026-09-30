@@ -8,7 +8,7 @@
 import type { TypedArray } from '../data/tbn';
 import type { StreetRoad, Terrain } from './roads';
 import type { HouseBuf, MeshBuf } from './meshing';
-import { district, shopDistrict } from './buildings';
+import { district, obb, shopDistrict } from './buildings';
 import { era } from './houseFront';
 
 /** prop kinds (PropsLayer pools) */
@@ -402,9 +402,10 @@ export function buildProps(
             [cx + ca * W2 + fx * L2, cy + sa * W2 + fy * L2], [cx - ca * W2 + fx * L2, cy - sa * W2 + fy * L2]], conc ? DRIVE_CONC : DRIVE_ASPH, 0.05);
         }
         // a parked car in some driveways
-        if (setback > 6 && rnd(i, 33) < 0.45) {
+        if (setback > 6 && rnd(i, 33) < 0.7) {
           const px = hx + ca * ux * F + fx * (D / 2 + Math.min(setback - 3, 3.5)), py = hy + sa * ux * F + fy * (D / 2 + Math.min(setback - 3, 3.5));
-          if (inTile(px, py)) push(K.CAR, px, py, Math.atan2(fy, fx) + (rnd(i, 34) < 0.5 ? 0 : Math.PI), 1, (rnd(i, 35) * 4) | 0, (rnd(i, 36) * 16) | 0);
+          // home overnight, often away by day (rank vs. the home schedule, layers/parkingOcc.ts)
+          if (inTile(px, py)) push(K.CAR, px, py, Math.atan2(fy, fx) + (rnd(i, 34) < 0.5 ? 0 : Math.PI), carTag(LOT.HOME, rnd(i, 39)), (rnd(i, 35) * 4) | 0, (rnd(i, 36) * 16) | 0);
         }
       }
       // collection-day bins (blue recycling, green organics, grey garbage) at the curb
@@ -465,82 +466,187 @@ class GroundMesh {
   }
 }
 
+/** parked-car occupancy tag (record `sx`): 2 + 2·lot type + rank, rank ∈ [0, 1). The props layer
+ *  shows the car while rank < the type's occupancy at the sim time (layers/parkingOcc.ts). sx < 2
+ *  (legacy records) = always shown. */
+export const carTag = (type: number, rank: number) => 2 + 2 * type + Math.min(0.999, Math.max(0, rank));
+
+interface LotInfo { id: number; area: number; cx: number; cy: number; ux: number; uy: number; u0: number; u1: number; v0: number; v1: number; type: number }
+
+/** what a lot serves, from the nearest non-house building (SPEC b_kind) or the land use around it */
+function lotType(a: Record<string, TypedArray>, ground: Uint8Array, S: number, cx: number, cy: number, area: number): number {
+  const ro = a.b_ring_off as Uint32Array | undefined, vo = a.b_vert_off as Uint32Array | undefined, bxy = a.b_xy as Float32Array | undefined;
+  const kind = a.b_kind as Uint8Array | undefined;
+  let best = -1, bd = 90;
+  if (ro && vo && bxy && kind) {
+    for (let i = 0; i < ro.length - 1; i++) {
+      const k = kind[i];
+      if (k === 1 || k === 11 || k === 15) continue;
+      const s0 = vo[ro[i]], s1 = vo[ro[i] + 1];
+      for (let v = s0; v < s1; v++) {
+        const d = Math.hypot(bxy[v * 2] - cx, bxy[v * 2 + 1] - cy);
+        if (d < bd) { bd = d; best = k; }
+      }
+    }
+  }
+  switch (best) {
+    case 4: case 12: return LOT.RETAIL;
+    case 3: case 5: case 6: case 7: case 8: return LOT.WORK;
+    case 2: return LOT.HOME;
+    case 10: case 13: return LOT.H24;
+    case 9: return area > 2500 ? LOT.COMMUTER : LOT.H24;
+    case 14: return LOT.WORK;
+  }
+  const g = ground[Math.min(255, Math.max(0, Math.floor((cy / S) * 256))) * 256 + Math.min(255, Math.max(0, Math.floor((cx / S) * 256)))];
+  return g === 4 ? LOT.HOME : g === 6 || g === 17 ? LOT.WORK : LOT.RETAIL;
+}
+/** lot types (layers/parkingOcc.ts schedules) */
+export const LOT = { RETAIL: 0, WORK: 1, HOME: 2, H24: 3, COMMUTER: 4 } as const;
+
+/** vector parking polygons (gp_class 11, docs/SPEC.md vector ground) → local E,N rings */
+function vectorLots(a: Record<string, TypedArray>, S: number): Float32Array[] | null {
+  const off = a.gp_off as Uint32Array | undefined, gxy = a.gp_xy as Uint16Array | undefined, cls = a.gp_class as Uint8Array | undefined;
+  if (!off || !gxy || !cls || !cls.length) return null;
+  const out: Float32Array[] = [];
+  const k = S / 65535;
+  for (let p = 0; p < cls.length; p++) {
+    if (cls[p] !== 11) continue;
+    const n = off[p + 1] - off[p];
+    if (n < 3) continue;
+    const r = new Float32Array(n * 2);
+    for (let i = 0; i < n * 2; i++) r[i] = gxy[off[p] * 2 + i] * k;
+    out.push(r);
+  }
+  return out;
+}
+
 /**
- * Parking lots on class-11 ground: the whole lot paved (marching-squares edges,
- * draped on the terrain), stalls striped on both sides of each aisle — mapped
- * parking aisles (tile arrays k_*, svc 1) when present, else rows along the
- * lot's principal axis — landscaped islands at row ends, light standards down
- * the aisles and parked cars.
+ * Parking lots: stalls striped on both sides of each aisle — mapped parking aisles (tile arrays
+ * k_*, svc 1) when present, else 18 m modules (stall · 7 m aisle · stall) along the lot's long
+ * axis — landscaped islands at row ends, light standards down the aisles and parked cars (every
+ * stall a candidate, shown by time of day and what the lot serves). Lots come from the vector
+ * ground (gp_class 11 polygons: exact outlines, the asphalt is already drawn by the ground) or,
+ * without it, from the class-11 ground raster (paved here, marching-squares edges).
  */
 function parkingLots(a: Record<string, TypedArray>, ground: Uint8Array, S: number, inBuilding: (x: number, y: number, m?: number) => boolean,
   onRoad: (x: number, y: number, m: number) => boolean,
   push: (k: number, x: number, y: number, ang: number, sx?: number, p0?: number, p1?: number, z?: number) => void, gm: GroundMesh, tx: number, ty: number) {
-  const R = 256, px = S / R;
-  const isP = (i: number, j: number) => i >= 0 && j >= 0 && i < R && j < R && ground[j * R + i] === 11;
-  const inLot = (x: number, y: number) => isP(Math.floor(x / px), Math.floor(y / px));
-  // component labels (lot ids) for per-lot variation and PCA
-  const label = new Int32Array(R * R).fill(-1);
-  const comps: number[][] = [];
-  const stack: number[] = [];
-  for (let s0 = 0; s0 < R * R; s0++) {
-    if (label[s0] >= 0 || ground[s0] !== 11) continue;
-    const id = comps.length, cells: number[] = [];
-    stack.length = 0; stack.push(s0); label[s0] = id;
-    while (stack.length) {
-      const c = stack.pop()!;
-      cells.push(c);
-      const i = c % R, j = (c / R) | 0;
-      for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        const ii = i + di, jj = j + dj;
-        if (!isP(ii, jj)) continue;
-        const k = jj * R + ii;
-        if (label[k] < 0) { label[k] = id; stack.push(k); }
-      }
-    }
-    comps.push(cells);
-  }
-  if (!comps.length) return;
   const seed0 = tx * 7919 + ty * 104729;
-  const lotCol = (id: number): RGBA => (rnd(seed0, id, 1) < 0.35 ? ASPHALT_OLD : ASPHALT);
-  const small = new Uint8Array(comps.length);
-  comps.forEach((c, id) => { small[id] = c.length < 6 ? 1 : 0; });
-
-  // ---- pavement: marching squares over pixel centres (interior runs merged)
-  const cx = (i: number) => (i + 0.5) * px;
-  for (let j = -1; j < R; j++) {
-    let run = -1, runId = -1;
-    const flush = (iEnd: number) => {
-      if (run < 0) return;
-      gm.quad([[cx(run), cx(j)], [cx(iEnd), cx(j)], [cx(iEnd), cx(j + 1)], [cx(run), cx(j + 1)]], lotCol(runId), 0.035);
-      run = -1;
-    };
-    for (let i = -1; i < R; i++) {
-      const A = isP(i, j), B = isP(i + 1, j), C = isP(i + 1, j + 1), D = isP(i, j + 1);
-      const id = A ? label[j * R + i] : B ? label[j * R + i + 1] : C ? label[(j + 1) * R + i + 1] : D ? label[(j + 1) * R + i] : -1;
-      if (A && B && C && D) {
-        if (run >= 0 && (id !== runId || i - run >= 8)) flush(i);
-        if (run < 0) { run = i; runId = id; }
-        continue;
+  const lots: LotInfo[] = [];
+  let inLot: (x: number, y: number) => boolean;
+  let labelAt: (x: number, y: number) => number;
+  const vpolys = vectorLots(a, S);
+  if (vpolys) {
+    // ---- vector lots: point-in-polygon on a 32 m grid of lot ids
+    const grid = new Grid<number>(32);
+    const polys: Poly[] = [];
+    vpolys.forEach((r, id) => {
+      const n = r.length / 2;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, ar = 0, cx = 0, cy = 0;
+      for (let i = 0; i < n; i++) {
+        const x = r[i * 2], y = r[i * 2 + 1], j = (i + 1) % n;
+        x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+        ar += x * r[j * 2 + 1] - r[j * 2] * y; cx += x; cy += y;
       }
-      flush(i);
-      if (!(A || B || C || D) || small[id]) continue;
-      const corners: [number, number, boolean][] = [[cx(i), cx(j), A], [cx(i + 1), cx(j), B], [cx(i + 1), cx(j + 1), C], [cx(i), cx(j + 1), D]];
-      const poly: number[][] = [];
-      for (let k = 0; k < 4; k++) {
-        const p = corners[k], q = corners[(k + 1) % 4];
-        if (p[2]) poly.push([p[0], p[1]]);
-        if (p[2] !== q[2]) poly.push([(p[0] + q[0]) / 2, (p[1] + q[1]) / 2]);
+      polys.push({ xy: r, a: 0, b: n });
+      grid.add(x0, y0, x1, y1, id);
+      const area = Math.abs(ar) / 2;
+      const o = obb(r, 0, n);
+      const vx = -o.uy, vy = o.ux;
+      let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+      for (let i = 0; i < n; i++) {
+        const u = r[i * 2] * o.ux + r[i * 2 + 1] * o.uy, v = r[i * 2] * vx + r[i * 2 + 1] * vy;
+        u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v);
       }
-      gm.poly(poly, lotCol(id), 0.035);
+      cx /= n; cy /= n;
+      lots.push({ id, area, cx, cy, ux: o.ux, uy: o.uy, u0, u1, v0, v1, type: lotType(a, ground, S, cx, cy, area) });
+    });
+    labelAt = (x, y) => { const c = grid.at(x, y); if (c) for (const id of c) if (inPoly(polys[id], x, y)) return id; return -1; };
+    inLot = (x, y) => labelAt(x, y) >= 0;
+  } else {
+    // ---- raster lots (class-11 pixels): components, pavement
+    const R = 256, px = S / R;
+    const isP = (i: number, j: number) => i >= 0 && j >= 0 && i < R && j < R && ground[j * R + i] === 11;
+    const label = new Int32Array(R * R).fill(-1);
+    const comps: number[][] = [];
+    const stack: number[] = [];
+    for (let s0 = 0; s0 < R * R; s0++) {
+      if (label[s0] >= 0 || ground[s0] !== 11) continue;
+      const id = comps.length, cells: number[] = [];
+      stack.length = 0; stack.push(s0); label[s0] = id;
+      while (stack.length) {
+        const c = stack.pop()!;
+        cells.push(c);
+        const i = c % R, j = (c / R) | 0;
+        for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const ii = i + di, jj = j + dj;
+          if (!isP(ii, jj)) continue;
+          const k = jj * R + ii;
+          if (label[k] < 0) { label[k] = id; stack.push(k); }
+        }
+      }
+      comps.push(cells);
     }
-    flush(R - 1);
+    if (!comps.length) return;
+    inLot = (x, y) => isP(Math.floor(x / px), Math.floor(y / px));
+    labelAt = (x, y) => { const i = Math.floor(x / px), j = Math.floor(y / px); return i >= 0 && j >= 0 && i < R && j < R ? label[j * R + i] : -1; };
+    const lotCol = (id: number): RGBA => (rnd(seed0, id, 1) < 0.35 ? ASPHALT_OLD : ASPHALT);
+    const small = new Uint8Array(comps.length);
+    comps.forEach((c, id) => { small[id] = c.length < 6 ? 1 : 0; });
+    // pavement: marching squares over pixel centres (interior runs merged)
+    const cx = (i: number) => (i + 0.5) * px;
+    for (let j = -1; j < R; j++) {
+      let run = -1, runId = -1;
+      const flush = (iEnd: number) => {
+        if (run < 0) return;
+        gm.quad([[cx(run), cx(j)], [cx(iEnd), cx(j)], [cx(iEnd), cx(j + 1)], [cx(run), cx(j + 1)]], lotCol(runId), 0.035);
+        run = -1;
+      };
+      for (let i = -1; i < R; i++) {
+        const A = isP(i, j), B = isP(i + 1, j), C = isP(i + 1, j + 1), D = isP(i, j + 1);
+        const id = A ? label[j * R + i] : B ? label[j * R + i + 1] : C ? label[(j + 1) * R + i + 1] : D ? label[(j + 1) * R + i] : -1;
+        if (A && B && C && D) {
+          if (run >= 0 && (id !== runId || i - run >= 8)) flush(i);
+          if (run < 0) { run = i; runId = id; }
+          continue;
+        }
+        flush(i);
+        if (!(A || B || C || D) || small[id]) continue;
+        const corners: [number, number, boolean][] = [[cx(i), cx(j), A], [cx(i + 1), cx(j), B], [cx(i + 1), cx(j + 1), C], [cx(i), cx(j + 1), D]];
+        const poly: number[][] = [];
+        for (let k = 0; k < 4; k++) {
+          const p = corners[k], q = corners[(k + 1) % 4];
+          if (p[2]) poly.push([p[0], p[1]]);
+          if (p[2] !== q[2]) poly.push([(p[0] + q[0]) / 2, (p[1] + q[1]) / 2]);
+        }
+        gm.poly(poly, lotCol(id), 0.035);
+      }
+      flush(R - 1);
+    }
+    comps.forEach((cells, id) => {
+      let mx = 0, my = 0;
+      for (const c of cells) { mx += c % R; my += (c / R) | 0; }
+      mx /= cells.length; my /= cells.length;
+      let sxx = 0, syy = 0, sxy = 0;
+      for (const c of cells) { const dx = c % R - mx, dy = ((c / R) | 0) - my; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; }
+      const th = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+      const ux = Math.cos(th), uy = Math.sin(th), vx = -uy, vy = ux;
+      let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+      for (const c of cells) {
+        const x = (c % R + 0.5) * px, y = (((c / R) | 0) + 0.5) * px;
+        const u = x * ux + y * uy, v = x * vx + y * vy;
+        u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v);
+      }
+      const area = cells.length * px * px, ccx = (mx + 0.5) * px, ccy = (my + 0.5) * px;
+      lots.push({ id, area, cx: ccx, cy: ccy, ux, uy, u0, u1, v0, v1, type: lotType(a, ground, S, ccx, ccy, area) });
+    });
   }
+  if (!lots.length) return;
 
-  // ---- stall rows
+  // ---- stall rows (2.7 × 5.5 m stalls, Toronto zoning by-law 569-2013 minimum 2.6 × 5.6)
   const SW = 2.7, SL = 5.5, AISLE = 7;
   const lights: [number, number][] = [];
   const nearLight = (x: number, y: number) => lights.some(([lx, ly]) => Math.hypot(lx - x, ly - y) < 30);
-  const occOf = (id: number) => 0.4 + rnd(seed0, id, 2) * 0.45;
   const stallOK = (x: number, y: number, ux: number, uy: number, vx: number, vy: number) => {
     for (const [du, dv] of [[0, 0], [0, 2.4], [0, -2.4], [1.2, 0], [-1.2, 0]]) {
       const qx = x + ux * du + vx * dv, qy = y + uy * du + vy * dv;
@@ -549,11 +655,13 @@ function parkingLots(a: Record<string, TypedArray>, ground: Uint8Array, S: numbe
     return true;
   };
   /** a row of stalls along direction (ux,uy) from `u0` to `u1` at offset `v` (stall centre) from the line through (ox,oy) */
-  const row = (ox: number, oy: number, ux: number, uy: number, u0: number, u1: number, v: number, side: 1 | -1, id: number, key: number) => {
+  const row = (ox: number, oy: number, ux: number, uy: number, u0: number, u1: number, v: number, side: 1 | -1, lot: LotInfo, key: number) => {
     const vx = -uy * side, vy = ux * side;
     const ang = Math.atan2(uy, ux);
     let first = true, lastU = -1, cnt = 0;
     const stripe = (u: number) => gm.rect(ox + ux * u + vx * v, oy + uy * u + vy * v, ang + Math.PI / 2, SL, 0.12, PAINT, 0.07);
+    // cars fill a lot from the stalls nearest the entrance / building first: rank grows along the row
+    const bias = rnd(seed0, lot.id, 9) < 0.5 ? 1 : -1;
     for (let u = u0 + SW / 2; u <= u1 - SW / 2; u += SW) {
       const x = ox + ux * u + vx * v, y = oy + uy * u + vy * v;
       if (!stallOK(x, y, ux, uy, vx, vy)) {
@@ -568,10 +676,10 @@ function parkingLots(a: Record<string, TypedArray>, ground: Uint8Array, S: numbe
       first = false; lastU = u; cnt++;
       stripe(u + SW / 2);
       const k = key * 1000 + Math.round(u * 3);
-      if (rnd(seed0, k, 3) < occOf(id)) {
-        push(K.CAR, x, y, ang + (side === 1 ? Math.PI / 2 : -Math.PI / 2) + (rnd(seed0, k, 4) < 0.15 ? Math.PI : 0) + (rnd(seed0, k, 5) - 0.5) * 0.06,
-          1, (rnd(seed0, k, 6) * 4) | 0, (rnd(seed0, k, 7) * 16) | 0);
-      }
+      const along = (u - u0) / Math.max(1, u1 - u0);
+      const rank = Math.min(0.999, rnd(seed0, k, 3) * 0.75 + (bias > 0 ? along : 1 - along) * 0.25);
+      push(K.CAR, x, y, ang + (side === 1 ? Math.PI / 2 : -Math.PI / 2) + (rnd(seed0, k, 4) < 0.15 ? Math.PI : 0) + (rnd(seed0, k, 5) - 0.5) * 0.06,
+        carTag(lot.type, rank), (rnd(seed0, k, 6) * 4) | 0, (rnd(seed0, k, 7) * 16) | 0);
     }
   };
 
@@ -585,12 +693,11 @@ function parkingLots(a: Record<string, TypedArray>, ground: Uint8Array, S: numbe
         const x0 = kXyz[k * 3], y0 = kXyz[k * 3 + 1], x1 = kXyz[k * 3 + 3], y1 = kXyz[k * 3 + 4];
         const L = Math.hypot(x1 - x0, y1 - y0);
         if (L < SW * 3) continue;
-        const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
-        const lab = label[Math.min(R - 1, Math.max(0, Math.floor(my / px))) * R + Math.min(R - 1, Math.max(0, Math.floor(mx / px)))];
+        const lab = labelAt((x0 + x1) / 2, (y0 + y1) / 2);
         if (lab < 0) continue;
         aisleLots.add(lab);
         const ux = (x1 - x0) / L, uy = (y1 - y0) / L;
-        for (const side of [1, -1] as const) row(x0, y0, ux, uy, 2, L - 2, AISLE / 2 + SL / 2, side, lab, r * 64 + (k - kOff[r]) * 2 + (side > 0 ? 0 : 1));
+        for (const side of [1, -1] as const) row(x0, y0, ux, uy, 2, L - 2, AISLE / 2 + SL / 2, side, lots[lab], r * 64 + (k - kOff[r]) * 2 + (side > 0 ? 0 : 1));
         for (let u = 12; u < L - 6; u += 36) {
           const lx = x0 + ux * u, ly = y0 + uy * u;
           if (!nearLight(lx, ly) && !inBuilding(lx, ly, 0.5)) { push(K.LOTLIGHT, lx - uy * 0, ly, Math.atan2(uy, ux)); lights.push([lx, ly]); }
@@ -598,33 +705,25 @@ function parkingLots(a: Record<string, TypedArray>, ground: Uint8Array, S: numbe
       }
     }
   }
-  // unmapped lots: 18 m modules (stall · aisle · stall) along the principal axis
-  comps.forEach((cells, id) => {
-    if (cells.length < 40 || aisleLots.has(id)) return;
-    let mx = 0, my = 0;
-    for (const c of cells) { mx += c % R; my += (c / R) | 0; }
-    mx /= cells.length; my /= cells.length;
-    let sxx = 0, syy = 0, sxy = 0;
-    for (const c of cells) { const dx = c % R - mx, dy = ((c / R) | 0) - my; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; }
-    const th = 0.5 * Math.atan2(2 * sxy, sxx - syy);
-    const ux = Math.cos(th), uy = Math.sin(th), vx = -uy, vy = ux;
-    let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
-    for (const c of cells) {
-      const x = (c % R + 0.5) * px, y = (((c / R) | 0) + 0.5) * px;
-      const u = x * ux + y * uy, v = x * vx + y * vy;
-      u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v);
-    }
+  // unmapped lots: 18 m modules (stall · aisle · stall) along the long axis, centred across the lot
+  for (const lot of lots) {
+    if (lot.area < 600 || aisleLots.has(lot.id)) continue;
+    const { ux, uy } = lot, vx = -uy, vy = ux;
     const MOD = SL * 2 + AISLE;
-    let m = 0;
-    for (let v = v0 + 1 + MOD / 2; v + MOD / 2 <= v1 + 1; v += MOD + 0.4, m++) {
+    const span = lot.v1 - lot.v0 - 2;
+    if (span < SL + AISLE / 2) continue;
+    const nMod = Math.max(1, Math.floor((span + 0.4) / (MOD + 0.4)));
+    const vStart = lot.v0 + 1 + (span - (nMod * (MOD + 0.4) - 0.4)) / 2 + MOD / 2;
+    for (let m = 0; m < nMod; m++) {
+      const v = vStart + m * (MOD + 0.4);
       // aisle centreline: points (u, v) → E,N = u·(ux,uy) + v·(vx,vy)
       const ox = v * vx, oy = v * vy;
-      for (const side of [1, -1] as const) row(ox, oy, ux, uy, u0, u1, AISLE / 2 + SL / 2, side, id, id * 4096 + m * 2 + (side > 0 ? 0 : 1));
-      for (let u = u0 + 10; u < u1 - 5; u += 36) {
+      for (const side of [1, -1] as const) row(ox, oy, ux, uy, lot.u0 + 1, lot.u1 - 1, AISLE / 2 + SL / 2, side, lot, lot.id * 4096 + m * 2 + (side > 0 ? 0 : 1));
+      for (let u = lot.u0 + 10; u < lot.u1 - 5; u += 36) {
         const lx = ox + ux * u, ly = oy + uy * u;
-        if (inLot(lx, ly) && !nearLight(lx, ly) && !inBuilding(lx, ly, 0.5)) { push(K.LOTLIGHT, lx, ly, th); lights.push([lx, ly]); }
+        if (inLot(lx, ly) && !nearLight(lx, ly) && !inBuilding(lx, ly, 0.5)) { push(K.LOTLIGHT, lx, ly, Math.atan2(uy, ux)); lights.push([lx, ly]); }
       }
     }
-  });
+  }
   void CURB; void PAINT_Y;
 }

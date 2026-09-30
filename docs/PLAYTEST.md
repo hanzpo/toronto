@@ -7,12 +7,11 @@ owner; fixed items move to the bottom with the commit that fixed them.
 ## Session 1 (2026-09-30, live site)
 
 ### Walking (King & Spadina)
-- [ ] The player walks through cars. There's no collision with vehicles,
-  props or buildings, and cars don't react to a pedestrian in the road.
-  → player-experience
-- [ ] The player avatar is a crude static block figure, worse than the NPC
-  pedestrians. Use the jointed pedestrian model with walk and run
-  animation. → player-experience
+- [x] Walker collisions with buildings, props, parked and moving cars; cars
+  brake, honk or change lanes for a pedestrian in the lane (25/25 in the
+  real-street test).
+- [x] Jointed, animated avatar (idle, walk, run, lean); taking over a
+  pedestrian keeps their look.
 - [ ] A turning minivan stopped diagonally across the crosswalk; queued cars
   overlap crosswalks. Partly fixed in 04d38ac (divided junctions act as one
   box); ~80 spillback cars still stop in boxes downtown at 08:15
@@ -29,12 +28,11 @@ owner; fixed items move to the bottom with the commit that fixed them.
   between blank walls. → roads (footway and service cleanup)
 - [ ] The chase camera presses against buildings. → stations/UX (camera
   collision)
-- [ ] "Take over nearest car" near the DVP picked a car on Broadview. Prefer
-  the highest-class road near the camera focus, and let the player pick by
-  clicking. → player-experience
-- [ ] Driving on the sidewalk at ~110 km/h through pedestrians: no curb
-  impact, pedestrians don't dodge or react, no collision response.
-  → player-experience
+- [x] Drive button prefers the highest-class road near the view; click any
+  car or pedestrian to take it over.
+- [x] Arcade handling (grip, weight transfer, handbrake, reverse), curb
+  impacts, building/car collisions with damage smoke, pedestrians dodge.
+  Cars don't yet collide with poles and trees.
 - [x] At 1024 px width the time bar was mid-screen and the Layers panel
   covered the view. Fixed in b96cfba.
 
@@ -50,15 +48,11 @@ owner; fixed items move to the bottom with the commit that fixed them.
 - [ ] Far station labels still stack at street level. → stations/UX
 
 ### Night (21:30)
-- [ ] Lit windows are huge flat quads (~3 m), break across building corners
-  and don't follow floor/window grids; at street level they read as stickers.
-  Needs the facade shader: real window grid, varied warm/cool interiors,
-  some rooms lit, blinds, lobby glow, ground-floor storefront light spill.
-  → buildings/props
-- [ ] From 2–3 km every building sparkles uniformly (noise). Lit-window
-  density and brightness should vary by building type and time (offices dark
-  after 22:00, residential warmer), with a smooth far-LOD emissive average.
-  → buildings/props
+- [x] Facade window shader: per-style grid restarting per wall, blank party
+  walls, occupancy schedules by use, rooms with depth, blinds, lobby glow,
+  storefront spill.
+- [x] Far windows average into light patches (no sparkle); density varies by
+  use and hour. Costs ~10–15% fps at the 2.8 km night view → perf.
 - [ ] Route overlay lines and oversized red far-vehicle markers show in
   normal (non-analytics) mode at city zoom. → transit-agents (already told)
 - [ ] Street lights: pools OK, but no light on facades or road reflection;
@@ -95,12 +89,12 @@ CIBC Square flicker → fixed in 3eda5f1.
   revetment, beach), real water levels (consolidated merge)
 - [x] Blank beige land and pixelated grass: vector ground with textured
   classes within ~1.5 km (consolidated merge)
-- [ ] Parking lots: aisles drawn as dark ribbons over blank ground, no
-  stalls/cars. → buildings/props (parking lots)
-- [ ] Brick facade texture scale far too large (bricks ~1 m) on Scarborough
-  plaza. → buildings/props
-- [ ] Queen W: no storefront band; strip between sidewalk and building face
-  unpaved/white. → buildings/props + ground
+- [x] Parking lots: stalls on vector lot polygons, parked cars by lot type
+  and hour, islands and light poles.
+- [x] Brick scale checked: already 67 mm courses; the shot was ~1 m from the
+  wall. No change.
+- [x] Queen W: paved strip between curb and street walls; shop glass no
+  longer reads as white panels.
 - [ ] Street level at Kipling on High: 54 fps, 10.6 ms CPU, 4.8 M tris. → perf
   budget check after merges
 
@@ -170,11 +164,12 @@ platforms.
 
 ### Consolidated merge follow-ups (tonight)
 - [ ] Bus pattern stretches with no road path: 935 (old graph) → 2,327 →
-  2,067 after the one-way fix. Roads agent tracing the remaining causes.
+  1,368 after the one-way, first-segment and loop fixes. The rest are stops
+  matching the wrong edge on smoothed curves. → roads
 - [ ] Red far-vehicle dots still show across the city in normal mode. → UI
 - [ ] Floating black boxes above Spadina near the corridor (crane parts?).
-- [ ] osm_extract keeps only the first outer ring of building multipolygons
-  (Pearson T3 missing; airports fills it as a stopgap). → buildings agent
+- [x] Building multipolygons: one footprint per outer ring (35 relations,
+  67 rings recovered, incl. Pearson T3).
 - [ ] Allen stations: Lawrence West buried (rail data 8 m below terrain),
   Wilson has no platform, Yorkdale ballast off the train path.
 - [ ] landmark_road_overlap 11 left (Union, CIBC Square, AGO, Legislature …).
