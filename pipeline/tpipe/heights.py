@@ -50,6 +50,74 @@ def _load_massing():
     return geoms, np.asarray(fields[0], dtype=np.float32)
 
 
+def _polygonal(g):
+    """Polygonal part of a geometry (overlays/make_valid can add lines/points)."""
+    polys = [q for q in shapely.get_parts(shapely.make_valid(g)) if q.geom_type == "Polygon" and q.area > 0]
+    if not polys:
+        return None
+    return shapely.MultiPolygon(polys) if len(polys) > 1 else polys[0]
+
+
+def _disjoint_sections(parts):
+    """Massing sections of one building overlap in plan (a tower footprint is
+    also covered by the podium section, and some sections are duplicated).
+    Extruding each from the ground makes coincident faces that z-fight, so
+    make them disjoint: per building, taller sections claim their footprint
+    first and lower ones keep only what's left (podium = podium - tower)."""
+    by_b: dict[int, list] = {}
+    for b, g, h in parts:
+        by_b.setdefault(b, []).append((g, h))
+    out = []
+    for b, secs in by_b.items():
+        secs.sort(key=lambda t: -t[1])
+        taken = None
+        for g, h in secs:
+            g = _polygonal(g)
+            if g is None:
+                continue
+            if taken is not None:
+                g = _polygonal(shapely.difference(g, taken, grid_size=0.01))
+            if g is None or g.area < 4:
+                continue
+            out.append((b, g, h))
+            taken = g if taken is None else _polygonal(shapely.union(taken, g, grid_size=0.01))
+    return out
+
+
+def contained_hidden(d: dict) -> np.ndarray:
+    """Buildings that are invisible duplicates: outer ring (almost) entirely
+    inside another non-part building that is at least as tall. They only add
+    coincident faces (z-fighting) — e.g. a store mapped inside its mall, or an
+    outline repeated as a second record. Returns a bool mask to drop."""
+    xy = d["xy"]
+    nring = d["nring"].astype(np.int64)
+    ring_off = _offsets(d["ringlen"].astype(np.int64))
+    outer = _offsets(nring)[:-1]
+    part = d["part"].astype(bool)
+    h = np.nan_to_num(d["height"], nan=0.0)
+    idx = np.arange(len(nring))
+    r = outer[idx]
+    lens = ring_off[r + 1] - ring_off[r]
+    vi = np.repeat(ring_off[r] - _offsets(lens)[:-1], lens) + np.arange(lens.sum())
+    polys = shapely.make_valid(shapely.polygons(shapely.linearrings(xy[vi], indices=np.repeat(idx, lens))))
+    area = shapely.area(polys)
+    tree = STRtree(polys)
+    pts = shapely.point_on_surface(polys)
+    pairs = tree.query(pts, predicate="within")  # [inner idx, container idx]
+    a, c = pairs
+    m = (a != c) & ~part[a] & ~part[c] & (area[c] >= area[a]) & (h[c] + 0.5 >= h[a])
+    a, c = a[m], c[m]
+    hidden = np.zeros(len(nring), dtype=bool)
+    if len(a):
+        inter = shapely.area(shapely.intersection(polys[a], polys[c], grid_size=0.01))
+        full = inter >= 0.95 * area[a]
+        # identical duplicates: keep exactly one of each pair
+        dup = full & (np.abs(area[a] - area[c]) < 0.02 * area[a]) & (np.abs(h[a] - h[c]) < 0.5)
+        hidden[a[full & ~dup]] = True
+        hidden[np.maximum(a[dup], c[dup])] = True
+    return hidden
+
+
 def enrich(d: dict) -> dict:
     t0 = time.time()
     d = {k: np.array(v) for k, v in d.items()}
@@ -145,6 +213,7 @@ def enrich(d: dict) -> dict:
         print(f"  dsm: {good.sum():,} of {len(still):,} large untagged buildings got estimated heights")
 
     if new_parts:
+        new_parts = _disjoint_sections(new_parts)
         add_xy, add_len, add_nring, add_b, add_h = [], [], [], [], []
         for b, g, h in new_parts:
             for p in shapely.get_parts(g):
@@ -170,5 +239,7 @@ def enrich(d: dict) -> dict:
         for key in ("id", "kind", "roof", "color", "tag"):
             d[key] = np.concatenate([d[key], d[key][add_b]])
         print(f"  added {k:,} massing parts")
+    d["hidden"] = contained_hidden(d)
+    print(f"  hidden {int(d['hidden'].sum()):,} buildings fully inside an equal-or-taller building")
     print(f"  heights enriched in {time.time() - t0:.0f}s ({nb:,} buildings)")
     return d
