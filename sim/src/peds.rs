@@ -67,6 +67,8 @@ pub struct Peds {
     stop_want: Vec<u8>,
     stop_have: Vec<u8>,
     stop_trips: Vec<f32>,
+    /// graph version the waiting crowds were last checked against
+    crowd_ver: u32,
     stops_at: f64,
     pub out: Vec<f32>,
 }
@@ -99,6 +101,7 @@ impl Peds {
             stop_want: Vec::new(),
             stop_have: Vec::new(),
             stop_trips: Vec::new(),
+            crowd_ver: u32::MAX,
             stops_at: -1e9,
             out: Vec::new(),
         }
@@ -149,6 +152,39 @@ impl Peds {
 
     /// Where a stop's crowd waits: on the sidewalk next to the nearest road
     /// (streetcar stops are often mapped in the middle of the road).
+    /// Is (x, y) on a carriageway (inside a road's drawn width) or inside a junction?
+    pub fn in_road(g: &Graph, x: f64, y: f64, near: &mut Vec<u32>) -> bool {
+        g.edges_near(x, y, 30.0, near);
+        for &eid in near.iter() {
+            let e = &g.edges[eid as usize];
+            if !e.alive || e.class > 6 || e.len < 0.5 {
+                continue;
+            }
+            let (se, lat, _, _) = g.project_on_edge(eid, x, y);
+            if se > 0.2 && se < e.len - 0.2 && lat.abs() < e.half_w - 0.05 {
+                return true;
+            }
+            // the junction box at either end: a disc as wide as the widest road there
+            for n in [e.from, e.to] {
+                let nd = &g.nodes[n as usize];
+                if nd.edges.len() < 3 {
+                    continue;
+                }
+                let r = nd.edges.iter().map(|&k| g.edges[k as usize].half_w).fold(0.0f32, f32::max) as f64;
+                if (nd.x - x).hypot(nd.y - y) < r - 0.1 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// QA: waiting (stop crowd) pedestrians standing on a carriageway / in a junction
+    pub fn waiting_in_road(&self, g: &Graph) -> u32 {
+        let mut near = Vec::new();
+        self.list.iter().filter(|p| !p.dead && p.state == IDLE && Self::in_road(g, p.pos[0], p.pos[1], &mut near)).count() as u32
+    }
+
     fn snap_stop(g: &Graph, s: [f64; 3], near: &mut Vec<u32>) -> ([f64; 3], f32, f32) {
         g.edges_near(s[0], s[1], 30.0, near);
         let mut best: Option<(u32, f32, f32, f32)> = None;
@@ -182,6 +218,9 @@ impl Peds {
         }
         let want = if lat >= 0.0 { 1.0f32 } else { -1.0 };
         let side = if e.ped_sides & if want > 0.0 { 1 } else { 2 } != 0 { want } else { -want };
+        // a stop mapped at the corner: its crowd waits along the curb clear of the junction
+        let clear = (e.half_w + 7.0).min(e.len * 0.5);
+        let se = se.clamp(clear, (e.len - clear).max(clear));
         let q = g.edge_pose(e, se, side * e.ped_off, false);
         // face the carriageway
         let face = wrap_pi(q.h + if side > 0.0 { PI * 0.5 } else { -PI * 0.5 });
@@ -431,6 +470,16 @@ impl Peds {
                 };
             }
             let mut near = Vec::new();
+            // roads loaded since a crowd was placed can put people in the carriageway: those
+            // leave (the crowd refills on the sidewalk)
+            if self.crowd_ver != g.version {
+                self.crowd_ver = g.version;
+                for p in self.list.iter_mut() {
+                    if p.state == IDLE && !p.dead && Self::in_road(g, p.pos[0], p.pos[1], &mut near) {
+                        p.dead = true;
+                    }
+                }
+            }
             for i in 0..self.stops.len() {
                 let (want, have) = (self.stop_want[i], self.stop_have[i]);
                 if have >= want || self.list.len() >= self.max {
@@ -462,6 +511,11 @@ impl Peds {
                         let w = if back { -1.6 } else { 0.45 - row * 1.05 } + rng.range(-0.12, 0.12) as f64;
                         let (fs, fc) = face.sin_cos();
                         let cand = [s[0] + u * ac as f64 + w * fc as f64, s[1] + u * ah as f64 + w * fs as f64, s[2]];
+                        // on the sidewalk / boarding area only: never on a carriageway or in a
+                        // junction (the crowd shrinks when there is no room)
+                        if Self::in_road(g, cand[0], cand[1], &mut near) {
+                            continue;
+                        }
                         if taken.iter().chain(placed.iter()).all(|q| (q[0] - cand[0]).hypot(q[1] - cand[1]) > 0.8) {
                             pos = cand;
                             ok = true;

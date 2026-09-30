@@ -27,6 +27,7 @@ export const sim_new: (a: number, b: number, c: number) => number;
 export const sim_overlap_counts: (a: number) => [number, number];
 export const sim_ped_count: (a: number) => number;
 export const sim_ped_ptr: (a: number) => number;
+export const sim_peds_waiting_in_road: (a: number) => number;
 export const sim_player_events: (a: number) => [number, number];
 export const sim_player_state: (a: number) => [number, number];
 export const sim_player_step: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;

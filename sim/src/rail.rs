@@ -700,6 +700,11 @@ pub struct RailSim {
     pub enabled: bool,
     /// safety statistics (must stay 0): body overlaps found by `check`, authority overruns
     pub overlaps: u32,
+    /// trains removed by the deadlock valve (held 10 min) inside the radius, and where
+    pub stuck_removed: u32,
+    /// empty-stock moves removed to break a head-on lock with a waiting train
+    pub dh_yield: u32,
+    pub stuck_log: Vec<String>,
     pub overruns: u32,
     pub player: Option<u32>,
     /// train being ridden (camera attached): never retired or handed back (NONE = none)
@@ -712,6 +717,8 @@ pub struct RailSim {
     dh_cache: std::collections::HashMap<(u32, u32), Option<Vec<u32>>>,
     /// number of plans built from patterns (turnback plans follow)
     n_pat_plans: usize,
+    /// resources used by timetabled routes (parking places must avoid them)
+    service_res: Vec<bool>,
     /// empty-stock move to a siding from the end of a plan
     stable_cache: std::collections::HashMap<u32, Option<u32>>,
     pub depots: Vec<Depot>,
@@ -759,6 +766,9 @@ impl Default for RailSim {
             spawn_acc: 1e9,
             enabled: true,
             overlaps: 0,
+            stuck_removed: 0,
+            dh_yield: 0,
+            stuck_log: Vec::new(),
             overruns: 0,
             player: None,
             keep: NONE,
@@ -767,6 +777,7 @@ impl Default for RailSim {
             bidir: Vec::new(),
             dh_cache: std::collections::HashMap::new(),
             n_pat_plans: 0,
+            service_res: Vec::new(),
             stable_cache: std::collections::HashMap::new(),
             depots: Vec::new(),
             park_cache: std::collections::HashMap::new(),
@@ -954,6 +965,19 @@ impl RailSim {
             self.trip_state.push(vec![TripState::None; nt]);
         }
         self.n_pat_plans = self.plans.len();
+        // resources the timetabled routes run through: a parked train must never stand on one
+        let mut sr = vec![false; self.owner.len()];
+        for p in &self.plans {
+            if !p.ok {
+                continue;
+            }
+            for sp in &p.spans {
+                if sp.kind != SP_DIR && (sp.res as usize) < sr.len() {
+                    sr[sp.res as usize] = true;
+                }
+            }
+        }
+        self.service_res = sr;
     }
 
     // ------------------------------------------------------------------ resources
@@ -2038,13 +2062,26 @@ impl RailSim {
         if let Some(v) = self.park_cache.get(&key) {
             return *v;
         }
-        let v = self.build_park_plan(e, len, feed, local, mode);
+        let v = self.build_park_plan(e, len, feed, local, mode).filter(|p| self.parks_clear(p, len));
         let v = v.map(|p| {
             self.plans.push(p);
             (self.plans.len() - 1) as u32
         });
         self.park_cache.insert(key, v);
         v
+    }
+
+    /// a parked body on plan `p` (front at its end) stands clear of every switch (junction
+    /// foul zone: yard ladders stay free for moves in and out) and of every block the
+    /// timetabled routes use
+    fn parks_clear(&self, p: &Plan, len: f32) -> bool {
+        let front = p.length;
+        p.spans.iter().all(|s| {
+            if s.kind == SP_DIR || s.r0 >= front || s.r1 <= front - len {
+                return true;
+            }
+            s.kind != SP_JUNCTION && !self.service_res.get(s.res as usize).copied().unwrap_or(false)
+        })
     }
 
     fn build_park_plan(&self, e: u32, len: f32, feed: u32, local: u32, mode: u8) -> Option<Plan> {
@@ -2835,8 +2872,29 @@ impl RailSim {
             let (dx, dy) = (p[0] - self.focus.0, p[1] - self.focus.1);
             let far = dx * dx + dy * dy > r2;
             // deadlock valve: stuck at a red for 10 minutes (e.g. a reversal blocked by a follower)
-            let stuck = tr.held_t > 600.0;
+            let mut stuck = tr.held_t > 600.0;
+            // an empty-stock move locked head-on with a train that waits for it (each holds
+            // what the other needs): the empty train gives way (stabled out of sight)
+            if !stuck && tr.dh && tr.held_t > 120.0 && tr.id != self.keep {
+                let me = tr.id;
+                if let Some(o) = self.blocker(ti).and_then(|id| self.trains.iter().position(|t| t.id == id)) {
+                    let q = self.plans[tr.plan as usize].point(&self.net, tr.front);
+                    if self.trains[o].held_t > 60.0 && self.blocker(o) == Some(me) && (!self.in_view(q[0], q[1]) || tr.held_t > 300.0) {
+                        stuck = true;
+                        self.dh_yield += 1;
+                    }
+                }
+            }
+            let tr_held_long = self.trains[ti].held_t > 600.0;
             if far || stuck {
+                if stuck && !far && tr_held_long {
+                    self.stuck_removed += 1;
+                    if self.stuck_log.len() < 5000 {
+                        let t = &self.trains[ti];
+                        let blk = self.blocker(ti).and_then(|id| self.trains.iter().find(|o| o.id == id)).map(|o| format!("{:?} dh {} player {}", o.state, o.dh, o.player)).unwrap_or_else(|| "-".into());
+                        self.stuck_log.push(format!("mode {} at ({:.0},{:.0}) dh {} legs {} depot {} | by {}", self.plans[t.plan as usize].mode, (p[0] / 200.0).round() * 200.0, (p[1] / 200.0).round() * 200.0, t.dh, t.legs.len(), t.depot as i64, blk));
+                    }
+                }
                 self.remove(ti, true);
                 if let Some(ts) = self.trip_state.get_mut(self.trains[ti].feed as usize) {
                     ts[self.trains[ti].trip as usize] = TripState::Done;
@@ -3193,9 +3251,17 @@ impl RailSim {
                     if r1 < front - 0.5 {
                         continue;
                     }
-                    let gap = (r0 - front).max(0.0);
+                    let mut gap = (r0 - front).max(0.0);
+                    let mut ov = self.trains[o.3 as usize].v;
+                    // coming the other way on the same track (a pull-in against the service
+                    // direction): both close in, so each may only use half the gap
+                    let op = &self.plans[self.trains[o.3 as usize].plan as usize];
+                    if op.items.iter().any(|x| x.edge == it.edge && x.dir != it.dir) {
+                        gap = (gap * 0.5 - 1.0).max(0.0);
+                        ov = 0.0;
+                    }
                     if gap < best.0 {
-                        best = (gap, self.trains[o.3 as usize].v);
+                        best = (gap, ov);
                     }
                 }
             }

@@ -341,7 +341,7 @@ export class TransitLayer implements Layer {
             const prev = this.prevSpeed.get(trip) ?? sp;
             next.set(trip, sp);
             const braking = sp < 0.2 || v.state[i] === STATE_DWELL || sp < prev - 0.01;
-            this.drawConsist(shape, lay, this.rdist[i] + lay.length / 2, 1, this.routeTint[v.route[i]] ?? _white, dc > LOW_DETAIL, braking ? FLAG_BRAKE : 0, this.laneOf(v.pattern[i], v.mode[i]), trip);
+            this.drawConsist(shape, lay, this.rdist[i] + lay.length / 2, 1, this.routeTint[v.route[i]] ?? _white, dc > LOW_DETAIL, braking ? FLAG_BRAKE : 0, this.laneOf(v.pattern[i], v.mode[i]), trip, v.mode[i]);
             if (!this.notePose(trip, shape, this.rdist[i], lay.length, 1, this.laneOf(v.pattern[i], v.mode[i]))) dupes++;
             this.schedLast.set(trip, { pattern: v.pattern[i], dist: this.rdist[i], mode, route: v.route[i] });
             this.noteSeen('t' + trip, v.x[i], v.y[i], camE, camN);
@@ -370,7 +370,7 @@ export class TransitLayer implements Layer {
         const dc = Math.hypot(q[0] - camE, q[1] - camN);
         if (!(dc < 2200 && this.inViewCone(q[0], q[1], camE, camN)) || !this.popArmed) { this.linger.delete(trip); continue; }
         const lay = layoutFor(lg.mode, this.system.routes[lg.route]);
-        this.drawConsist(shape, lay, lg.dist + lay.length / 2, 1, this.routeTint[lg.route] ?? _white, dc > LOW_DETAIL, FLAG_BRAKE, LANE_OFFSET[MODE_ID[lg.mode]], trip);
+        this.drawConsist(shape, lay, lg.dist + lay.length / 2, 1, this.routeTint[lg.route] ?? _white, dc > LOW_DETAIL, FLAG_BRAKE, LANE_OFFSET[MODE_ID[lg.mode]], trip, MODE_ID[lg.mode]);
         this.schedNow.add(trip);
         this.noteSeen('t' + trip, q[0], q[1], camE, camN);
       }
@@ -418,7 +418,7 @@ export class TransitLayer implements Layer {
             }
           }
           if (near && dc < NEAR) {
-            this.drawConsist(shape, lay, front, 1, this.routeTint[route] ?? _white, dc > LOW_DETAIL, trip < 0 ? FLAG_OFF : flags & RAIL_FLAG.BRAKE ? FLAG_BRAKE : 0, 0, trip);
+            this.drawConsist(shape, lay, front, 1, this.routeTint[route] ?? _white, dc > LOW_DETAIL, trip < 0 ? FLAG_OFF : flags & RAIL_FLAG.BRAKE ? FLAG_BRAKE : 0, 0, trip, MODE_ID[mode]);
             if (!this.notePose(trip, shape, front - lay.length / 2, lay.length, 1, 0)) dupes++;
             this.stats.near++;
           } else {
@@ -445,7 +445,7 @@ export class TransitLayer implements Layer {
         if (shape && dc < NEAR) {
           const lay = layoutFor(o.mode, this.system.routes[o.route]);
           const dir = o.dir ?? 1;
-          this.drawConsist(shape, lay, o.dist + dir * lay.length / 2, dir, this.routeTint[o.route] ?? _white, dc > LOW_DETAIL, 0, LANE_OFFSET[MODE_ID[o.mode]]);
+          this.drawConsist(shape, lay, o.dist + dir * lay.length / 2, dir, this.routeTint[o.route] ?? _white, dc > LOW_DETAIL, 0, LANE_OFFSET[MODE_ID[o.mode]], -1, MODE_ID[o.mode]);
           if (SURFACE & (1 << MODE_ID[o.mode])) {
             const p = shape.point(o.dist + dir * lay.length / 2, _p);
             const dd = shape.direction(o.dist + dir * lay.length / 2, _d);
@@ -468,7 +468,7 @@ export class TransitLayer implements Layer {
     if (qa) {
       qa.transitDupes = ((qa.transitDupes as number) || 0) + dupes;
       const rs = (this.traffic() as unknown as { railStats?(): number[] } | null)?.railStats?.();
-      if (rs) { qa.railAgents = rs[0]; qa.trainOverlaps = rs[1]; qa.railOverruns = rs[2]; qa.railTurnbacks = rs[3]; qa.railPullouts = rs[4]; qa.railPullins = rs[5]; qa.railParked = rs[6]; }
+      if (rs) { qa.railAgents = rs[0]; qa.trainOverlaps = rs[1]; qa.railOverruns = rs[2]; qa.railTurnbacks = rs[3]; qa.railPullouts = rs[4]; qa.railPullins = rs[5]; qa.railParked = rs[6]; qa.trainsHeldAtDepot = rs[7] ?? 0; }
       qa.vehicleSpawnInView = this.popStats.spawn + this.popStats.despawn;
       qa.vehicleSpawnInViewExamples = this.popStats.examples;
     }
@@ -804,8 +804,11 @@ export class TransitLayer implements Layer {
     this.groundN++;
   }
 
-  private drawConsist(shape: PatternShape, lay: ConsistLayout, front: number, dir: 1 | -1, tint: THREE.Color, low: boolean, flags: number, lat: number, trip = -1) {
-    const H = (e: number, n: number) => this.engine.heightAt(e, n);
+  private drawConsist(shape: PatternShape, lay: ConsistLayout, front: number, dir: 1 | -1, tint: THREE.Color, low: boolean, flags: number, lat: number, trip = -1, mode = -1) {
+    // subway / commuter / airport / intercity rail run at the network model's track z as drawn
+    // (docs/ROADS.md "Source of truth"); street-running vehicles snap to the draped road surface
+    const own = mode === MODE_ID.subway || mode === MODE_ID.commuter_rail || mode === MODE_ID.airport_rail || mode === MODE_ID.intercity_rail;
+    const H = own ? null : (e: number, n: number) => this.engine.heightAt(e, n);
     const pose = this.pose;
     const hl = trip >= 0 && this.highlight.size ? this.highlight.get(trip) ?? 0 : 0;
     for (let c = 0; c < lay.cars.length; c++) {

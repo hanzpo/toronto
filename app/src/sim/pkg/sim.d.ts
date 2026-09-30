@@ -61,12 +61,16 @@ export class Sim {
     measured(): Float32Array;
     constructor(seed: number, max_cars: number, max_peds: number);
     /**
-     * cars stopped in junction boxes: [front past the stop line, rear in the exit box, inside a split junction]
      * QA: overlapping car bodies by cause (see World::overlap_causes)
      */
     overlap_counts(): Uint32Array;
     ped_count(): number;
     ped_ptr(): number;
+    /**
+     * cars stopped in junction boxes: [front past the stop line, rear in the exit box, inside a split junction]
+     * QA: waiting (stop crowd) pedestrians standing on a carriageway or in a junction
+     */
+    peds_waiting_in_road(): number;
     /**
      * [curb jolt (m/s), collision impulse (m/s), surface (0 off-road, 1 road, 2 sidewalk)] since the last call
      */
@@ -231,6 +235,7 @@ export interface InitOutput {
     readonly sim_overlap_counts: (a: number) => [number, number];
     readonly sim_ped_count: (a: number) => number;
     readonly sim_ped_ptr: (a: number) => number;
+    readonly sim_peds_waiting_in_road: (a: number) => number;
     readonly sim_player_events: (a: number) => [number, number];
     readonly sim_player_state: (a: number) => [number, number];
     readonly sim_player_step: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;

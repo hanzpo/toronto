@@ -291,7 +291,6 @@ export class Sim {
         return this;
     }
     /**
-     * cars stopped in junction boxes: [front past the stop line, rear in the exit box, inside a split junction]
      * QA: overlapping car bodies by cause (see World::overlap_causes)
      * @returns {Uint32Array}
      */
@@ -313,6 +312,15 @@ export class Sim {
      */
     ped_ptr() {
         const ret = wasm.sim_ped_ptr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * cars stopped in junction boxes: [front past the stop line, rear in the exit box, inside a split junction]
+     * QA: waiting (stop crowd) pedestrians standing on a carriageway or in a junction
+     * @returns {number}
+     */
+    peds_waiting_in_road() {
+        const ret = wasm.sim_peds_waiting_in_road(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**

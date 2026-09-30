@@ -423,3 +423,62 @@ fn dvp_am_peak_direction() {
     eprintln!("expressway 08:02-08:05 near ({fx},{fy}): inbound {:.1} m/s (n {ns}), outbound {:.1} m/s (n {nn})", vs / ns.max(1) as f64, vn / nn.max(1) as f64);
     assert!(vs / ns.max(1) as f64 <= vn / nn.max(1) as f64 + 0.5, "AM peak: inbound should be the slow direction");
 }
+
+/// stop positions (E, N, elev) of an agency's bus + rail feeds within `r` of (fx, fy)
+fn transit_stops(agency: &str, fx: f64, fy: f64, r: f64) -> Vec<f64> {
+    let mut out = Vec::new();
+    for kind in ["bus", "rail"] {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("../app/public/data/transit/{agency}_weekday_{kind}.bin.gz"));
+        let Ok(raw) = std::fs::read(&path) else { continue };
+        let mut d = flate2::read::GzDecoder::new(&raw[..]);
+        let mut buf = Vec::new();
+        d.read_to_end(&mut buf).unwrap();
+        let hl = u32::from_le_bytes(buf[4..8].try_into().unwrap()) as usize;
+        let header = String::from_utf8(buf[8..8 + hl].to_vec()).unwrap();
+        let mut base = 8 + hl;
+        base += (8 - base % 8) % 8;
+        let a = header.find("\"stop_xyz\":[").unwrap() + 12;
+        let parts: Vec<&str> = header[a..].split(']').next().unwrap().split(',').collect();
+        let (off, n): (usize, usize) = (parts[1].parse().unwrap(), parts[2].parse().unwrap());
+        let v: Vec<f32> = buf[base + off..base + off + n * 4].chunks_exact(4).map(|c| f32::from_le_bytes(c.try_into().unwrap())).collect();
+        for c in v.chunks_exact(3) {
+            if (c[0] as f64 - fx).hypot(c[1] as f64 - fy) < r {
+                out.extend_from_slice(&[c[0] as f64, c[1] as f64, c[2] as f64]);
+            }
+        }
+    }
+    out
+}
+
+/// Waiting crowds at real TTC stops downtown stay on the sidewalk (never on a carriageway or
+/// in a junction), rush hour.
+#[test]
+fn stop_crowds_stay_off_the_road() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../app/public/data/graph");
+    if !dir.exists() {
+        return;
+    }
+    let (fx, fy) = (-1300.0, -900.0);
+    let stops = transit_stops("ttc", fx, fy, 800.0);
+    if stops.is_empty() {
+        return;
+    }
+    let mut w = World::new(5, 4000, 12000);
+    load_around(&mut w, &dir, fx, fy, 1500.0);
+    w.focus = (fx, fy);
+    w.radius = 900.0;
+    w.peds.radius = 900.0;
+    w.tod = 17.5 * 3600.0;
+    w.weekday = 3;
+    w.peds.set_stops(&stops);
+    // a busy line at every stop: the biggest crowds
+    w.peds.set_stop_trips(&vec![600.0; stops.len() / 3]);
+    for _ in 0..150 {
+        w.step(0.2);
+    }
+    let waiting = w.peds.list.iter().filter(|p| p.state == gta_sim::peds::IDLE).count();
+    let bad = w.peds.waiting_in_road(&w.g);
+    eprintln!("stops {} waiting {waiting} in the road {bad}", stops.len() / 3);
+    assert!(waiting > 100);
+    assert_eq!(bad, 0, "waiting pedestrians standing in the road");
+}

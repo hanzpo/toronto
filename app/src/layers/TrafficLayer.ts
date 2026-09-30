@@ -393,6 +393,8 @@ export class TrafficLayer implements Layer {
         // QA: sim-side overlapping car bodies by cause (__qa.carOverlapCauses)
         const qa = (window as unknown as { __qa?: Record<string, unknown> }).__qa;
         if (qa) qa.carOverlapCauses = Object.fromEntries(OVERLAP_CAUSES.map((k, i) => [k, m.counts[i] ?? 0]));
+        // waiting crowds standing on a carriageway / in a junction (must stay 0)
+        if (qa) qa.pedsWaitingInRoad = m.pedsInRoad ?? 0;
         break;
       }
       case 'majorsGeom': this.congestion?.setGeometry(m); break;
@@ -472,7 +474,7 @@ export class TrafficLayer implements Layer {
   /** [trains, overlaps (total), overruns (total), turnbacks, pull-outs, pull-ins, parked] */
   railStats(): number[] {
     if (!this.hf) return [0, 0, 0, 0, 0, 0, 0];
-    return [...[0, 1, 2, 3].map((i) => this.hf[HF.RAIL + i]), ...[0, 1, 2].map((i) => this.hf[HF.RAILX + i])];
+    return [...[0, 1, 2, 3].map((i) => this.hf[HF.RAIL + i]), ...[0, 1, 2, 3].map((i) => this.hf[HF.RAILX + i])];
   }
 
   /** player train state (RAILP fields), or null when not driving a train */

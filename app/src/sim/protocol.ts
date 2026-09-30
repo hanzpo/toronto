@@ -164,7 +164,7 @@ export type FromWorker =
   | { type: 'crossings'; data: Float64Array }
   | { type: 'railRide'; id: number }
   /** QA: overlapping car bodies by cause (OVERLAP_CAUSES order), every ~2 s */
-  | { type: 'overlaps'; counts: number[] }
+  | { type: 'overlaps'; counts: number[]; pedsInRoad?: number }
   /** signal plans of the loaded graph: [osmId, e, n, offset, axis, greenA, greenB]* */
   | { type: 'plans'; plans: Float64Array };
 

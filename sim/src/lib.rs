@@ -150,6 +150,11 @@ impl Sim {
     }
 
     /// cars stopped in junction boxes: [front past the stop line, rear in the exit box, inside a split junction]
+    /// QA: waiting (stop crowd) pedestrians standing on a carriageway or in a junction
+    pub fn peds_waiting_in_road(&self) -> u32 {
+        self.w.peds.waiting_in_road(&self.w.g)
+    }
+
     /// QA: overlapping car bodies by cause (see World::overlap_causes)
     pub fn overlap_counts(&mut self) -> Vec<u32> {
         self.w.overlap_counts().to_vec()
@@ -502,7 +507,15 @@ impl Sim {
     /// [trains, overlaps (total), authority overruns (total), turnbacks, pull-outs, pull-ins, parked]
     pub fn rail_stats(&self) -> Vec<f64> {
         let parked = self.rail.trains.iter().filter(|t| t.state == rail::TState::Parked).count();
-        vec![self.rail.trains.len() as f64, self.rail.overlaps as f64, self.rail.overruns as f64, self.rail.turnbacks as f64, self.rail.pullouts as f64, self.rail.pullins as f64, parked as f64]
+        // trains stopped > 60 s within 500 m of a depot, not at a platform (QA: trainsHeldAtDepot)
+        let depot_held = self.rail.trains.iter().filter(|t| {
+            if t.dead || t.held_t <= 60.0 || matches!(t.state, rail::TState::Dwell | rail::TState::Terminal | rail::TState::Parked) {
+                return false;
+            }
+            let p = self.rail.plans[t.plan as usize].point(&self.rail.net, t.front);
+            self.rail.depots.iter().any(|d| (d.x - p[0]).hypot(d.y - p[1]) < 500.0)
+        }).count();
+        vec![self.rail.trains.len() as f64, self.rail.overlaps as f64, self.rail.overruns as f64, self.rail.turnbacks as f64, self.rail.pullouts as f64, self.rail.pullins as f64, parked as f64, depot_held as f64]
     }
 
     pub fn rail_player_attach(&mut self, feed: u32, trip: u32) -> bool {

@@ -333,13 +333,13 @@ function tick(m: TickMsg) {
       Atomics.store(hdr, H.FAST, fast ? 1 : 0);
       if (t0 - lastOverlaps > 2000) {
         lastOverlaps = t0;
-        post({ type: 'overlaps', counts: Array.from(sim.overlap_counts()) });
+        post({ type: 'overlaps', counts: Array.from(sim.overlap_counts()), pedsInRoad: sim.peds_waiting_in_road() });
       }
       const xc = sim.rail_crossing_changes();
       if (xc.length) { const data = new Float64Array(xc); post({ type: 'crossings', data }, [data.buffer]); }
       const rs = sim.rail_stats();
       for (let i = 0; i < 4; i++) hf[HF.RAIL + i] = rs[i];
-      for (let i = 4; i < 7; i++) hf[HF.RAILX + i - 4] = rs[i];
+      for (let i = 4; i < 8; i++) hf[HF.RAILX + i - 4] = rs[i] ?? 0;
       const rp = sim.rail_player_state();
       for (let i = 0; i < 14; i++) hf[HF.RAILP + i] = rp[i] ?? 0;
       const st = sim.stats();
