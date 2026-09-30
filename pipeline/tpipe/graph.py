@@ -16,8 +16,7 @@ import time
 
 import numpy as np
 
-from . import geo, grade, tbn
-from .terrain import get as get_terrain
+from . import geo, tbn
 
 S0 = geo.TILE_SIZE[0]
 DRIVABLE_MAX_CLASS = 6          # motorway .. service
@@ -32,89 +31,95 @@ def _offsets(counts):
 
 
 def main() -> None:
+    """Edges follow the shared network model (tpipe.roadnet, work/roadnet.npz):
+    the same smoothed centrelines, solved bridge / ramp / grade-separation
+    elevations and sanity-checked lane counts the render tiles draw."""
     t0 = time.time()
-    d = np.load(geo.WORK / "osm_lines.npz", allow_pickle=True)
-    kind, cls = d["kind"], d["cls"]
-    loff = _offsets(d["len"].astype(np.int64))
-    ways = np.nonzero((kind == 0) & (cls <= DRIVABLE_MAX_CLASS))[0]
-    wlen = loff[ways + 1] - loff[ways]
-    vidx = np.repeat(loff[ways] - _offsets(wlen)[:-1], wlen) + np.arange(wlen.sum())
-    way_of = np.repeat(np.arange(len(ways)), wlen)          # index into `ways`
-    xy = d["xy"][vidx]
-    nid = d["nid"][vidx]
-    print(f"{len(ways):,} drivable ways, {len(vidx):,} vertices", flush=True)
-
-    # graph nodes: way endpoints + nodes used by more than one vertex
-    uniq, inv, counts = np.unique(nid, return_inverse=True, return_counts=True)
-    first = np.zeros(len(vidx), dtype=bool)
-    last = np.zeros(len(vidx), dtype=bool)
-    wo = _offsets(wlen)
-    first[wo[:-1]] = True
-    last[wo[1:] - 1] = True
-    is_node = (counts[inv] > 1) | first | last
-    cut = np.nonzero(is_node)[0]
-    # edges between consecutive cuts of the same way
-    same = way_of[cut[1:]] == way_of[cut[:-1]]
-    ea, eb = cut[:-1][same], cut[1:][same]
-    ew = way_of[ea]
-    ok = eb > ea
-    ea, eb, ew = ea[ok], eb[ok], ew[ok]
-    print(f"{is_node.sum():,} node vertices, {len(ea):,} edges ({time.time() - t0:.0f}s)", flush=True)
-
-    # densify every edge's polyline in one pass: segments are (k, k+1) for k in [ea, eb)
-    seg_edge = np.repeat(np.arange(len(ea)), eb - ea)
-    seg_a = np.repeat(ea - _offsets(eb - ea)[:-1], eb - ea) + np.arange((eb - ea).sum())
-    p0, p1 = xy[seg_a], xy[seg_a + 1]
-    slen = np.hypot(*(p1 - p0).T)
-    nsub = np.maximum(1, np.ceil(slen / STEP).astype(np.int64))
-    # points: each edge starts with its first vertex, then nsub points per segment
-    pts_per_edge = np.bincount(seg_edge, weights=nsub, minlength=len(ea)).astype(np.int64) + 1
-    poff = _offsets(pts_per_edge)
-    P = np.empty((poff[-1], 2), dtype=np.float64)
-    P[poff[:-1]] = xy[ea]
-    sub_seg = np.repeat(np.arange(len(seg_a)), nsub)
-    k = np.arange(len(sub_seg)) - np.repeat(_offsets(nsub)[:-1], nsub) + 1
-    t = (k / nsub[sub_seg])[:, None]
-    # destination slot: edge start + 1 + running index within the edge
-    within = np.arange(len(sub_seg)) - np.repeat(_offsets(np.bincount(seg_edge, weights=nsub, minlength=len(ea)).astype(np.int64))[:-1], np.bincount(seg_edge, weights=nsub, minlength=len(ea)).astype(np.int64))
-    dest = np.repeat(poff[:-1], pts_per_edge - 1) + 1 + within
-    P[dest] = p0[sub_seg] + (p1[sub_seg] - p0[sub_seg]) * t
-    terrain = get_terrain()
-    Z = terrain.sample(P[:, 0], P[:, 1]).astype(np.float64)
-    print(f"densified to {len(P):,} points ({time.time() - t0:.0f}s)", flush=True)
-
-    gw = ways[ew]                       # global line index per edge
-    flags = d["flags"][gw]
-    layer = d["layer"][gw]
-    for e in np.nonzero(flags & 6)[0]:
-        a, b = poff[e], poff[e + 1]
-        n = b - a
-        lay = max(1, abs(int(layer[e]))) if layer[e] != 0 else 1
-        f = int(flags[e])
-        Z[a:b] = grade.profile(P[a:b], Z[a:b], np.full(n, bool(f & 2)), np.full(n, bool(f & 4)),
-                               clearance=6.0 * lay, cover=9.0 * lay, ramp=60.0)
-    elen = np.bincount(seg_edge, weights=slen, minlength=len(ea))
-
-    c = cls[gw].astype(np.int64)
-    oneway = (flags & 1).astype(bool)
-    lanes = np.maximum(1, d["lanes"][gw].astype(np.int64))
-    fwd = np.where(oneway, lanes, np.maximum(1, lanes // 2 + lanes % 2))
-    bwd = np.where(oneway, 0, np.maximum(1, lanes // 2))
-    sp = d["speed"][gw]
-    kmh = np.where((sp > 5) & (sp < 140), sp, DEFAULT_KMH[c])
-
-    nodes = np.load(geo.WORK / "osm_nodes.npz")
-    sig = np.isin(nid, nodes["id"][nodes["kind"] == 0])
-    stp = np.isin(nid, nodes["id"][nodes["kind"] == 1])
-    nflag = sig.astype(np.uint8) | (stp.astype(np.uint8) << 1)
-
-    mid = P[(poff[:-1] + poff[1:]) // 2]
+    with np.load(geo.WORK / "osm_lines.npz", allow_pickle=True) as f:
+        d = {k: f[k] for k in ("kind", "cls", "id", "speed", "name", "side", "nid", "xy")}
+    # true OSM node positions: edges start / end exactly on their graph node (ramps pushed
+    # beside the mainline for rendering still join the mainline node)
+    nuq, nfirst = np.unique(d["nid"], return_index=True)
+    nxy_all = d["xy"][nfirst]
+    del d["xy"], d["nid"]
+    with np.load(geo.WORK / "roadnet.npz", allow_pickle=True) as f:
+        W = {k: f[k] for k in f.files if k.startswith("way_")}
+    order_id = np.argsort(d["id"])
+    sorted_id = d["id"][order_id]
+    wid = W["way_id"]
+    pos = np.searchsorted(sorted_id, wid)
+    pos = np.clip(pos, 0, len(sorted_id) - 1)
+    row = order_id[pos]
+    ok = (sorted_id[pos] == wid) & (d["kind"][row] == 0) & (d["cls"][row] <= DRIVABLE_MAX_CLASS) \
+        & ((W["way_flags"] & 32) == 0)
+    ways = np.nonzero(ok)[0]
+    print(f"{len(ways):,} drivable ways from the network model", flush=True)
+    woff, wxyz, ws = W["way_off"], W["way_xyz"], W["way_s"]
+    noff, nnode, nns = W["way_node_off"], W["way_node"], W["way_node_s"]
+    # graph nodes: nodes used more than once by drivable ways, and way ends
+    alln = np.concatenate([nnode[noff[w]:noff[w + 1]] for w in ways])
+    uniq, cnt = np.unique(alln, return_counts=True)
+    multi = set(uniq[cnt > 1].tolist())
+    E_geo, E_way, E_from, E_to, E_len = [], [], [], [], []
+    for w in ways:
+        P = wxyz[woff[w]:woff[w + 1]]
+        s = ws[woff[w]:woff[w + 1]]
+        nodes = nnode[noff[w]:noff[w + 1]]
+        ns = nns[noff[w]:noff[w + 1]].copy()
+        if len(P) < 2 or len(nodes) < 2:
+            continue
+        ns[0], ns[-1] = 0.0, s[-1]
+        bad = ~np.isfinite(ns) | (np.diff(np.concatenate([[0.0], ns])) < -0.5)
+        if bad.any():  # fall back to proportional positions
+            ns = np.linspace(0.0, s[-1], len(nodes))
+        ns = np.maximum.accumulate(np.clip(ns, 0, s[-1]))
+        cut = [k for k in range(len(nodes)) if k == 0 or k == len(nodes) - 1 or int(nodes[k]) in multi]
+        for a, b in zip(cut[:-1], cut[1:]):
+            sa, sb = ns[a], ns[b]
+            if sb - sa < 0.3:
+                continue
+            inner = (s > sa + 1e-6) & (s < sb - 1e-6)
+            S = np.concatenate([[sa], s[inner], [sb]])
+            # densify for smooth driving
+            seg = np.diff(S)
+            k = np.maximum(1, np.ceil(seg / STEP).astype(np.int64))
+            S2 = np.concatenate([[S[0]]] + [S[i] + seg[i] * np.arange(1, k[i] + 1) / k[i] for i in range(len(seg))])
+            G = np.column_stack([np.interp(S2, s, P[:, c]) for c in range(3)])
+            for end, nd in ((0, nodes[a]), (-1, nodes[b])):
+                q = np.searchsorted(nuq, nd)
+                if q < len(nuq) and nuq[q] == nd and np.hypot(*(nxy_all[q] - G[end, :2])) < 12.0:
+                    G[end, :2] = nxy_all[q]
+            E_geo.append(G)
+            E_way.append(w)
+            E_from.append(int(nodes[a]))
+            E_to.append(int(nodes[b]))
+            E_len.append(float(np.hypot(*np.diff(G[:, :2], axis=0).T).sum()))
+    print(f"{len(E_geo):,} edges ({time.time() - t0:.0f}s)", flush=True)
+    ne = len(E_geo)
+    E_way = np.array(E_way, np.int64)
+    r = row[E_way]
+    c = d["cls"][r].astype(np.int64)
+    flags = (W["way_flags"][E_way] & 31).astype(np.int64)
+    fwd = W["way_nF"][E_way].astype(np.int64)
+    bwd = W["way_nB"][E_way].astype(np.int64)
+    oneway = (flags & 1) != 0
+    fwd = np.maximum(1, fwd)
+    bwd = np.where(oneway, 0, np.maximum(bwd, 0))
+    sp = d["speed"][r]
+    kmh = np.where((sp > 5) & (sp < 140), sp, DEFAULT_KMH[np.minimum(c, 6)])
+    with np.load(geo.WORK / "osm_nodes.npz") as f:
+        nk, nid_ = f["kind"], f["id"]
+    sig_ids = set(nid_[nk == 0].tolist())
+    stp_ids = set(nid_[nk == 1].tolist())
+    mid = np.array([g[len(g) // 2, :2] for g in E_geo]) if ne else np.zeros((0, 2))
     tx = np.floor(mid[:, 0] / S0).astype(np.int64)
     ty = np.floor(mid[:, 1] / S0).astype(np.int64)
     order = np.lexsort((ty, tx))
     key = np.stack([tx[order], ty[order]], 1)
     brk = np.nonzero(np.any(np.diff(key, axis=0) != 0, axis=1))[0] + 1
     names = d["name"]
+    d_id = d["id"]
+    d_side = d["side"]
     out = geo.OUT / "graph"
     total = 0
     ntiles = 0
@@ -124,48 +129,51 @@ def main() -> None:
         X, Y = int(tx[chunk[0]]), int(ty[chunk[0]])
         x0, y0 = X * S0, Y * S0
         E = np.sort(chunk)
-        vend = np.concatenate([ea[E], eb[E]])            # vertex indices of endpoints
-        uids, ui = np.unique(nid[vend], return_index=True)
-        vsel = vend[ui]
-        lookup = {int(u): i for i, u in enumerate(uids)}
-        e_from = np.array([lookup[int(nid[v])] for v in ea[E]], dtype=np.uint32)
-        e_to = np.array([lookup[int(nid[v])] for v in eb[E]], dtype=np.uint32)
-        cnt = pts_per_edge[E]
-        pidx = np.repeat(poff[E] - _offsets(cnt)[:-1], cnt) + np.arange(cnt.sum())
+        lookup: dict[int, int] = {}
+        n_id, n_xyz, n_fl = [], [], []
+
+        def node(nid, p):
+            k = lookup.get(nid)
+            if k is None:
+                k = lookup[nid] = len(n_id)
+                n_id.append(float(nid))
+                n_xyz.append(p)
+                n_fl.append((1 if nid in sig_ids else 0) | (2 if nid in stp_ids else 0))
+            return k
+        e_from = np.array([node(E_from[e], E_geo[e][0]) for e in E], np.uint32)
+        e_to = np.array([node(E_to[e], E_geo[e][-1]) for e in E], np.uint32)
+        cnts = np.array([len(E_geo[e]) for e in E], np.int64)
+        G = np.vstack([E_geo[e] for e in E])
         name_list: list[str] = []
         name_idx: dict[str, int] = {}
         eni = np.full(len(E), 0xFFFF, dtype=np.uint16)
-        for j, g in enumerate(gw[E]):
-            nm = names[g]
+        for j, e in enumerate(E):
+            nm = names[r[e]]
             if nm:
                 if nm not in name_idx:
                     name_idx[nm] = len(name_list)
                     name_list.append(nm)
                 eni[j] = name_idx[nm]
-        # node elevation: take it from the edge geometry at that endpoint
-        nz = np.zeros(len(uids), dtype=np.float32)
-        nz[e_from] = Z[poff[E]]
-        nz[e_to] = Z[poff[E + 1] - 1]
+        NX = np.array(n_xyz)
         arrays = {
-            "n_id": uids.astype(np.float64),
-            "n_xyz": np.column_stack([xy[vsel, 0] - x0, xy[vsel, 1] - y0, nz]).astype(np.float32).ravel(),
-            "n_flags": nflag[vsel],
+            "n_id": np.array(n_id, np.float64),
+            "n_xyz": np.column_stack([NX[:, 0] - x0, NX[:, 1] - y0, NX[:, 2]]).astype(np.float32).ravel(),
+            "n_flags": np.array(n_fl, np.uint8),
             "e_from": e_from,
             "e_to": e_to,
-            "e_off": _offsets(cnt).astype(np.uint32),
-            "e_xyz": np.column_stack([P[pidx, 0] - x0, P[pidx, 1] - y0, Z[pidx]]).astype(np.float32).ravel(),
-            "e_len": elen[E].astype(np.float32),
+            "e_off": _offsets(cnts).astype(np.uint32),
+            "e_xyz": np.column_stack([G[:, 0] - x0, G[:, 1] - y0, G[:, 2]]).astype(np.float32).ravel(),
+            "e_len": np.array([E_len[e] for e in E], np.float32),
             "e_class": c[E].astype(np.uint8),
             "e_lanes_fwd": fwd[E].astype(np.uint8),
             "e_lanes_bwd": bwd[E].astype(np.uint8),
             "e_speed": (kmh[E] / 3.6).astype(np.float32),
-            "e_osm": d["id"][gw[E]].astype(np.float64),
+            "e_osm": d_id[r[E]].astype(np.float64),
             "e_name": eni,
             "e_flags": flags[E].astype(np.uint8),
-            # carriageway width as drawn by the render tiles (r_width) and OSM sidewalk code
-            # (r_side), so the sim can put pedestrians on the rendered sidewalks
-            "e_width": d["width"][gw[E]].astype(np.float32),
-            "e_side": d["side"][gw[E]].astype(np.uint8),
+            # pavement width as drawn by the render tiles (r_pl + r_pr), OSM sidewalk code (r_side)
+            "e_width": W["way_width"][E_way[E]].astype(np.float32),
+            "e_side": d_side[r[E]].astype(np.uint8),
         }
         total += tbn.write(out / f"{X}_{Y}.bin.gz", arrays, tx=X, ty=Y, names=name_list)
         ntiles += 1

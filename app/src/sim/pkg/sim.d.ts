@@ -10,6 +10,22 @@ export class Sim {
      */
     add_footprints(tx: number, ty: number, ring_off: Uint32Array, xy: Float32Array): void;
     add_tile(tx: number, ty: number, n_id: Float64Array, n_xyz: Float32Array, n_flags: Uint8Array, e_from: Uint32Array, e_to: Uint32Array, e_off: Uint32Array, e_xyz: Float32Array, e_class: Uint8Array, e_lanes_fwd: Uint8Array, e_lanes_bwd: Uint8Array, e_speed: Float32Array, e_flags: Uint8Array, bottleneck: Float32Array, e_width: Float32Array, e_side: Uint8Array): void;
+    bus_count(): number;
+    /**
+     * buses that stopped being agents since the last call: [trip, delay]*
+     */
+    bus_gone(): Float32Array;
+    bus_path_len(): number;
+    bus_path_ptr(): number;
+    /**
+     * pattern shape (world E/N pairs) + stop centre distances / flags
+     */
+    bus_pattern(id: number, xy: Float64Array, stop_d: Float32Array, stop_flag: Uint8Array): void;
+    bus_ptr(): number;
+    /**
+     * place bus trip `trip` with its front at `front` along pattern `pat`
+     */
+    bus_spawn(trip: number, pat: number, len: number, front: number, v: number, arr: Float64Array, dep: Float64Array): number;
     car_count(): number;
     car_ptr(): number;
     /**
@@ -141,6 +157,13 @@ export interface InitOutput {
     readonly __wbg_sim_free: (a: number, b: number) => void;
     readonly sim_add_footprints: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
     readonly sim_add_tile: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number, a1: number, b1: number, c1: number, d1: number, e1: number, f1: number, g1: number) => void;
+    readonly sim_bus_count: (a: number) => number;
+    readonly sim_bus_gone: (a: number) => [number, number];
+    readonly sim_bus_path_len: (a: number) => number;
+    readonly sim_bus_path_ptr: (a: number) => number;
+    readonly sim_bus_pattern: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => void;
+    readonly sim_bus_ptr: (a: number) => number;
+    readonly sim_bus_spawn: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => number;
     readonly sim_car_count: (a: number) => number;
     readonly sim_car_ptr: (a: number) => number;
     readonly sim_footprint_tiles: (a: number) => [number, number];

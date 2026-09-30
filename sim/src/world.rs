@@ -11,6 +11,7 @@
 
 use std::f32::consts::PI;
 
+use crate::bus::{BusAgent, BusPattern, BusState, BF_BRAKE, BF_DOORS, BF_DWELL, BF_NIS, BUS_DWELL, BUS_STRIDE};
 use crate::collide::{obb_overlap, Footprints, Obb};
 use crate::demand::{self, FLAG_BRIDGE, FLAG_LINK, FLAG_TUNNEL};
 use crate::graph::{classify_turn, wrap_pi, Control, Graph, Pose, Turn, LANE_W, MAXL, NONE};
@@ -86,6 +87,8 @@ pub struct Car {
     /// last rendered pose (centre of the body)
     pub pose: Pose,
     pub posed: bool,
+    /// bus agent (index into World::buses) or NONE
+    pub bus: u32,
 }
 
 pub struct Player {
@@ -266,6 +269,14 @@ pub struct World {
     ped_boxes: Vec<(u32, [[f32; 2]; NS], u8)>,
     /// accumulated native ms per phase (tests / benchmarks; zero in wasm)
     pub prof: [f64; 8],
+    // buses (bus.rs)
+    pub bus_pats: std::collections::HashMap<u32, BusPattern>,
+    pub buses: Vec<Option<BusAgent>>,
+    bus_free: Vec<u32>,
+    pub out_buses: Vec<f32>,
+    pub out_bus_path: Vec<f32>,
+    /// buses that stopped being agents since the last output: [trip, delay]
+    pub bus_gone: Vec<f32>,
 }
 
 /// phase timer (no-op on wasm, where `Instant` is unavailable)
@@ -377,6 +388,12 @@ impl World {
             fp: Footprints::default(),
             ped_boxes: Vec::new(),
             prof: [0.0; 8],
+            bus_pats: std::collections::HashMap::new(),
+            buses: Vec::new(),
+            bus_free: Vec::new(),
+            out_buses: Vec::new(),
+            out_bus_path: Vec::new(),
+            bus_gone: Vec::new(),
         }
     }
 
@@ -441,6 +458,7 @@ impl World {
         self.lane_changes(dt);
         t.lap(&mut self.prof[4]);
         self.advance(dt);
+        self.bus_stops();
         self.advance_obstacles(dt);
         t.lap(&mut self.prof[5]);
         self.spawn();
@@ -1380,6 +1398,13 @@ impl World {
             if let Some(gap) = self.control_gap(i, dt) {
                 a = a.min(idm::accel(&p, v, v0, gap, v));
             }
+            if self.cars[i].bus != NONE {
+                if let Some(gap) = self.bus_stop_gap(i) {
+                    // IDM keeps s0 to an obstacle: aim s0 beyond the stop point to stop at it
+                    a = a.min(idm::accel(&p, v, v0, gap + p.s0, v));
+                    lim = lim.min(self.cars[i].s + gap.max(0.0) + 0.3);
+                }
+            }
             self.acc[i] = a;
             self.lim[i] = lim;
         }
@@ -1498,6 +1523,18 @@ impl World {
                     _ => {}
                 }
             }
+            // buses: curb lane before their stop, stay there near it
+            if self.cars[i].bus != NONE {
+                if let Some(d) = self.bus_stop_ahead(i) {
+                    if d < 220.0 {
+                        if lane > 0 {
+                            want = -1;
+                        } else {
+                            continue;
+                        }
+                    }
+                }
+            }
             // discretionary changes need room to complete (≈3 s) before the box
             if want == 0 && dist_end < a_box + v * 3.0 + 10.0 {
                 continue;
@@ -1605,6 +1642,11 @@ impl World {
             c.v = nv;
             c.a = a;
             c.s += ds;
+            if c.bus != NONE {
+                if let Some(b) = self.buses[c.bus as usize].as_mut() {
+                    b.sd += ds;
+                }
+            }
             let k = (-ds / 7.0).exp();
             c.blend = [c.blend[0] * k, c.blend[1] * k, c.blend[2] * k];
             // lane change progress; hurry up to finish before the junction box
@@ -1647,7 +1689,8 @@ impl World {
         }
         let l = &self.g.links[link as usize];
         let node = &self.g.nodes[l.to as usize];
-        if (node.x - dest[0]).hypot(node.y - dest[1]) < 180.0 {
+        let guided = self.cars[i].bus != NONE && self.buses[self.cars[i].bus as usize].as_ref().map_or(false, |b| b.state != BusState::OutOfService);
+        if !guided && (node.x - dest[0]).hypot(node.y - dest[1]) < 180.0 {
             // arrived: vanish only out of sight, otherwise head somewhere else
             if (node.x - self.focus.0).hypot(node.y - self.focus.1) > self.radius * 0.6 {
                 return false;
@@ -1680,6 +1723,7 @@ impl World {
         c.wait = 0.0;
         c.wait_conf = 0.0;
         c.next = NONE;
+        self.bus_resync(i);
         self.choose_next(i);
         true
     }
@@ -1687,6 +1731,9 @@ impl World {
     /// routing: weighted random choice at the node ahead with a soft pull
     /// towards the car's destination
     fn choose_next(&mut self, i: usize) {
+        if self.cars[i].bus != NONE && self.bus_guide(i) {
+            return;
+        }
         let (link, dest) = (self.cars[i].link, self.cars[i].dest);
         let l = &self.g.links[link as usize];
         let node = &self.g.nodes[l.to as usize];
@@ -1749,6 +1796,13 @@ impl World {
         let mut i = 0;
         while i < self.cars.len() {
             if self.cars[i].flags & F_DEAD != 0 && self.cars[i].flags & F_PLAYER == 0 {
+                let b = self.cars[i].bus;
+                if b != NONE {
+                    if let Some(bu) = self.buses[b as usize].take() {
+                        self.bus_gone.extend_from_slice(&[bu.trip as f32, bu.delay]);
+                    }
+                    self.bus_free.push(b);
+                }
                 self.cars.swap_remove(i);
                 self.bp.swap_remove(i);
             } else {
@@ -1892,11 +1946,325 @@ impl World {
             lc_cool: self.rng.range(0.0, 2.0),
             pose: Pose::default(),
             posed: false,
+            bus: NONE,
         });
         self.bp.push([BoxPath::NONE; 2]);
         let i = self.cars.len() - 1;
         self.choose_next(i);
         i
+    }
+
+    // ------------------------------------------------------------------ buses (bus.rs)
+
+    /// service-day seconds (4 am rollover) of the sim clock
+    #[inline]
+    fn service_time(&self) -> f64 {
+        if self.tod < 4.0 * 3600.0 { self.tod + 86400.0 } else { self.tod }
+    }
+
+    pub fn bus_pattern(&mut self, id: u32, xy: &[f64], stop_d: &[f32], stop_flag: &[u8]) {
+        self.bus_pats.insert(id, BusPattern::new(xy, stop_d, stop_flag));
+    }
+
+    /// Place bus trip `trip` (pattern `pat`) with its front at `front` along the pattern, in
+    /// the curb lane of the road link under it. Returns false if no road / no room.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bus_spawn(&mut self, trip: u32, pat: u32, len: f32, front: f32, v: f32, arr: &[f64], dep: &[f64]) -> u8 {
+        if self.buses.iter().flatten().any(|b| b.trip == trip) {
+            return 0;
+        }
+        let Some(p) = self.bus_pats.get(&pat) else { return 1 };
+        let (q, t) = p.at(front);
+        let hb = (t[1] as f32).atan2(t[0] as f32);
+        let mut near = std::mem::take(&mut self.tmp);
+        self.g.edges_near(q[0], q[1], 30.0, &mut near);
+        let mut best: Option<(f32, u32, f32)> = None;
+        for &eid in &near {
+            let e = &self.g.edges[eid as usize];
+            if !e.alive || e.class > 6 {
+                continue;
+            }
+            let (se, lat, _, he) = self.g.project_on_edge(eid, q[0], q[1]);
+            let dh = wrap_pi(hb - he);
+            let (link, sl, latl) = if dh.abs() < 0.7 {
+                (e.links[0], se, lat)
+            } else if dh.abs() > PI - 0.7 {
+                (e.links[1], e.len - se, -lat)
+            } else {
+                continue;
+            };
+            if link == NONE {
+                continue;
+            }
+            let score = latl.abs() + dh.abs().min((PI - dh.abs()).abs()) * 5.0;
+            if best.map_or(true, |b| score < b.0) {
+                best = Some((score, link, sl));
+            }
+        }
+        self.tmp = near;
+        let Some((score, link, sl)) = best else { return 2 };
+        if score > 20.0 {
+            return 3;
+        }
+        let l = &self.g.links[link as usize];
+        // near a link end (buses stop at junctions): shift it onto the link a little
+        let sl = if sl < len + 1.0 && len + 1.0 - sl < 16.0 { len + 1.0 } else if sl > l.len - 1.5 && sl - (l.len - 1.5) < 12.0 { l.len - 1.5 } else { sl };
+        if sl < len + 1.0 || sl > l.len - 1.0 {
+            return 4;
+        }
+        let lane = 0u8;
+        // room in the lane: ordinary cars in the way are taken out when away from the focus
+        // (the bus takes their place out of sight), else the bus waits for a later try
+        let far = {
+            let (x, y, _) = self.g.link_xyz(link, sl, 0.0);
+            (x - self.focus.0).hypot(y - self.focus.1) > 250.0
+        };
+        let (ld, fl) = self.neighbours(link, lane, sl, usize::MAX);
+        for x in [ld, fl].into_iter().flatten() {
+            let c = &self.cars[x];
+            let clash = (c.s - c.len - sl < 2.0 && c.s > sl - len - 2.0) || (sl - len - c.s < 2.0 && c.s - c.len < sl + 2.0);
+            if clash {
+                if far && c.bus == NONE && c.flags & F_PLAYER == 0 {
+                    self.cars[x].flags |= F_DEAD;
+                } else {
+                    return 5;
+                }
+            }
+        }
+        if self.obst_block(link, lane, sl - len - 2.0, sl + 2.0) {
+            return 5;
+        }
+        // first stop ahead of the front
+        let mut stop = 0;
+        while stop < p.stop_d.len() && p.stop_d[stop] + len * 0.5 < front - 3.0 {
+            stop += 1;
+        }
+        let vv = v.min(l.speed);
+        let i = self.spawn_car_kind(link, lane, sl, vv, idm::TRUCK, len);
+        let slot = match self.bus_free.pop() {
+            Some(k) => k,
+            None => {
+                self.buses.push(None);
+                (self.buses.len() - 1) as u32
+            }
+        };
+        let id = self.cars[i].id;
+        self.buses[slot as usize] = Some(BusAgent {
+            trip,
+            pat,
+            sd: front,
+            stop,
+            arr: arr.to_vec(),
+            dep: dep.to_vec(),
+            state: BusState::Run,
+            until: 0.0,
+            delay: 0.0,
+            len,
+            car_id: id,
+        });
+        let c = &mut self.cars[i];
+        c.bus = slot;
+        c.vf = 1.0;
+        c.color = 0;
+        c.next = NONE;
+        self.choose_next(i);
+        0
+    }
+
+    fn spawn_car_kind(&mut self, link: u32, lane: u8, s: f32, v: f32, kind: u8, len: f32) -> usize {
+        let i = self.spawn_car(link, lane, s, v, kind);
+        self.cars[i].len = len;
+        i
+    }
+
+    /// Guided routing: the outgoing link that follows the bus's pattern. False (and the
+    /// bus goes out of service) when no link does.
+    fn bus_guide(&mut self, i: usize) -> bool {
+        let b = self.cars[i].bus as usize;
+        let Some(bu) = self.buses[b].as_ref() else { return false };
+        if bu.state == BusState::OutOfService {
+            return false;
+        }
+        let Some(p) = self.bus_pats.get(&bu.pat) else { return false };
+        let link = self.cars[i].link;
+        let l = &self.g.links[link as usize];
+        let node = &self.g.nodes[l.to as usize];
+        let rem = (l.len - self.cars[i].s).max(0.0);
+        let sd0 = bu.sd + rem;
+        if sd0 > p.length() - 2.0 {
+            return false; // end of the pattern
+        }
+        let b_in = l.bearing_end;
+        let mut best: Option<(f32, u32, Turn)> = None;
+        for &o in node.outs.iter() {
+            let ol = &self.g.links[o as usize];
+            if !ol.alive || ol.len < 0.5 {
+                continue;
+            }
+            // how well does the link follow the shape ahead?
+            let mut err = 0.0f32;
+            let mut n = 0.0f32;
+            for &k in &[6.0f32, 18.0, 35.0] {
+                if k > ol.len + 2.0 && n > 0.0 {
+                    break;
+                }
+                let (x, y, _) = self.g.link_xyz(o, k.min(ol.len), 0.0);
+                let (_, d) = p.project(x, y, sd0 - 15.0, sd0 + k + 40.0);
+                err += d;
+                n += 1.0;
+            }
+            let err = err / n.max(1.0);
+            let t = if ol.edge == l.edge { Turn::U } else { classify_turn(b_in, ol.bearing_start) };
+            let pen = if t == Turn::U { 25.0 } else { 0.0 };
+            if best.map_or(true, |bb| err + pen < bb.0) {
+                best = Some((err + pen, o, t));
+            }
+        }
+        match best {
+            Some((err, o, t)) if err < 16.0 => {
+                let c = &mut self.cars[i];
+                c.next = o;
+                c.turn = t;
+                c.ngen = self.g.links[o as usize].gen;
+                true
+            }
+            _ => {
+                // the pattern leaves the road graph here: out of service from now on
+                if let Some(bu) = self.buses[b].as_mut() {
+                    bu.state = BusState::OutOfService;
+                }
+                false
+            }
+        }
+    }
+
+    /// after moving onto a new link: re-sync the progress along the pattern
+    fn bus_resync(&mut self, i: usize) {
+        let b = self.cars[i].bus;
+        if b == NONE {
+            return;
+        }
+        let (x, y, _) = self.g.link_xyz(self.cars[i].link, self.cars[i].s.max(0.0), 0.0);
+        let Some(bu) = self.buses[b as usize].as_mut() else { return };
+        let Some(p) = self.bus_pats.get(&bu.pat) else { return };
+        let (sd, d) = p.project(x, y, bu.sd - 40.0, bu.sd + 60.0);
+        if d < 25.0 {
+            bu.sd = sd;
+        }
+    }
+
+    /// distance from the bus front to its next stop point (m), if it is running to one
+    fn bus_stop_ahead(&self, i: usize) -> Option<f32> {
+        let bu = self.buses[self.cars[i].bus as usize].as_ref()?;
+        if bu.state != BusState::Run {
+            return None;
+        }
+        let p = self.bus_pats.get(&bu.pat)?;
+        let mut k = bu.stop;
+        while k < p.stop_d.len() && p.stop_flag[k] & 1 != 0 {
+            k += 1;
+        }
+        if k >= p.stop_d.len() {
+            return None;
+        }
+        Some(bu.stop_front(p, k) - bu.sd)
+    }
+
+    /// gap (m) the bus must stop within: its stop ahead, or 0 while dwelling
+    fn bus_stop_gap(&self, i: usize) -> Option<f32> {
+        let bu = self.buses[self.cars[i].bus as usize].as_ref()?;
+        match bu.state {
+            BusState::Dwell => Some(0.0),
+            BusState::Run => {
+                let d = self.bus_stop_ahead(i)?;
+                if d < 150.0 && d > -2.0 {
+                    Some(d.max(0.0))
+                } else {
+                    None
+                }
+            }
+            BusState::OutOfService => None,
+        }
+    }
+
+    /// stop arrivals / departures, end of trip
+    fn bus_stops(&mut self) {
+        if self.buses.is_empty() {
+            return;
+        }
+        let t = self.service_time();
+        for i in 0..self.cars.len() {
+            let b = self.cars[i].bus;
+            if b == NONE || self.cars[i].flags & F_DEAD != 0 {
+                continue;
+            }
+            let v = self.cars[i].v;
+            let Some(bu) = self.buses[b as usize].as_mut() else { continue };
+            let Some(p) = self.bus_pats.get(&bu.pat) else { continue };
+            match bu.state {
+                BusState::Run => {
+                    // skip virtual points and stops already passed (missed)
+                    while bu.stop < p.stop_d.len() && (p.stop_flag[bu.stop] & 1 != 0 || bu.sd > bu.stop_front(p, bu.stop) + 12.0) {
+                        bu.stop += 1;
+                    }
+                    if bu.stop >= p.stop_d.len() {
+                        bu.state = BusState::OutOfService;
+                        continue;
+                    }
+                    let d = bu.stop_front(p, bu.stop) - bu.sd;
+                    if d < 3.0 && v < 0.4 {
+                        let k = bu.stop;
+                        let (arr, dep) = (bu.arr.get(k).copied().unwrap_or(t), bu.dep.get(k).copied().unwrap_or(t));
+                        bu.delay = (t - arr) as f32;
+                        bu.until = dep.max(t + BUS_DWELL);
+                        bu.state = if k + 1 >= p.stop_d.len() { BusState::OutOfService } else { BusState::Dwell };
+                        if bu.state == BusState::OutOfService {
+                            bu.until = t + BUS_DWELL;
+                        }
+                    }
+                }
+                BusState::Dwell => {
+                    if t >= bu.until {
+                        bu.stop += 1;
+                        bu.state = BusState::Run;
+                    }
+                }
+                BusState::OutOfService => {}
+            }
+        }
+    }
+
+    /// bus render records (BUS_STRIDE floats) + body paths (rear -> front, every 2 m)
+    pub fn write_buses(&mut self, oe: f64, on: f64) {
+        self.out_buses.clear();
+        self.out_bus_path.clear();
+        for i in 0..self.cars.len() {
+            let c = &self.cars[i];
+            if c.bus == NONE || c.flags & F_DEAD != 0 {
+                continue;
+            }
+            let Some(bu) = self.buses[c.bus as usize].as_ref() else { continue };
+            let mut f = 0u32;
+            match bu.state {
+                BusState::Dwell => f |= BF_DWELL | BF_DOORS,
+                BusState::OutOfService => f |= BF_NIS,
+                _ => {}
+            }
+            if c.a < -0.8 || c.v < 0.3 {
+                f |= BF_BRAKE;
+            }
+            let p0 = (self.out_bus_path.len() / 3) as u32;
+            let len = c.len;
+            let n = ((len + 2.0) / 2.0).ceil() as usize;
+            let dt_lc = |back: f32| if c.lc_from != NO_LANE { c.lc_t - back / (c.v.max(2.0) * c.lc_dur) } else { 0.0 };
+            for k in 0..=n {
+                let back = len + 1.0 - (len + 2.0) * k as f32 / n as f32; // rear -> front
+                let (x, y, z, _) = self.car_point(i, back.max(-1.0), dt_lc(back));
+                self.out_bus_path.extend_from_slice(&[(x - oe) as f32, (y - on) as f32, z]);
+            }
+            self.out_buses.extend_from_slice(&[bu.trip as f32, bu.sd - len * 0.5, c.v, f32::from_bits(f), bu.delay, len, p0 as f32, (n + 1) as f32]);
+        }
+        let _ = BUS_STRIDE;
     }
 
     // ------------------------------------------------------------------ output
@@ -1937,6 +2305,14 @@ impl World {
         for i in 0..n {
             let c = &self.cars[i];
             if c.flags & F_DEAD != 0 {
+                continue;
+            }
+            if c.bus != NONE {
+                // drawn by the transit layer (write_buses); keep the pose for queries
+                let (pose, _) = self.car_pose(i);
+                let c = &mut self.cars[i];
+                c.pose = pose;
+                c.posed = true;
                 continue;
             }
             let (pose, speed, flags, ground) = if c.flags & F_PLAYER != 0 {
@@ -2066,6 +2442,7 @@ impl World {
             lc_cool: 0.0,
             pose,
             posed: true,
+            bus: NONE,
         });
         self.bp.push([BoxPath::NONE; 2]);
         self.player = Some(Player { x: pose.x, y: pose.y, z: pose.z, h: pose.h, p: pose.p, v: 0.0, steer: 0.0, on_road: true, edge: eid, id, placed: true, structure, bump: 0.0 });
@@ -2444,5 +2821,44 @@ mod tests {
         assert!(w.player_road().is_some());
         w.release_player();
         assert!(w.player.is_none());
+    }
+
+    #[test]
+    fn bus_stops_at_its_stop_and_keeps_schedule() {
+        let mut w = world_with_cross(0, [2, 2, 2, 2]);
+        w.max_cars = 0;
+        // pattern: south arm northbound through the junction to the north arm
+        let xy = [512.0, 330.0, 512.0, 700.0];
+        let len = 12.2;
+        // stops (centre distances): 20 m (start), 120 m (a stop on the south arm), 360 m
+        w.bus_pattern(7, &xy, &[20.0, 120.0, 360.0], &[0, 0, 0]);
+        let t0 = 30000.0;
+        w.tod = t0;
+        let arr = [t0, t0 + 20.0, t0 + 90.0];
+        let dep = [t0, t0 + 40.0, t0 + 90.0];
+        assert_eq!(w.bus_spawn(5, 7, len, 45.0, 8.0, &arr, &dep), 0, "spawned");
+        let mut dwell_seen = false;
+        let mut left_at = None;
+        for _ in 0..1200 {
+            w.step(0.1);
+            let Some(b) = w.buses.iter().flatten().next() else { eprintln!("bus gone at {}", w.tod - t0); break };
+            if ((w.tod - t0) * 10.0).round() as i64 % 20 == 0 {
+                let c = w.cars.iter().find(|c| c.id == b.car_id).unwrap();
+                eprintln!("t {:.0} sd {:.1} stop {} state {:?} v {:.1} lane {} link {} s {:.1}", w.tod - t0, b.sd, b.stop, b.state, c.v, c.lane, c.link, c.s);
+            }
+            if b.state == BusState::Dwell && b.stop == 1 {
+                dwell_seen = true;
+                let c = w.cars.iter().find(|c| c.id == b.car_id).unwrap();
+                assert_eq!(c.lane, 0, "curb lane at the stop");
+                let sf = b.stop_front(&w.bus_pats[&7], 1);
+                assert!((b.sd - sf).abs() < 3.0, "stopped at the pole: {} vs {}", b.sd, sf);
+            }
+            if dwell_seen && left_at.is_none() && b.stop >= 2 {
+                left_at = Some(w.tod);
+            }
+        }
+        assert!(dwell_seen, "the bus stopped at its stop");
+        let t = left_at.expect("left the stop");
+        assert!(t >= t0 + 40.0 - 0.2, "left before the timetable: {}", t - t0);
     }
 }

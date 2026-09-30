@@ -116,6 +116,11 @@ class RoadCtx:
             return np.zeros(0, bool)
         side = R.attrs["side"]
         c, f = self.cls, self.flags
+        sw = R.attrs.get("sw")
+        if sw is not None and sw.any():
+            # network-model tiles (tpipe.roadnet): the pipeline decides sidewalks per vertex,
+            # bridges carry their sidewalks on the deck
+            return (sw.astype(np.int64) & 3) != 0
         base = (c >= 2) & (c <= 5) & ((f & F_BRIDGE) == 0) & ((f & F_LINK) == 0)
         mid = (R.off[:-1] + R.off[1:] - 1) // 2
         g0 = B.ground(R.X[R.off[:-1]], R.Y[R.off[:-1]])
@@ -223,7 +228,7 @@ def check_connections(ctx: RoadCtx, cats: set) -> list[dict]:
                                    f"{dw:.1f} m hard step, no taper", key=("road_width_step", pair, round(x), round(y)), bearing=bearing))
         if "sidewalk_bridge_discontinuity" in cats:
             for p1, p2 in ((pa, pb), (pb, pa)):
-                if ctx.sidewalk[p1] and (ctx.flags[p2] & F_BRIDGE) and ctx.cls[p2] <= 5:
+                if ctx.sidewalk[p1] and (ctx.flags[p2] & F_BRIDGE) and ctx.cls[p2] <= 5 and not ctx.sidewalk[p2]:
                     out.append(finding("sidewalk_bridge_discontinuity", "road_to_deck", 2.0 + ctx.w[p1] / 4, x, y, z, [ctx.osm[p1], ctx.osm[p2]],
                                        f"sidewalks of {_lbl(ctx, p1)} stop where bridge {_lbl(ctx, p2)} starts (decks draw no sidewalk)",
                                        key=("sidewalk_bridge_discontinuity", pair, round(x), round(y)), bearing=bearing))
@@ -252,8 +257,10 @@ def check_connections(ctx: RoadCtx, cats: set) -> list[dict]:
                     zr = float(np.median(R.Z[others[np.isin(ctx.vp[others], ob)]]))
                     what = "the deck it joins"
                 else:
-                    zr = tz
-                    what = "the at-grade road it joins"
+                    # the joining road's own elevation at the shared node (approach embankments
+                    # carry solved elevations; for draped roads this is the terrain)
+                    zr = float(np.median(R.Z[others]))
+                    what = "the road it joins"
                 dz = zb - zr
                 if abs(dz) > DECK_STEP:
                     sub = "deck_floats" if dz > 0 else "deck_dives"
@@ -384,10 +391,11 @@ def check_overlap(ctx: RoadCtx, cats: set) -> list[dict]:
         return []
     inter = shapely.intersection(quads[i], quads[j])
     area = shapely.area(inter)
+    # filter before taking centroids: degenerate (zero-length) segments give empty intersections
+    k = area > 0.05
+    i, j, pi, pj, area, inter = i[k], j[k], pi[k], pj[k], area[k], inter[k]
     cen = shapely.centroid(inter)
     cx, cy = shapely.get_x(cen), shapely.get_y(cen)
-    k = area > 0.05
-    i, j, pi, pj, area, cx, cy = i[k], j[k], pi[k], pj[k], area[k], cx[k], cy[k]
     # allowed zones: junction boxes + every shared node (disc of the widest road there)
     zx, zy, zr = [B.junc["x"]], [B.junc["y"]], [B.junc["r"] + OVERLAP_ZONE_PAD]
     if ctx.tree is not None:

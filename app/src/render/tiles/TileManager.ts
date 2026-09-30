@@ -3,10 +3,13 @@
 import * as THREE from 'three/webgpu';
 import type { WorkerIn, WorkerOut } from '../../workers/tileWorker';
 import type { MeshBuf, TileMeshes } from '../../workers/meshing';
-import { GroundPage, GROUND_LAYERS, vertexColorMaterial } from './materials';
+import { GroundPage, GROUND_LAYERS } from './materials';
 import { roadMaterial } from './roadMaterial';
+import { groundMaterial } from './groundMaterial';
+import { cutFloor, type CutBuf } from '../../workers/ground';
 import type { StreetBuf } from '../../workers/street';
 import { HousePools } from './houses';
+import { facadeMaterial } from './facadeMaterial';
 import type { FrameContext } from '../../engine/types';
 import { useApp } from '../../state/store';
 
@@ -37,6 +40,8 @@ export interface Tile {
   group: THREE.Group | null;
   terrain: THREE.Mesh | null;
   buildings: THREE.Mesh | null;
+  /** building footprints (level 0) for camera collision / label occlusion */
+  collide?: import('../../workers/collide').FootprintBuf | null;
   /** roads + sidewalks + rail in one mesh; rail = indices from `railStart` */
   roads: THREE.Mesh | null;
   railStart: number;
@@ -50,6 +55,12 @@ export interface Tile {
   housesShown: boolean;
   /** street furniture placements (level 0), consumed by StreetLayer */
   street: StreetBuf | null;
+  /** far-field canopy clumps (level 1), consumed by the vegetation layer */
+  canopy: Float32Array | null;
+  /** open cuts / portal approaches (level 0), for heightAt */
+  cuts?: CutBuf | null;
+  /** street props / parking lots (level 0), consumed by PropsLayer */
+  props: import('../../workers/props').PropsBuf | null;
   page: GroundPage | null;
   layer: number;
   bytes: number;
@@ -74,7 +85,7 @@ function attrBytes(m: MeshBuf): number {
 
 function meshBytes(r: TileMeshes): number {
   let b = 0;
-  for (const m of [r.terrain, r.buildings, r.roads]) {
+  for (const m of [r.vground ?? r.terrain, r.buildings, r.roads]) {
     if (m) b += m.position.byteLength + m.normal.byteLength + m.index.byteLength + (m.color?.byteLength ?? 0) + attrBytes(m);
   }
   return b;
@@ -123,7 +134,7 @@ export class TileManager {
   private prefetchInFlight = 0;
   private vel = { e: 0, n: 0, h: 0, lastE: NaN, lastN: NaN, lastH: NaN };
   private pfList: { t: Tile; d: number }[] = [];
-  readonly buildingMat = vertexColorMaterial('buildings', { emissiveWindows: true });
+  readonly buildingMat = facadeMaterial();
   /** one street material for roads, sidewalks and rail (shared shader) */
   readonly roadMat = roadMaterial('roads');
   readonly railMat = this.roadMat;
@@ -165,7 +176,7 @@ export class TileManager {
         const t: Tile = {
           key: key(l, tx, ty), L: l, tx, ty, S, state: 'none', jobId: 0, group: null, terrain: null,
           buildings: null, roads: null, railStart: 0, streetMask: 3, heights: null, grid: 0, minH: 0, maxH: 120,
-          houses: null, housesShown: false, street: null, page: null, layer: -1, bytes: 0, lastUsed: 0, drawn: false,
+          houses: null, housesShown: false, street: null, canopy: null, props: null, page: null, layer: -1, bytes: 0, lastUsed: 0, drawn: false,
           requestedAt: 0, priority: 0, kids: null, counts: null, retryAt: 0, refined: false,
         };
         this.tiles.set(t.key, t);
@@ -218,6 +229,11 @@ export class TileManager {
       if (!S) continue;
       const t = this.tiles.get(key(L, Math.floor(e / S), Math.floor(n / S)));
       if (t && t.heights) {
+        if (t.cuts) {
+          // open cuts / portal approaches: the ground there is the cut floor (rail level)
+          const f = cutFloor(t.cuts, e - t.tx * S, n - t.ty * S);
+          if (!Number.isNaN(f)) return f;
+        }
         const G = t.grid, c = S / (G - 1), h = t.heights;
         let fx = (e - t.tx * S) / c, fy = (n - t.ty * S) / c;
         fx = Math.min(Math.max(fx, 0), G - 1.0001); fy = Math.min(Math.max(fy, 0), G - 1.0001);
@@ -306,6 +322,7 @@ export class TileManager {
     this.prefetch(E, N, H);
     this.consumeResults();
     this.evict();
+    this.houses.updateNear(E, N, H);
     this.houses.flush();
     this.houses.group.updateMatrixWorld();
   }
@@ -543,21 +560,28 @@ export class TileManager {
       if (m) bytes += m.position.byteLength + m.normal.byteLength + m.index.byteLength + (m.color?.byteLength ?? 0) + attrBytes(m);
     };
 
-    // terrain
-    let page = this.pages.find((p) => p.free.length > 0);
-    if (!page) page = this.addPage();
-    t.page = page;
-    t.layer = page.alloc(r.ground);
-    const terrain = new THREE.Mesh(this.geometry(r.terrain, sphere), page.material);
-    terrain.userData.groundLayer = t.layer;
-    terrain.userData.tileSize = S;
+    // terrain: level-0 vector ground (workers/ground.ts) when the tile has it,
+    // else the height grid shaded from the land-cover raster page
+    let terrain: THREE.Mesh;
+    if (r.vground) {
+      terrain = new THREE.Mesh(this.geometry(r.vground, sphere), groundMaterial());
+      count(r.vground);
+    } else {
+      let page = this.pages.find((p) => p.free.length > 0);
+      if (!page) page = this.addPage();
+      t.page = page;
+      t.layer = page.alloc(r.ground);
+      terrain = new THREE.Mesh(this.geometry(r.terrain, sphere), page.material);
+      terrain.userData.groundLayer = t.layer;
+      terrain.userData.tileSize = S;
+      count(r.terrain);
+      bytes += 65536;
+    }
     terrain.receiveShadow = true;
     terrain.name = 'terrain';
     terrain.matrixAutoUpdate = false;
     g.add(terrain);
     t.terrain = terrain;
-    count(r.terrain);
-    bytes += 65536;
 
     const add = (m: MeshBuf | null, mat: THREE.Material, name: string, cast: boolean) => {
       if (!m) return null;
@@ -578,7 +602,15 @@ export class TileManager {
     t.heights = r.heights;
     t.grid = r.grid;
     t.houses = r.houses;
+    t.collide = r.collide ?? null;
+    if (r.collide) bytes += r.collide.xy.byteLength + r.collide.off.byteLength * 3;
     t.street = r.street;
+    t.canopy = r.canopy;
+    t.cuts = r.cuts ?? null;
+    t.props = r.props;
+    if (r.props) bytes += r.props.items.byteLength + r.props.segs.byteLength;
+    if (r.canopy) bytes += r.canopy.byteLength;
+    if (r.street) bytes += r.street.veg.byteLength;
     t.counts = r.counts;
     if (r.houses) bytes += r.houses.count * 76;
     t.bytes = bytes;
@@ -601,7 +633,7 @@ export class TileManager {
     if (t.page && t.layer >= 0) t.page.release(t.layer);
     this.bytes -= t.bytes;
     Object.assign(t, {
-      group: null, terrain: null, buildings: null, roads: null, railStart: 0, streetMask: 3, heights: null, houses: null, street: null,
+      group: null, terrain: null, buildings: null, collide: null, roads: null, railStart: 0, streetMask: 3, heights: null, houses: null, street: null, canopy: null, cuts: null, props: null,
       page: null, layer: -1, bytes: 0, state: 'none', counts: null,
     });
     this.readyCount--;

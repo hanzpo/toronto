@@ -1,0 +1,505 @@
+{
+ "version": 1,
+ "about": "Tunnel portals and open cuts. The cut geometry is derived from the rail graph (tpipe.rail_graph: where track the trains run on is below the ground but above tunnel depth, docs/SPEC.md 'Portals'); this list names them, documents references and can switch one off with \"skip\": true (radius m, default 150).",
+ "portals": [
+  {
+   "id": "l1-rosedale-south",
+   "name": "Line 1 portal south of Rosedale (Rosedale Valley)",
+   "line": "TTC Line 1",
+   "lat": 43.67264,
+   "lon": -79.38612,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_1_Yonge–University",
+    "https://en.wikipedia.org/wiki/Rosedale_station"
+   ],
+   "notes": "tunnel from Bloor–Yonge emerges into the open cut through Rosedale"
+  },
+  {
+   "id": "l1-rosedale-north",
+   "name": "Line 1 Rosedale–Summerhill portal (under the CPR)",
+   "line": "TTC Line 1",
+   "lat": 43.6796,
+   "lon": -79.38968,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_1_Yonge–University",
+    "https://en.wikipedia.org/wiki/Summerhill_station"
+   ]
+  },
+  {
+   "id": "l1-stclair-davisville-s",
+   "name": "Line 1 open cut, St Clair portal",
+   "line": "TTC Line 1",
+   "lat": 43.69221,
+   "lon": -79.3955,
+   "kind": "open_cut",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_1_Yonge–University",
+    "https://en.wikipedia.org/wiki/Davisville_station"
+   ],
+   "notes": "open cut St Clair → Davisville (1954 Yonge subway)"
+  },
+  {
+   "id": "l1-stclair-davisville-n",
+   "name": "Line 1 open cut, Davisville/Chaplin portal",
+   "line": "TTC Line 1",
+   "lat": 43.70396,
+   "lon": -79.39838,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_1_Yonge–University",
+    "https://en.wikipedia.org/wiki/Davisville_station"
+   ],
+   "notes": "tracks descend north of Davisville Yard towards Eglinton"
+  },
+  {
+   "id": "l1-allen-eglinton",
+   "name": "Line 1 Allen Rd portal north of Cedarvale (Eglinton West)",
+   "line": "TTC Line 1",
+   "lat": 43.70042,
+   "lon": -79.43655,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_1_Yonge–University",
+    "https://en.wikipedia.org/wiki/Cedarvale_station"
+   ],
+   "notes": "Spadina line enters the William R. Allen Road median"
+  },
+  {
+   "id": "l1-allen-lawrence-s",
+   "name": "Line 1 Lawrence West underpass (south)",
+   "line": "TTC Line 1",
+   "lat": 43.71451,
+   "lon": -79.44369,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_1_Yonge–University",
+    "https://en.wikipedia.org/wiki/Lawrence_West_station"
+   ]
+  },
+  {
+   "id": "l1-allen-lawrence-n",
+   "name": "Line 1 Lawrence West underpass (north)",
+   "line": "TTC Line 1",
+   "lat": 43.71595,
+   "lon": -79.44424,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_1_Yonge–University",
+    "https://en.wikipedia.org/wiki/Lawrence_West_station"
+   ]
+  },
+  {
+   "id": "l1-wilson",
+   "name": "Line 1 portal north of Wilson (Wilson Yard / Downsview Park)",
+   "line": "TTC Line 1",
+   "lat": 43.73683,
+   "lon": -79.45116,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_1_Yonge–University",
+    "https://en.wikipedia.org/wiki/Wilson_station"
+   ]
+  },
+  {
+   "id": "l1-sheppard-west",
+   "name": "Line 1 portal south of Sheppard West",
+   "line": "TTC Line 1",
+   "lat": 43.74399,
+   "lon": -79.4587,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_1_Yonge–University",
+    "https://en.wikipedia.org/wiki/Sheppard_West_station"
+   ]
+  },
+  {
+   "id": "l2-castle-frank",
+   "name": "Line 2 portal, west end of the Prince Edward Viaduct",
+   "line": "TTC Line 2",
+   "lat": 43.67321,
+   "lon": -79.36963,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/Prince_Edward_Viaduct"
+   ],
+   "notes": "lower deck of the Bloor Viaduct over the Don Valley"
+  },
+  {
+   "id": "l2-castle-frank-w",
+   "name": "Line 2 Castle Frank cut (Rosedale Valley)",
+   "line": "TTC Line 2",
+   "lat": 43.67236,
+   "lon": -79.37157,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/Castle_Frank_station"
+   ]
+  },
+  {
+   "id": "l2-broadview",
+   "name": "Line 2 portal, east end of the Prince Edward Viaduct",
+   "line": "TTC Line 2",
+   "lat": 43.6758,
+   "lon": -79.36105,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/Prince_Edward_Viaduct"
+   ]
+  },
+  {
+   "id": "l2-keele",
+   "name": "Line 2 Keele–Dundas West portal",
+   "line": "TTC Line 2",
+   "lat": 43.65522,
+   "lon": -79.46119,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/Keele_station"
+   ]
+  },
+  {
+   "id": "l2-dundas-west",
+   "name": "Line 2 portal east of Keele",
+   "line": "TTC Line 2",
+   "lat": 43.65663,
+   "lon": -79.45472,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/Dundas_West_station"
+   ]
+  },
+  {
+   "id": "l2-high-park",
+   "name": "Line 2 High Park open section",
+   "line": "TTC Line 2",
+   "lat": 43.65352,
+   "lon": -79.46852,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/High_Park_station"
+   ]
+  },
+  {
+   "id": "l2-runnymede",
+   "name": "Line 2 portal east of Runnymede",
+   "line": "TTC Line 2",
+   "lat": 43.65256,
+   "lon": -79.47236,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/Runnymede_station"
+   ]
+  },
+  {
+   "id": "l2-old-mill-e",
+   "name": "Line 2 portal, Jane → Old Mill (Humber viaduct east)",
+   "line": "TTC Line 2",
+   "lat": 43.64858,
+   "lon": -79.49088,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/Old_Mill_station"
+   ],
+   "notes": "Old Mill station and the Humber River bridge are at grade"
+  },
+  {
+   "id": "l2-old-mill-w",
+   "name": "Line 2 portal west of Old Mill",
+   "line": "TTC Line 2",
+   "lat": 43.64985,
+   "lon": -79.4944,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/Old_Mill_station"
+   ]
+  },
+  {
+   "id": "l2-royal-york",
+   "name": "Line 2 portal west of Royal York",
+   "line": "TTC Line 2",
+   "lat": 43.64737,
+   "lon": -79.51568,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/Royal_York_station"
+   ]
+  },
+  {
+   "id": "l2-islington-e",
+   "name": "Line 2 portal east of Islington",
+   "line": "TTC Line 2",
+   "lat": 43.64628,
+   "lon": -79.52049,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/Islington_station"
+   ]
+  },
+  {
+   "id": "l2-islington-kipling",
+   "name": "Line 2 portal west of Islington (surface run to Kipling)",
+   "line": "TTC Line 2",
+   "lat": 43.64488,
+   "lon": -79.52672,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/Kipling_station"
+   ],
+   "notes": "Islington → Kipling runs in an open cut beside the CP Galt subdivision"
+  },
+  {
+   "id": "l2-victoria-park",
+   "name": "Line 2 portal east of Victoria Park (surface to Warden)",
+   "line": "TTC Line 2",
+   "lat": 43.69364,
+   "lon": -79.29153,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/Victoria_Park_station_(Toronto)"
+   ]
+  },
+  {
+   "id": "l2-warden-s",
+   "name": "Line 2 Warden portal (south)",
+   "line": "TTC Line 2",
+   "lat": 43.70837,
+   "lon": -79.27953,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/Warden_station"
+   ]
+  },
+  {
+   "id": "l2-warden-n",
+   "name": "Line 2 portal north of Warden (towards Kennedy)",
+   "line": "TTC Line 2",
+   "lat": 43.71523,
+   "lon": -79.27839,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_2_Bloor–Danforth",
+    "https://en.wikipedia.org/wiki/Warden_station"
+   ]
+  },
+  {
+   "id": "l5-keelesdale",
+   "name": "Line 5 Keelesdale portal (Black Creek)",
+   "line": "TTC Line 5",
+   "lat": 43.68915,
+   "lon": -79.4795,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_5_Eglinton",
+    "https://en.wikipedia.org/wiki/Keelesdale_station"
+   ],
+   "notes": "Line 5 crosses the Black Creek valley at grade between Keelesdale and Mount Dennis"
+  },
+  {
+   "id": "l5-mount-dennis-e",
+   "name": "Line 5 portal east of Mount Dennis",
+   "line": "TTC Line 5",
+   "lat": 43.688,
+   "lon": -79.486,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_5_Eglinton",
+    "https://en.wikipedia.org/wiki/Mount_Dennis_station"
+   ]
+  },
+  {
+   "id": "l5-brentcliffe",
+   "name": "Line 5 east portal at Brentcliffe (Leslie)",
+   "line": "TTC Line 5",
+   "lat": 43.7154,
+   "lon": -79.35582,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_5_Eglinton",
+    "https://en.wikipedia.org/wiki/Leslie_station_(Line_5_Eglinton)"
+   ],
+   "notes": "surface section Brentcliffe → Sunnybrook Park → Don River bridge"
+  },
+  {
+   "id": "l5-science-centre-w",
+   "name": "Line 5 Science Centre tunnel (west portal)",
+   "line": "TTC Line 5",
+   "lat": 43.71987,
+   "lon": -79.34081,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_5_Eglinton",
+    "https://en.wikipedia.org/wiki/Science_Centre_station"
+   ]
+  },
+  {
+   "id": "l5-science-centre-e",
+   "name": "Line 5 Science Centre tunnel (east portal)",
+   "line": "TTC Line 5",
+   "lat": 43.72132,
+   "lon": -79.33631,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_5_Eglinton",
+    "https://en.wikipedia.org/wiki/Science_Centre_station"
+   ]
+  },
+  {
+   "id": "l5-kennedy",
+   "name": "Line 5 portal west of Kennedy (Ionview)",
+   "line": "TTC Line 5",
+   "lat": 43.73224,
+   "lon": -79.26801,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_5_Eglinton",
+    "https://en.wikipedia.org/wiki/Kennedy_station_(Toronto)"
+   ]
+  },
+  {
+   "id": "l6-humber",
+   "name": "Line 6 Humber College portal",
+   "line": "TTC Line 6",
+   "lat": 43.7302,
+   "lon": -79.60165,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_6_Finch_West",
+    "https://en.wikipedia.org/wiki/Humber_College_station"
+   ]
+  },
+  {
+   "id": "l6-westmore",
+   "name": "Line 6 underpass near Westmore",
+   "line": "TTC Line 6",
+   "lat": 43.73407,
+   "lon": -79.60316,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_6_Finch_West"
+   ]
+  },
+  {
+   "id": "l6-finch-west",
+   "name": "Line 6 portal east of Finch West",
+   "line": "TTC Line 6",
+   "lat": 43.76342,
+   "lon": -79.49124,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Line_6_Finch_West",
+    "https://en.wikipedia.org/wiki/Finch_West_station"
+   ]
+  },
+  {
+   "id": "sc-queens-quay",
+   "name": "Queens Quay streetcar tunnel portal (Bay St)",
+   "line": "TTC 509/510",
+   "lat": 43.64158,
+   "lon": -79.37707,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Harbourfront_LRT",
+    "https://transit.toronto.on.ca/streetcar/4116.shtml"
+   ],
+   "notes": "509 Harbourfront / 510 Spadina ramp into the Union loop"
+  },
+  {
+   "id": "sc-spadina",
+   "name": "Spadina streetcar tunnel portal (Spadina station loop)",
+   "line": "TTC 510",
+   "lat": 43.66611,
+   "lon": -79.40342,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Spadina_station",
+    "https://transit.toronto.on.ca/streetcar/4108.shtml"
+   ]
+  },
+  {
+   "id": "sc-st-clair-west",
+   "name": "St Clair West streetcar ramp",
+   "line": "TTC 512",
+   "lat": 43.6842,
+   "lon": -79.4156,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/St._Clair_West_station"
+   ]
+  },
+  {
+   "id": "sc-humber-loop",
+   "name": "Humber Loop streetcar underpass",
+   "line": "TTC 501",
+   "lat": 43.62984,
+   "lon": -79.4781,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Humber_Loop"
+   ]
+  },
+  {
+   "id": "go-weston",
+   "name": "Weston tunnel (UP Express / GO Kitchener)",
+   "line": "UP Express, GO Kitchener",
+   "lat": 43.70385,
+   "lon": -79.5205,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Weston_GO_Station",
+    "https://en.wikipedia.org/wiki/Union_Pearson_Express"
+   ],
+   "notes": "covered trench through Weston built for UP Express (2015)"
+  },
+  {
+   "id": "go-west-toronto",
+   "name": "West Toronto Diamond grade separation",
+   "line": "GO Kitchener, UP Express",
+   "lat": 43.668,
+   "lon": -79.4608,
+   "kind": "open_cut",
+   "refs": [
+    "https://en.wikipedia.org/wiki/West_Toronto_Railpath",
+    "https://www.metrolinx.com/en/projects-and-programs/georgetown-south"
+   ],
+   "notes": "Kitchener line dips under the CP North Toronto subdivision"
+  },
+  {
+   "id": "go-agincourt",
+   "name": "Sheppard Ave grade separation (GO Stouffville)",
+   "line": "GO Stouffville",
+   "lat": 43.77598,
+   "lon": -79.27962,
+   "kind": "open_cut",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Agincourt_GO_Station"
+   ]
+  },
+  {
+   "id": "go-hamilton-hunter",
+   "name": "Hunter St tunnel, Hamilton (CN Grimsby sub)",
+   "line": "GO Lakeshore West",
+   "lat": 43.255,
+   "lon": -79.877,
+   "kind": "portal",
+   "refs": [
+    "https://en.wikipedia.org/wiki/Hamilton_GO_Centre"
+   ]
+  }
+ ]
+}

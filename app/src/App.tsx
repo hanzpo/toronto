@@ -22,6 +22,7 @@ function loadLayerModules() {
     labels: import('./render/LabelsLayer'),
     landmarks: import('./layers/LandmarksLayer'),
     street: import('./layers/StreetLayer'),
+    props: import('./layers/PropsLayer'),
     transit: import('./layers/TransitLayer'),
     interact: import('./interact/InteractLayer'),
     stations: import('./layers/StationsLayer'),
@@ -61,6 +62,7 @@ export default function App() {
         await engine.addLayer(new (await mods.labels).LabelsLayer());
         await yieldTask();
         await engine.addLayer(new (await mods.street).StreetLayer());
+        await engine.addLayer(new (await mods.props).PropsLayer());
         const transit = new (await mods.transit).TransitLayer(engine.dataRoot);
         await engine.addLayer(transit);
         Object.assign(window as object, { __transit: transit });

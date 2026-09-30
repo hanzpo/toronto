@@ -25,6 +25,7 @@ from .transit_gtfs import PROFILES, Feed, parse_times, pick_dates, service_calen
 from .transit_rail import RailNet, densify_xy
 from . import rail_graph
 from .rail_routes import Router, consist_len
+from .bus_roads import BusRouter, RoadNet
 from .transit_sources import SOURCES
 
 OUTDIR = geo.OUT / "transit"
@@ -187,9 +188,11 @@ def cut_line(xy: np.ndarray, cum: np.ndarray, d0: float, d1: float) -> np.ndarra
 
 # ----------------------------------------------------------------------------
 class Agency:
-    def __init__(self, key: str, rail: RailNet | None, router: Router | None = None) -> None:
+    def __init__(self, key: str, rail: RailNet | None, router: Router | None = None, bus_router: BusRouter | None = None) -> None:
         self.key = key
         self.router = router
+        self.bus_router = bus_router
+        self.bus_matched = [0, 0]
         self.route_stats: list = []
         self.src = SOURCES[key]
         self.feed = Feed(GTFS / f"{key}.zip")
@@ -367,6 +370,18 @@ class Agency:
             p = self._make_rail_pattern(rid, direc, head, mode, sidx, i0, i1, dist, d_lo, d_hi, virt_lo, virt_hi, part, cache)
             if p is not None:
                 return p
+        if mode == "bus" and self.bus_router is not None:
+            # follow the road graph in the curb lane (bus_roads.py)
+            sdp = np.clip(np.asarray(dist[i0 : i1 + 1], float) - d_lo, 0.0, d_hi - d_lo)
+            rkey = ("road", np.round(part, 0).tobytes(), np.round(sdp, 0).tobytes())
+            rg = cache.get(rkey)
+            if rg is None:
+                rg = self.bus_router.route(np.asarray(part, float)[:, :2], sdp, f"{self.key}:{self.routes[rid]['short']}:{head}")
+                cache[rkey] = rg if rg is not None else False
+            self.bus_matched[0] += 1
+            if rg is not False and rg is not None and len(rg) >= 2:
+                part = rg
+                self.bus_matched[1] += 1
         gkey = (np.round(part, 0).tobytes(), mode)
         g = cache.get(gkey)
         if g is None:
@@ -679,6 +694,7 @@ class Agency:
         del arrays["tp_dep"]
         route_meta = [self.routes[r] for r in routes]
         header = dict(
+            laneShapes=bool(kind == "bus" and self.bus_router is not None),
             version=1, agency=self.key, profile=prof, date=date.isoformat(), kind=kind,
             modes=MODES, routes=route_meta,
             headsigns=list(heads), stopIds=[s[0] for s in stop_list], stopNames=[s[1] for s in stop_list],
@@ -688,6 +704,8 @@ class Agency:
         header["maxDuration"] = int(durs.max()) if len(durs) else 0
         if kind == "rail":
             self._rail_arrays(arrays, recs, pats, header)
+        else:
+            arrays["trip_next"] = self._trip_next(recs)
             tripnames = []
             for r in recs:
                 tr = self.trips[r[0].split("#")[0]]
@@ -723,8 +741,12 @@ class Agency:
         arrays["pat_rstart"] = np.array(r_start, dtype=np.float32)
         arrays["pat_redge_off"] = np.array(r_off, dtype=np.uint32)
         arrays["pat_redge"] = np.array(r_edge, dtype=np.uint32)
-        # vehicle blocks: next trip of the same block (same vehicle) starting at the stop
-        # where this one ends, within 90 min
+        arrays["trip_next"] = self._trip_next(recs)
+        header["railNetwork"] = getattr(self.router, "net_hash", "")
+
+    def _trip_next(self, recs: list) -> np.ndarray:
+        """Next trip (index in `recs`) of the same GTFS vehicle block that starts at the stop
+        where this one ends, within 90 min; -1 if none."""
         blk: dict = {}
         for i, r in enumerate(recs):
             b = self.trips[r[0].split("#")[0]][7]
@@ -744,8 +766,7 @@ class Agency:
                         or float(np.hypot(*(self.stop_xy[sa] - self.stop_xy[sc]))) < 250.0))
                     if same:
                         nxt[a] = c
-        arrays["trip_next"] = nxt
-        header["railNetwork"] = getattr(self.router, "net_hash", "")
+        return nxt
 
     def stations(self) -> list[dict]:
         """Rail stations summary (grouped by parent station or name)."""
@@ -774,6 +795,12 @@ class Agency:
         return out
 
 
+def bus_roads_gaps_path():
+    from .bus_roads import GAPS
+
+    return GAPS
+
+
 def main(argv: list[str]) -> None:
     keys = [a for a in argv if not a.startswith("-")] or list(SOURCES)
     if "--download" in argv:
@@ -783,6 +810,11 @@ def main(argv: list[str]) -> None:
     t0 = time.time()
     rail = RailNet()
     print(f"rail network: {len(rail.kind)} ways ({time.time()-t0:.1f}s)")
+    bus_router = None
+    if "--no-bus-roads" not in argv:
+        rn = RoadNet()
+        bus_router = BusRouter(rn)
+        print(f"road net for buses: {len(rn.frm)} edges ({time.time()-t0:.0f}s)")
     router = None
     if any(k in RAIL_AGENCIES for k in keys):
         g = rail_graph.load()
@@ -800,9 +832,11 @@ def main(argv: list[str]) -> None:
     stations = {s["id"]: s for s in old.get("stations", [])}
     for k in keys:
         print(f"== {k}")
-        ag = Agency(k, rail, router if k in RAIL_AGENCIES else None)
+        ag = Agency(k, rail, router if k in RAIL_AGENCIES else None, bus_router)
         ag.load()
         ag.build()
+        if ag.bus_matched[0]:
+            print(f"  [{k}] bus shapes on roads: {ag.bus_matched[1]}/{ag.bus_matched[0]} patterns")
         if ag.route_stats:
             bad = [r for r in ag.route_stats if not r[2]]
             print(f"  [{k}] rail routes: {len(ag.route_stats)}, broken {len(bad)} {sorted({(b[0], b[3]) for b in bad})[:20]}")
@@ -830,6 +864,9 @@ def main(argv: list[str]) -> None:
         stations=sorted(stations.values(), key=lambda s: s["id"]),
     )
     idx_path.write_text(json.dumps(index, separators=(",", ":")))
+    if bus_router is not None:
+        bus_router.write_gaps()
+        print(f"bus road gaps (missing roads): {len(bus_router.gaps)} -> {bus_roads_gaps_path()}")
     print(f"done in {time.time()-t0:.0f}s")
 
 

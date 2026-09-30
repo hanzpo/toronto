@@ -2,6 +2,7 @@
 // mode bar, toast and the passenger window frame.
 import { useInteract, type OperateTelemetry } from '../../interact/state';
 import { RouteBadge } from './InfoPanels';
+import { Icon } from '../icons';
 import { getEngine } from '../../engine/instance';
 import { MODE_LABEL, getInteract, kmh, useTick, shortStop, cleanHeadsign } from './common';
 
@@ -86,18 +87,18 @@ function OperateHud({ op }: { op: OperateTelemetry }) {
     <div className="ophud">
       <div className="op-top panel">
         <RouteBadge short={op.route} color={op.routeColor} text={op.routeText} big />
-        <div className="op-title"><small>{MODE_LABEL[op.mode]} · driving</small><b>→ {cleanHeadsign(op.headsign)}</b></div>
+        <div className="op-title"><small>{MODE_LABEL[op.mode]} · driving</small><b><span className="to">to</span> {cleanHeadsign(op.headsign)}</b></div>
         <div className={`op-sig ${op.aspect}`} title="Block signal">
           <i className="r" /><i className="y" /><i className="g" />
         </div>
         <div className="op-ahead"><small>Train ahead</small><b>{op.trainAhead === null ? 'clear' : op.trainAhead > 1000 ? `${(op.trainAhead / 1000).toFixed(1)} km` : `${Math.max(0, Math.round(op.trainAhead))} m`}</b></div>
         <div className={`op-dev ${devCls}`}><small>Schedule</small><b>{devLabel}</b></div>
-        <div className="op-views">
+        <div className="seg op-views">
           {(['cab', 'chase', 'ride'] as const).map((v, i) => (
-            <button key={v} className={useInteract.getState().view === v ? 'on' : ''} onClick={() => ia?.setView(v)}>{i + 1} {v === 'ride' ? 'cabin' : v}</button>
+            <button key={v} className={useInteract.getState().view === v ? 'on' : ''} onClick={() => ia?.setView(v)} title={`View ${i + 1}`}>{v === 'ride' ? 'Cabin' : v === 'cab' ? 'Cab' : 'Chase'}</button>
           ))}
         </div>
-        <button className="op-exit" onClick={() => ia?.exit()}>Release · Esc</button>
+        <button className="op-exit" onClick={() => ia?.exit()}><Icon.exit />Release<kbd>Esc</kbd></button>
       </div>
 
       <div className="op-desk">
@@ -122,7 +123,7 @@ function OperateHud({ op }: { op: OperateTelemetry }) {
           </div>
           {op.boarding && (
             <div className="boarding">
-              <span>▼ {op.boarding.off} off</span><span>▲ {op.boarding.on}/{op.boarding.target} on</span>
+              <span>{op.boarding.off} off</span><span>{op.boarding.on}/{op.boarding.target} on</span>
               <em>{op.boarding.done ? 'Boarding complete' : 'Boarding…'}</em>
             </div>
           )}
@@ -137,10 +138,15 @@ function OperateHud({ op }: { op: OperateTelemetry }) {
         </div>
       </div>
       <div className="op-keys">
-        <kbd>W</kbd>/<kbd>S</kbd> notch · <kbd>X</kbd> emergency · <kbd>O</kbd>/<kbd>C</kbd> doors (<kbd>Space</kbd>) · <kbd>R</kbd> reverser · <kbd>B</kbd> horn · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> views · drag to look · <kbd>Esc</kbd> release
+        <Keys k={['W', 'S']} t="Notch" /><Keys k={['X']} t="Emergency" /><Keys k={['O', 'C']} t="Doors" /><Keys k={['R']} t="Reverser" /><Keys k={['B']} t="Horn" /><Keys k={['1', '2', '3']} t="Views" /><Keys k={['Drag']} t="Look" />
       </div>
     </div>
   );
+}
+
+/** one key-hint group: keycaps + what they do */
+function Keys({ k, t }: { k: string[]; t: string }) {
+  return <span className="kg">{k.map((x) => <kbd key={x}>{x}</kbd>)}<span>{t}</span></span>;
 }
 
 function fmtDev(s: number) {
@@ -159,16 +165,16 @@ function RideHud() {
       <RouteBadge short={ride.route} color={ride.routeColor} text={ride.routeText} big />
       <div className="op-title">
         <small>{mode === 'ride' ? 'Riding' : mode === 'cab' ? 'Cab view' : 'Following'} · {kmh(ride.speed)} km/h</small>
-        <b>→ {cleanHeadsign(ride.headsign)}</b>
+        <b><span className="to">to</span> {cleanHeadsign(ride.headsign)}</b>
       </div>
       <div className="ride-next"><small>{ride.dwelling ? 'Now at' : 'Next'}</small><b>{shortStop(ride.nextStop)}</b></div>
-      <div className="op-views">
+      <div className="seg op-views">
         {(['cab', 'chase', 'ride'] as const).map((v, i) => (
-          <button key={v} className={view === v ? 'on' : ''} onClick={() => ia?.setView(v)}>{i + 1} {v === 'ride' ? 'window' : v}</button>
+          <button key={v} className={view === v ? 'on' : ''} onClick={() => ia?.setView(v)} title={`View ${i + 1}`}>{v === 'ride' ? 'Window' : v === 'cab' ? 'Cab' : 'Chase'}</button>
         ))}
       </div>
-      <button className="op-take" onClick={() => ia?.operate(ride.trip)} title="T">Take control</button>
-      <button className="op-exit" onClick={() => ia?.exit()}>Exit · Esc</button>
+      <button className="op-take" onClick={() => ia?.operate(ride.trip)} title="Take control (T)"><Icon.wheel />Drive</button>
+      <button className="op-exit" onClick={() => ia?.exit()}><Icon.exit />Exit<kbd>Esc</kbd></button>
       {walk?.prompt && <div className="prompt inline"><kbd>E</kbd> {walk.prompt.replace(/^Press E to /, '')}</div>}
     </div>
   );
@@ -184,7 +190,7 @@ function WalkHud() {
       <div className="walkhud">
         {walk.prompt && <div className="prompt"><kbd>E</kbd>{walk.prompt.replace(/^Press E to /, '')}</div>}
         {walk.prompt2 && <div className="prompt dim"><kbd>F</kbd>{walk.prompt2.replace(/^Press F to /, '')}</div>}
-        <div className="op-keys"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> walk · <kbd>Shift</kbd> run · drag to look · wheel zoom · <kbd>Esc</kbd> exit</div>
+        <div className="op-keys"><Keys k={['W', 'A', 'S', 'D']} t="Walk" /><Keys k={['Shift']} t="Run" /><Keys k={['Drag']} t="Look" /><Keys k={['Scroll']} t="Zoom" /></div>
       </div>
       {walk.nearStop && (
         <div className="nearstop panel">
@@ -197,7 +203,7 @@ function WalkHud() {
           </ul>
         </div>
       )}
-      <button className="walk-exit panel" onClick={() => ia?.exit()}>Exit walk · Esc</button>
+      <button className="walk-exit panel" onClick={() => ia?.exit()}><Icon.exit />Exit walk<kbd>Esc</kbd></button>
     </>
   );
 }
@@ -212,9 +218,9 @@ function DriveHud() {
       <div className="ridehud panel">
         <div className="drive-speed"><b>{p ? kmh(Math.abs(p.speed)) : 0}</b><small>km/h</small></div>
         <div className="op-title"><small>Driving{p && !p.onRoad ? ' · off road' : ''}</small><b>{p?.roadName ?? '—'}</b></div>
-        <button className="op-exit" onClick={() => ia?.exit()}>Exit car · Esc</button>
+        <button className="op-exit" onClick={() => ia?.exit()}><Icon.exit />Exit car<kbd>Esc</kbd></button>
       </div>
-      <div className="walkhud"><div className="op-keys"><kbd>W</kbd>/<kbd>S</kbd> throttle · brake · <kbd>A</kbd>/<kbd>D</kbd> steer · <kbd>Space</kbd> handbrake · wheel zoom · <kbd>Esc</kbd> exit</div></div>
+      <div className="walkhud"><div className="op-keys"><Keys k={['W', 'S']} t="Throttle / brake" /><Keys k={['A', 'D']} t="Steer" /><Keys k={['Space']} t="Handbrake" /><Keys k={['Scroll']} t="Zoom" /></div></div>
     </>
   );
 }
@@ -227,7 +233,7 @@ function ModeBar() {
   return (
     <div className="modebar panel">
       <button className={`act ${placing ? 'on' : ''}`} onClick={() => (placing ? useInteract.getState().set({ placing: false }) : ia?.startPlacing())} title="Drop a pedestrian on the map">
-        <svg viewBox="0 0 16 16" aria-hidden><circle cx="8.5" cy="2.8" r="1.6" /><path d="M8 5.5 L6.5 9.5 L4.5 14 M6.8 8.5 L9.5 10 L11 14 M7.5 6 L10.5 8 M7.5 6 L5 7.5" /></svg>
+        <Icon.walk />
         {placing ? 'Click the map…' : 'Walk'}
       </button>
     </div>

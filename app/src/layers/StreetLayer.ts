@@ -1,6 +1,7 @@
-// Street furniture: instanced trees (OSM + procedural street/park trees), street
-// lights (emissive at night) and traffic signal heads, for level-0 tiles within
-// ~1.5 km of the camera. Placements come from the tile worker (workers/street.ts).
+// Street furniture: street lights (emissive at night) and traffic signal heads,
+// for level-0 tiles within ~1.5 km of the camera, plus the vegetation system
+// (layers/vegetation: trees, shrubs, hedges to the horizon). Placements come
+// from the tile worker (workers/street.ts, workers/vegetation.ts).
 //
 // Signals run a simple fixed-time two-phase plan off the sim clock until
 // something drives them: `setSignal(junctionOsmId, armAngleRad | null, state)`
@@ -8,7 +9,7 @@
 // `clearSignals()` returns to the built-in plan.
 import * as THREE from 'three/webgpu';
 import {
-  attribute, float, fract, uniform, vec3, vec4, cameraPosition, modelWorldMatrix, positionLocal, length, smoothstep, vertexColor,
+  attribute, float, vec3, vec4, cameraPosition, modelWorldMatrix, positionLocal, length, smoothstep, vertexColor,
   mix, select, abs, max, uv,
 } from 'three/tsl';
 import type { Engine } from '../engine/Engine';
@@ -17,13 +18,10 @@ import type { StreetBuf } from '../workers/street';
 import { U } from '../render/uniforms';
 import { baseTone } from '../render/tiles/materials';
 import { useApp } from '../state/store';
-import { broadleaf, conifer, mastArm, mastHead, signalPole, streetLight } from './street/geometry';
-
-/** fraction of broadleaf trees showing autumn colour (set from the sim date) */
-const FALL = uniform(0);
+import { mastArm, mastHead, signalPole, streetLight } from './street/geometry';
+import { Vegetation } from './vegetation/Vegetation';
 
 const RADIUS = 1500; // furniture is loaded for L0 tiles this close (m)
-const NEAR_TREES = 260; // detailed tree meshes inside this distance
 const LAMP_MAX = 900;
 /** lamps / signal hardware cast shadows through shadow-only proxies within this range */
 const NEAR_SHADOW = 320;
@@ -45,15 +43,7 @@ function furnitureMaterial(name: string, win: { near?: number; far: number }, em
   if (win.near) k = k.mul(smoothstep(win.near * 0.92, win.near, d));
   m.positionNode = center.add(positionLocal.sub(center).mul(k));
   const vc = vertexColor();
-  // foliage (alpha ≈ 0.05): per-instance tint from the seed in ipos.w; early-autumn colours by date
-  const seed = ipos.w;
-  const foliage = select(vc.a.greaterThan(0.03).and(vc.a.lessThan(0.1)), float(1), float(0));
-  const broad = select(vc.a.lessThan(0.065), float(1), float(0)); // conifers (0.08) never turn
-  const v = fract(seed.mul(13.1)).mul(0.35).add(0.8);
-  const green = vec3(fract(seed.mul(7.3)).mul(0.3).add(0.85), fract(seed.mul(3.7)).mul(0.15).add(0.95), fract(seed.mul(5.9)).mul(0.35).add(0.75)).mul(v);
-  const autumn = mix(vec3(1.9, 1.15, 0.45), vec3(2.2, 0.8, 0.35), fract(seed.mul(97.0)));
-  const tint = select(fract(seed.mul(31.7)).lessThan(FALL.mul(broad)), autumn, green);
-  m.colorNode = baseTone(mix(vc.rgb, vc.rgb.mul(tint), foliage));
+  m.colorNode = baseTone(vc.rgb);
   if (emissive === 'lamp') {
     const lit = select(vc.a.greaterThan(0.9), float(1), float(0));
     (m as unknown as { emissiveNode: N }).emissiveNode = vec3(1.0, 0.82, 0.55).mul(lit.mul(U.night).mul(3));
@@ -211,8 +201,8 @@ export class StreetLayer implements Layer {
   private tiles = new Map<string, TileRec>();
   private anchorVer = -1;
   private pools: Record<string, Pool> = {};
-  private nearTrees!: Pool;
-  private nearConifers!: Pool;
+  /** trees, shrubs, hedges (own group: not tied to the roads toggle) */
+  private veg!: Vegetation;
   /** shadow-only copies of the lamps / signal hardware near the camera (ring 0) */
   private shadowProxies: Record<'lamps' | 'poles' | 'masts' | 'heads', Pool> | null = null;
   private nearAt = new THREE.Vector3(Infinity, 0, 0);
@@ -225,15 +215,11 @@ export class StreetLayer implements Layer {
     this.engine = engine;
     this.group.name = 'street';
     engine.scene.add(this.group);
-    const farTree = furnitureMaterial('treesFar', { near: NEAR_TREES, far: RADIUS }, null);
-    const nearTree = furnitureMaterial('treesNear', { far: NEAR_TREES + 20 }, null);
     const lampMat = furnitureMaterial('lamps', { far: LAMP_MAX }, 'lamp');
     const poleMat = furnitureMaterial('signalPoles', { far: 1200 }, null);
     const sigMat = furnitureMaterial('signalHeads', { far: 1200 }, 'signal');
     const P = (geo: THREE.BufferGeometry, mat: THREE.Material, cap: number, name: string, shadow: boolean) => new Pool(geo, mat, cap, this.group, name, shadow);
     this.pools = {
-      trees: P(broadleaf(1), farTree, 8192, 'treesFar', false),
-      conifers: P(conifer(1), farTree, 2048, 'conifersFar', false),
       lamps: P(streetLight(), lampMat, 2048, 'streetLights', false),
       glows: P(glowDisc(), glowMaterial(), 2048, 'lampGlow', false),
       poles: P(signalPole(), sigMat, 512, 'signalPoles', false),
@@ -247,13 +233,13 @@ export class StreetLayer implements Layer {
       masts: S(mastArm(), poleMat, 'signalMastsShadow'),
       heads: S(mastHead(), sigMat, 'signalMastHeadsShadow'),
     };
-    this.nearTrees = new Pool(broadleaf(0), nearTree, 2048, this.group, 'treesNear', true);
-    this.nearConifers = new Pool(conifer(0), nearTree, 512, this.group, 'conifersNear', true);
+    this.veg = new Vegetation(engine);
+    void this.veg.prewarm();
     Object.assign(window as object, { __street: this });
   }
 
   private allPools(): Pool[] {
-    return [...Object.values(this.pools), this.nearTrees, this.nearConifers, ...Object.values(this.shadowProxies ?? {})];
+    return [...Object.values(this.pools), ...Object.values(this.shadowProxies ?? {})];
   }
 
   // ------------------------------------------------------------------ signal API
@@ -280,6 +266,7 @@ export class StreetLayer implements Layer {
 
   update(ctx: FrameContext) {
     const eng = this.engine;
+    this.veg.update(ctx);
     const layers = useApp.getState().layers as Record<string, boolean>;
     this.group.visible = layers.roads !== false;
     if (!this.group.visible) return;
@@ -307,21 +294,15 @@ export class StreetLayer implements Layer {
     for (const t of eng.tiles.drawn) {
       if (want.has(t.key) && !this.tiles.has(t.key) && t.street) this.add(t.key, t.tx * t.S, t.ty * t.S, t.street);
     }
-    // near-tree LOD set
+    // near shadow proxies
     if (this.nearDirty || Math.hypot(cam.x - this.nearAt.x, cam.z - this.nearAt.z) > 25 || Math.abs(cam.y - this.nearAt.y) > 40) this.rebuildNear(cam);
-    FALL.value = this.fall(ctx.simMs);
     this.signals(ctx);
     for (const p of this.allPools()) p.flush();
   }
 
   private add(key: string, e0: number, n0: number, data: StreetBuf) {
     const rec: TileRec = { key, e0, n0, data, owners: new Map() };
-    const nT = data.trees.length / 6;
-    let broad = 0;
-    for (let i = 0; i < nT; i++) if (data.trees[i * 6 + 4] !== 1) broad++;
     const own = (p: Pool, n: number) => { if (!n) return; const o: Owner = { key, slots: new Int32Array(0) }; o.slots = p.alloc(o, n); rec.owners.set(p, o); };
-    own(this.pools.trees, broad);
-    own(this.pools.conifers, nT - broad);
     own(this.pools.lamps, data.lamps.length / 5);
     own(this.pools.glows, data.lamps.length / 5);
     const nS = data.signals.length / 7;
@@ -350,25 +331,10 @@ export class StreetLayer implements Layer {
     p.mark(slot);
   }
 
-  /** fraction of trees in autumn colour for the sim date (late Sep → Nov) */
-  private fall(simMs: number) {
-    const d = new Date(simMs);
-    const doy = d.getUTCMonth() * 30.5 + d.getUTCDate();
-    return doy < 262 ? 0 : doy < 305 ? ((doy - 262) / 43) ** 1.5 * 0.65 : doy < 330 ? 0.65 : 0;
-  }
-
   private write(rec: TileRec) {
     const o = this.engine.anchor.origin;
     const ox = rec.e0 - o.x, on = rec.n0 + o.z; // anchor-relative (origin.z = -N)
     const d = rec.data;
-    const tr = rec.owners.get(this.pools.trees), co = rec.owners.get(this.pools.conifers);
-    let bi = 0, ci = 0;
-    for (let i = 0; i < d.trees.length / 6; i++) {
-      const x = d.trees[i * 6], y = d.trees[i * 6 + 1], z = d.trees[i * 6 + 2], s = d.trees[i * 6 + 3], k = d.trees[i * 6 + 4], seed = d.trees[i * 6 + 5];
-      const conif = k === 1;
-      if (conif && co) this.put(this.pools.conifers, co.slots[ci++], ox + x, z, -(on + y), seed * 6.28, s, s * (0.9 + seed * 0.3), s, seed);
-      else if (!conif && tr) this.put(this.pools.trees, tr.slots[bi++], ox + x, z, -(on + y), seed * 6.28, s, s * (0.85 + seed * 0.35), s, seed);
-    }
     const la = rec.owners.get(this.pools.lamps);
     if (la) for (let i = 0; i < d.lamps.length / 5; i++) {
       const x = d.lamps[i * 5], y = d.lamps[i * 5 + 1], z = d.lamps[i * 5 + 2], a = d.lamps[i * 5 + 3], h = d.lamps[i * 5 + 4];
@@ -397,28 +363,10 @@ export class StreetLayer implements Layer {
     this.nearAt.copy(cam);
     this.nearDirty = false;
     const o = this.engine.anchor.origin;
-    const pools = [this.nearTrees, this.nearConifers, ...Object.values(this.shadowProxies ?? {})];
+    const pools = Object.values(this.shadowProxies ?? {});
     for (const p of pools) p.clear();
-    const R = NEAR_TREES + 60;
     const E = cam.x, Nn = -cam.z;
     const dummy: Owner = { key: 'near', slots: new Int32Array(0) };
-    const add = (p: Pool, x: number, y: number, z: number, a: number, sx: number, sy: number, seed: number) => {
-      p.ensure(p.count + 1);
-      const k = p.count++;
-      p.owners[k] = dummy;
-      p.mesh.count = p.count;
-      this.put(p, k, x, y, z, a, sx, sy, sx, seed);
-    };
-    for (const rec of this.tiles.values()) {
-      if (E < rec.e0 - R || E > rec.e0 + 1024 + R || Nn < rec.n0 - R || Nn > rec.n0 + 1024 + R) continue;
-      const d = rec.data.trees;
-      for (let i = 0; i < d.length / 6; i++) {
-        const e = rec.e0 + d[i * 6], n = rec.n0 + d[i * 6 + 1];
-        if (Math.abs(e - E) > R || Math.abs(n - Nn) > R || Math.hypot(e - E, n - Nn, d[i * 6 + 2] - cam.y) > R) continue;
-        const s = d[i * 6 + 3], seed = d[i * 6 + 5], conif = d[i * 6 + 4] === 1;
-        add(conif ? this.nearConifers : this.nearTrees, e - o.x, d[i * 6 + 2], -n - o.z, seed * 6.28, s, s * (conif ? 0.9 + seed * 0.3 : 0.85 + seed * 0.35), seed);
-      }
-    }
     // shadow proxies for lamps and signal hardware in ring 0 (the far pools cast none)
     const sp = this.shadowProxies;
     if (!sp) return;
@@ -483,6 +431,7 @@ export class StreetLayer implements Layer {
   }
 
   dispose() {
+    this.veg.dispose();
     for (const p of this.allPools()) p.dispose();
     this.group.removeFromParent();
   }

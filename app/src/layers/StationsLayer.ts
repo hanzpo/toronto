@@ -1,160 +1,424 @@
-// Rail station platforms (subway, LRT, GO, UP, VIA) built along the actual
-// track at each station, plus DOM station labels with mode badges.
+// Rail stations (subway, LRT, GO, UP, VIA) from the curated station table
+// (data/stations.json, see docs/STATIONS.md): platforms snapped onto the
+// tracks the trains run on, canopies, shelters, name boards, underground
+// station boxes, surface entrances and bus-bay canopies (layers/stations/
+// build.ts), plus DOM station labels with line badges, decluttered through
+// the shared label board.
 //
-// Data: station list from transit index.json, track geometry from the loaded
-// rail patterns (TransitSystem.routeLines). Per station the nearest track of
-// the station's mode is the reference line; every parallel track within
-// ~60 m gives a lateral offset. Platforms are laid out from those offsets
-// (island in gaps ≥ 8.5 m, side platforms on the outside otherwise) and follow
-// the reference line's curvature and elevation (so subway platforms sit in
-// the tunnel, hidden by terrain unless the camera is underground).
+// Streaming: stations within STREAM_RADIUS of the camera focus are merged
+// into two meshes (lit surface + unlit underground, vertex colours → 2 draws);
+// stations within SIGN_RADIUS get one textured sign mesh each (per-station
+// atlas: name tiles, name boards, logos). Rebuilt when the focus moves more
+// than REBUILD_DIST, the floating anchor rebases, or a station that was built
+// before its terrain tile loaded can now be finished.
 //
-// Streaming: stations within STREAM_RADIUS of the camera focus are merged into
-// ONE mesh (one material, vertex colours) → 1 draw call (+ shadow pass).
-// Rebuilt when the focus moves > REBUILD_DIST or the floating anchor rebases.
+// Tunnel API: `stationBoxesNear(e, n, r)` returns the underground station
+// boxes (reference track path, lateral extents, platforms, wall colour) so
+// the cab-view tunnel (interact/tunnel.ts) can match them.
 import * as THREE from 'three/webgpu';
 import type { Engine } from '../engine/Engine';
 import type { FrameContext, Layer } from '../engine/types';
-import { MeshBuilder, rgb, type RGB } from '../models/builder';
+import { labelBoard, visibleFrom } from '../render/labelBoard';
 import { useApp } from '../state/store';
-import type { Mode, StationMeta, TransitSystem } from '../transit';
+import type { Mode, RouteMeta, TransitSystem } from '../transit';
+import { buildStation, type Built, type StationBox } from './stations/build';
+import { fallbackStations, HEAVY, loadStations, RAIL_MODES, type StationRec } from './stations/data';
+import { makeAtlas, wallColour, type Bullet } from './stations/signs';
+import { TrackIndex } from './stations/tracks';
 
-const STREAM_RADIUS = 5000;
-const REBUILD_DIST = 600;
-const LABEL_MAX_DIST = 4500;
-const LABEL_MAX_ALT = 6000;
+export type { StationBox } from './stations/build';
 
-type RailMode = Exclude<Mode, 'bus' | 'streetcar'>;
-const RAIL_MODES: RailMode[] = ['subway', 'lrt', 'commuter_rail', 'airport_rail', 'intercity_rail'];
-const HEAVY = new Set<Mode>(['commuter_rail', 'airport_rail', 'intercity_rail']);
+const STREAM_RADIUS = 3500;
+const SIGN_RADIUS = 900;
+const REBUILD_DIST = 400;
 
-interface PlatformSpec {
-  length: number;
-  /** platform top above rail (m) */
-  height: number;
-  /** track centre → platform edge */
-  edge: number;
-  /** side-platform width */
-  width: number;
-  canopy: number; // canopy length (0 = none)
-  shelter: boolean;
-  search: number; // max station→track distance
+let active: StationsLayer | null = null;
+
+/**
+ * Underground station boxes within r of (e, n) (world E/N metres). Built on
+ * demand; empty until the rail feeds and stations.json have loaded.
+ */
+export function stationBoxesNear(e: number, n: number, r = 400): StationBox[] {
+  return active ? active.boxesNear(e, n, r) : [];
 }
 
-const SPEC: Record<RailMode, PlatformSpec> = {
-  subway: { length: 152, height: 1.05, edge: 1.6, width: 4.5, canopy: 0, shelter: false, search: 120 },
-  lrt: { length: 90, height: 0.35, edge: 1.4, width: 3.5, canopy: 0, shelter: true, search: 120 },
-  commuter_rail: { length: 310, height: 0.8, edge: 1.75, width: 6, canopy: 130, shelter: false, search: 220 },
-  airport_rail: { length: 95, height: 1.0, edge: 1.7, width: 6, canopy: 80, shelter: false, search: 220 },
-  intercity_rail: { length: 240, height: 0.8, edge: 1.75, width: 5, canopy: 60, shelter: false, search: 220 },
-};
-
-const COL = {
-  concrete: rgb(0xb9b6ae),
-  concreteSide: rgb(0x8e8b84),
-  tactile: rgb(0xf2c500),
-  roof: rgb(0xd9dcdf),
-  roofUnder: rgb(0x8b9096),
-  post: rgb(0x5a6068),
-  glass: rgb(0x9fc3d6),
-  go: rgb(0x3e8a36),
-  up: rgb(0xf58220),
-  via: rgb(0xf5c400),
-  sign: rgb(0x1f2a36),
-};
-
-// ---------------------------------------------------------------- track index
-interface Poly { xyz: Float32Array; cum: Float64Array; mode: RailMode }
-
-class TrackIndex {
-  polys: Poly[] = [];
-  private grid = new Map<string, number[]>(); // cell → packed (poly << 16 | seg) refs
-  private cell = 200;
-
-  add(mode: RailMode, xyz: Float32Array) {
-    const n = xyz.length / 3;
-    if (n < 2) return;
-    const cum = new Float64Array(n);
-    for (let i = 1; i < n; i++) cum[i] = cum[i - 1] + Math.hypot(xyz[3 * i] - xyz[3 * i - 3], xyz[3 * i + 1] - xyz[3 * i - 2]);
-    const pi = this.polys.length;
-    this.polys.push({ xyz, cum, mode });
-    for (let i = 0; i < n - 1; i++) {
-      const x0 = xyz[3 * i], y0 = xyz[3 * i + 1], x1 = xyz[3 * i + 3], y1 = xyz[3 * i + 4];
-      const cx0 = Math.floor(Math.min(x0, x1) / this.cell), cx1 = Math.floor(Math.max(x0, x1) / this.cell);
-      const cy0 = Math.floor(Math.min(y0, y1) / this.cell), cy1 = Math.floor(Math.max(y0, y1) / this.cell);
-      for (let cx = cx0; cx <= cx1; cx++) for (let cy = cy0; cy <= cy1; cy++) {
-        const k = `${cx},${cy}`;
-        let a = this.grid.get(k);
-        if (!a) this.grid.set(k, (a = []));
-        a.push(pi, i);
-      }
-    }
-  }
-
-  /** nearest point on each polyline (of `modes`) within r of (e, n) */
-  near(e: number, n: number, r: number, modes: Set<Mode>): { poly: number; seg: number; t: number; d: number; x: number; y: number }[] {
-    const best = new Map<number, { poly: number; seg: number; t: number; d: number; x: number; y: number }>();
-    const c0x = Math.floor((e - r) / this.cell), c1x = Math.floor((e + r) / this.cell);
-    const c0y = Math.floor((n - r) / this.cell), c1y = Math.floor((n + r) / this.cell);
-    for (let cx = c0x; cx <= c1x; cx++) for (let cy = c0y; cy <= c1y; cy++) {
-      const a = this.grid.get(`${cx},${cy}`);
-      if (!a) continue;
-      for (let k = 0; k < a.length; k += 2) {
-        const pi = a[k], si = a[k + 1];
-        const p = this.polys[pi];
-        if (!modes.has(p.mode)) continue;
-        const x0 = p.xyz[3 * si], y0 = p.xyz[3 * si + 1], x1 = p.xyz[3 * si + 3], y1 = p.xyz[3 * si + 4];
-        const dx = x1 - x0, dy = y1 - y0, L2 = dx * dx + dy * dy;
-        const t = L2 > 0 ? Math.max(0, Math.min(1, ((e - x0) * dx + (n - y0) * dy) / L2)) : 0;
-        const x = x0 + dx * t, y = y0 + dy * t;
-        const d = Math.hypot(e - x, n - y);
-        if (d > r) continue;
-        const cur = best.get(pi);
-        if (!cur || d < cur.d) best.set(pi, { poly: pi, seg: si, t, d, x, y });
-      }
-    }
-    return [...best.values()].sort((a, b) => a.d - b.d);
-  }
-
-  /** point (E, N, z) and unit tangent at arc length s along poly */
-  at(pi: number, s: number): { e: number; n: number; z: number; tx: number; ty: number } {
-    const p = this.polys[pi];
-    const n = p.cum.length;
-    s = Math.max(0, Math.min(p.cum[n - 1], s));
-    let lo = 0, hi = n - 1;
-    while (hi - lo > 1) {
-      const m = (lo + hi) >> 1;
-      if (p.cum[m] <= s) lo = m; else hi = m;
-    }
-    const L = p.cum[hi] - p.cum[lo] || 1;
-    const t = (s - p.cum[lo]) / L;
-    const a = 3 * lo, b = 3 * hi;
-    const tx = (p.xyz[b] - p.xyz[a]) / L, ty = (p.xyz[b + 1] - p.xyz[a + 1]) / L;
-    return { e: p.xyz[a] + (p.xyz[b] - p.xyz[a]) * t, n: p.xyz[a + 1] + (p.xyz[b + 1] - p.xyz[a + 1]) * t, z: p.xyz[a + 2] + (p.xyz[b + 2] - p.xyz[a + 2]) * t, tx, ty };
-  }
-
-  arc(pi: number, seg: number, t: number): number {
-    const p = this.polys[pi];
-    return p.cum[seg] + (p.cum[seg + 1] - p.cum[seg]) * t;
-  }
-}
-
-// ---------------------------------------------------------------- stations
-interface BuiltStation {
-  key: string;
-  e: number; n: number; // reference (local origin of the geometry)
-  pos: Float32Array; nrm: Float32Array; col: Float32Array; idx: Uint32Array;
-}
-
-interface LabelGroup {
-  name: string;
-  e: number; n: number;
+interface Label {
+  st: StationRec;
+  el: HTMLDivElement | null;
+  html: string;
   h: number;
-  el: HTMLDivElement;
-  badges: string;
+  occ: boolean;
+  occAt: number;
   attached: boolean;
 }
 
+let cssInjected = false;
+function injectCss() {
+  if (cssInjected) return;
+  cssInjected = true;
+  const st = document.createElement('style');
+  st.textContent = `
+.stations-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.stn-label { position: absolute; left: 0; top: 0; display: flex; align-items: center; gap: 3px; white-space: nowrap; opacity: 0;
+  font: 600 11.5px/1 var(--ui, system-ui, sans-serif); letter-spacing: -0.005em; color: #161a20; background: #fff; border-radius: 6px;
+  padding: 3px 7px 3px 3px; box-shadow: 0 0 0 1px rgba(0,0,0,0.12), 0 1px 3px rgba(0,0,0,0.22); will-change: transform, opacity; }
+.stn-label.r1 { font-size: 10.5px; padding: 2px 6px 2px 2px; border-radius: 5px; }
+.stn-label.r3 { font-size: 12.5px; font-weight: 650; }
+.stn-label::after { content: ''; position: absolute; left: 50%; bottom: -4px; margin-left: -4px; border: 4px solid transparent;
+  border-bottom: 0; border-top-color: #fff; }
+.stn-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 17px; height: 17px; padding: 0 4px;
+  border-radius: 9px; font: 700 10.5px/1 var(--ui, system-ui, sans-serif); box-sizing: border-box; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.15); }
+.stn-badge:last-of-type { margin-right: 2px; }
+.stn-label.r1 .stn-badge { min-width: 15px; height: 15px; font-size: 9.5px; }
+.stn-badge.sq { border-radius: 4px; padding: 0 4px; letter-spacing: 0.01em; }
+`;
+  document.head.appendChild(st);
+}
+
+export class StationsLayer implements Layer {
+  readonly id = 'stations';
+  private engine!: Engine;
+  private system: TransitSystem;
+  private tracks: TrackIndex | null = null;
+  private curated: StationRec[] | null = null;
+  private curatedLoaded = false;
+  private stations: StationRec[] = [];
+  private built = new Map<string, Built | null>();
+  private labels: Label[] = [];
+  private lit: THREE.Mesh;
+  private under: THREE.Mesh;
+  private litMat: THREE.MeshStandardMaterial;
+  private underMat: THREE.MeshBasicMaterial;
+  private signMeshes = new Map<string, THREE.Mesh>();
+  private atlases = new Map<string, THREE.CanvasTexture>();
+  private dataSig = '';
+  private buildCentre = new THREE.Vector2(Infinity, Infinity);
+  private anchorVersion = -1;
+  private lastPendingCheck = 0;
+  private root = document.createElement('div');
+  private v = new THREE.Vector3();
+  private routes = new Map<string, RouteMeta>();
+  /** stats for debugging: stations in the current batch, triangles, visible labels */
+  stats = { stations: 0, tris: 0, underTris: 0, signs: 0, labels: 0 };
+
+  constructor(system: TransitSystem) {
+    this.system = system;
+    this.litMat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.05 });
+    this.litMat.name = 'stations';
+    this.underMat = new THREE.MeshBasicMaterial({ vertexColors: true });
+    this.underMat.name = 'stations-under';
+    this.lit = new THREE.Mesh(new THREE.BufferGeometry(), this.litMat);
+    this.lit.name = 'stations';
+    this.lit.castShadow = true;
+    this.lit.receiveShadow = true;
+    this.lit.frustumCulled = false;
+    this.under = new THREE.Mesh(new THREE.BufferGeometry(), this.underMat);
+    this.under.name = 'stations-under';
+    this.under.frustumCulled = false;
+  }
+
+  init(engine: Engine) {
+    this.engine = engine;
+    active = this;
+    injectCss();
+    this.root.className = 'stations-layer';
+    engine.renderer.domElement.parentElement?.appendChild(this.root);
+    engine.scene.add(this.lit);
+    engine.scene.add(this.under);
+    loadStations(engine.dataRoot).then((s) => {
+      this.curated = s;
+      this.curatedLoaded = true;
+      this.dataSig = ''; // re-prepare with the curated table
+    });
+  }
+
+  private railSignature(): string {
+    return this.system.feedsInfo().filter((f) => f.kind === 'rail').map((f) => `${f.agency}:${f.profile}`).join(',');
+  }
+
+  /** (Re)build the track index + labels when the loaded rail feeds (or the station table) change. */
+  private prepare() {
+    const idx = this.system.index;
+    if (!idx) return;
+    const t = new TrackIndex();
+    for (const m of RAIL_MODES) {
+      for (const rl of this.system.routeLines({ modes: [m] })) for (const l of rl.lines) t.add(m, rl.meta.id, l);
+    }
+    this.tracks = t;
+    this.routes = new Map(this.system.routes.map((r) => [r.id, r]));
+    this.stations = this.curated ?? fallbackStations(idx);
+    this.built.clear();
+    for (const m of this.signMeshes.values()) this.disposeSign(m);
+    this.signMeshes.clear();
+    this.buildLabels();
+    this.buildCentre.set(Infinity, Infinity);
+  }
+
+  // ---------------------------------------------------------------- labels
+  private badges(st: StationRec): { html: string; bullets: Bullet[] } {
+    const idx = this.system.index!;
+    const byId = new Map(idx.stations.map((s) => [s.id, s]));
+    const out: string[] = [];
+    const bullets: Bullet[] = [];
+    const seen = new Set<string>();
+    const add = (key: string, html: string) => { if (!seen.has(key)) { seen.add(key); out.push(html); } };
+    const order: Mode[] = ['subway', 'lrt', 'commuter_rail', 'airport_rail', 'intercity_rail'];
+    const members = st.ids.map((i) => byId.get(i)).filter((s) => !!s);
+    for (const m of order) {
+      for (const s of members) {
+        if (!s.modes.includes(m)) continue;
+        if (m === 'subway' || m === 'lrt') {
+          for (const rid of s.routes) {
+            const r = this.routes.get(rid);
+            if (!r || r.mode !== m) continue;
+            if (!seen.has(rid)) bullets.push({ text: r.short, bg: r.color, fg: r.textColor });
+            add(rid, `<span class="stn-badge" style="background:${r.color};color:${r.textColor}">${escapeHtml(r.short)}</span>`);
+          }
+        } else if (m === 'commuter_rail') add('go', `<span class="stn-badge sq" style="background:#3d8b37;color:#fff">GO</span>`);
+        else if (m === 'airport_rail') add('up', `<span class="stn-badge sq" style="background:#e8641b;color:#fff">UP</span>`);
+        else add('via', `<span class="stn-badge sq" style="background:#ffd400;color:#1a2a55">VIA</span>`);
+      }
+    }
+    return { html: out.join(''), bullets };
+  }
+
+  private buildLabels() {
+    for (const l of this.labels) if (l.el) { labelBoard.remove(l.el); l.el.remove(); }
+    this.labels = this.stations.map((st) => ({ st, el: null, html: `${this.badges(st).html}<span>${escapeHtml(cleanName(st.name))}</span>`, h: NaN, occ: false, occAt: -1e9, attached: false }));
+  }
+
+  // ---------------------------------------------------------------- geometry
+  private brand(st: StationRec): 'ttc' | 'go' | 'up' | 'via' {
+    const m = new Set(st.levels.map((l) => l.mode));
+    if (m.has('subway') || m.has('lrt')) return 'ttc';
+    if (m.has('commuter_rail')) return 'go';
+    if (m.has('airport_rail')) return 'up';
+    return 'via';
+  }
+
+  private hasHeights(e: number, n: number): boolean {
+    const S = this.engine.tiles.manifest?.tileSize[0];
+    if (!S) return false;
+    return !!this.engine.tiles.tiles.get(`0/${Math.floor(e / S)}/${Math.floor(n / S)}`)?.heights;
+  }
+
+  private getBuilt(st: StationRec): Built | null {
+    let b = this.built.get(st.id);
+    if (b === undefined) {
+      b = buildStation(st, {
+        tracks: this.tracks!,
+        heightAt: (e, n) => this.engine.heightAt(e, n),
+        hasHeights: (e, n) => this.hasHeights(e, n),
+        wall: wallColour(cleanName(st.name), st.levels.find((l) => l.wall)?.wall),
+        brand: this.brand(st),
+      }, []);
+      if (!b.lit.tris && !b.under.tris && !b.signs.tris && !b.pending) b = null;
+      this.built.set(st.id, b);
+    }
+    return b;
+  }
+
+  boxesNear(e: number, n: number, r: number): StationBox[] {
+    if (!this.tracks) return [];
+    const out: StationBox[] = [];
+    for (const st of this.stations) {
+      if (Math.hypot(st.c[0] - e, st.c[1] - n) > r + 300) continue;
+      if (!st.levels.some((l) => l.grade === 'underground')) continue;
+      const b = this.getBuilt(st);
+      if (b) out.push(...b.boxes);
+    }
+    return out;
+  }
+
+  private rebuild(ctx: FrameContext) {
+    const fe = ctx.focus.x, fn = -ctx.focus.z;
+    this.buildCentre.set(fe, fn);
+    const anchor = ctx.anchor.origin;
+    const parts: Built[] = [];
+    const near = new Set<string>();
+    for (const st of this.stations) {
+      const d = Math.hypot(st.c[0] - fe, st.c[1] - fn);
+      if (d > STREAM_RADIUS + 300) continue;
+      const b = this.getBuilt(st);
+      if (!b) continue;
+      parts.push(b);
+      if (d < SIGN_RADIUS && b.signs.tris) near.add(st.id);
+    }
+    const merge = (pick: (b: Built) => { pos: number[]; nrm: number[]; col: number[]; idx: number[] }, mesh: THREE.Mesh, withNormals: boolean) => {
+      let nV = 0, nI = 0;
+      for (const p of parts) { const g = pick(p); nV += g.pos.length / 3; nI += g.idx.length; }
+      const pos = new Float32Array(nV * 3), col = new Float32Array(nV * 3), idx = new Uint32Array(nI);
+      const nrm = withNormals ? new Float32Array(nV * 3) : null;
+      let v = 0, k = 0;
+      for (const p of parts) {
+        const g = pick(p);
+        const dx = p.oe - anchor.x, dz = -p.on - anchor.z;
+        const cnt = g.pos.length / 3;
+        for (let i = 0; i < cnt; i++) {
+          pos[3 * (v + i)] = g.pos[3 * i] + dx;
+          pos[3 * (v + i) + 1] = g.pos[3 * i + 1];
+          pos[3 * (v + i) + 2] = g.pos[3 * i + 2] + dz;
+        }
+        if (nrm) nrm.set(g.nrm, 3 * v);
+        col.set(g.col, 3 * v);
+        for (let i = 0; i < g.idx.length; i++) idx[k + i] = g.idx[i] + v;
+        v += cnt; k += g.idx.length;
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      if (nrm) geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+      geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      geo.setIndex(new THREE.BufferAttribute(idx, 1));
+      geo.computeBoundingSphere();
+      mesh.geometry.dispose();
+      mesh.geometry = geo;
+      mesh.position.copy(anchor);
+      return nI / 3;
+    };
+    this.stats.tris = merge((b) => b.lit, this.lit, true);
+    this.stats.underTris = merge((b) => b.under, this.under, false);
+    this.stats.stations = parts.length;
+    // sign meshes (one per nearby station)
+    for (const [id, m] of this.signMeshes) if (!near.has(id)) { this.disposeSign(m); this.signMeshes.delete(id); }
+    for (const b of parts) {
+      if (!near.has(b.id)) continue;
+      let m = this.signMeshes.get(b.id);
+      if (m && m.userData.built !== b) { this.disposeSign(m); this.signMeshes.delete(b.id); m = undefined; }
+      if (!m) {
+        const st = this.stations.find((s) => s.id === b.id)!;
+        let tex = this.atlases.get(b.id);
+        if (!tex) {
+          tex = makeAtlas(cleanName(st.name), wallColour(cleanName(st.name), st.levels.find((l) => l.wall)?.wall), this.badges(st).bullets);
+          this.atlases.set(b.id, tex);
+        }
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(b.signs.pos, 3));
+        geo.setAttribute('uv', new THREE.Float32BufferAttribute(b.signs.uv, 2));
+        geo.setIndex(b.signs.idx);
+        geo.computeBoundingSphere();
+        const mat = new THREE.MeshBasicMaterial({ map: tex });
+        m = new THREE.Mesh(geo, mat);
+        m.name = `station-signs:${b.id}`;
+        m.userData.built = b;
+        this.engine.scene.add(m);
+        this.signMeshes.set(b.id, m);
+      }
+      m.position.set(b.oe, 0, -b.on);
+    }
+    // atlases of stations far away are released
+    for (const [id, t] of this.atlases) if (!near.has(id)) { t.dispose(); this.atlases.delete(id); }
+    this.stats.signs = this.signMeshes.size;
+  }
+
+  private disposeSign(m: THREE.Mesh) {
+    m.removeFromParent();
+    m.geometry.dispose();
+    (m.material as THREE.Material).dispose();
+  }
+
+  update(ctx: FrameContext) {
+    const sig = this.railSignature() + (this.curatedLoaded ? '|c' : '');
+    if (sig !== this.dataSig && this.system.tripCount > 0 && this.curatedLoaded) {
+      this.dataSig = sig;
+      this.prepare();
+    }
+    const on = useApp.getState().layers.rail;
+    this.lit.visible = on && !!this.tracks;
+    this.under.visible = this.lit.visible;
+    for (const m of this.signMeshes.values()) m.visible = this.lit.visible;
+    this.root.style.display = on ? '' : 'none';
+    if (!this.tracks || !on) return;
+    const fe = ctx.focus.x, fn = -ctx.focus.z;
+    let dirty = ctx.anchor.version !== this.anchorVersion || Math.hypot(fe - this.buildCentre.x, fn - this.buildCentre.y) > REBUILD_DIST;
+    // finish stations that were built before their terrain tile arrived
+    if (!dirty && ctx.time - this.lastPendingCheck > 1.5) {
+      this.lastPendingCheck = ctx.time;
+      for (const [id, b] of this.built) {
+        if (!b || !b.pending) continue;
+        const d = Math.hypot(b.oe - fe, b.on - fn);
+        if (d > STREAM_RADIUS) continue;
+        const st = this.stations.find((s) => s.id === id)!;
+        if (st.ents.concat().every((e) => e.k === 'underground' || e.k === 'path' || this.hasHeights(e.p[0], e.p[1])) && this.hasHeights(b.oe, b.on)) {
+          this.built.delete(id);
+          dirty = true;
+        }
+      }
+    }
+    if (dirty) {
+      this.anchorVersion = ctx.anchor.version;
+      this.rebuild(ctx);
+    }
+    this.updateLabels(ctx);
+  }
+
+  // ---------------------------------------------------------------- labels
+  private updateLabels(ctx: FrameContext) {
+    const { width, height } = ctx.viewport;
+    const cam = ctx.camera;
+    const cp = ctx.cameraPos;
+    const alt = ctx.altitude;
+    let nVis = 0;
+    // distance limits by importance, growing with altitude; minor stops drop out first
+    const altK = Math.min(12, 1 + alt / 250);
+    const base = [0, 450, 900, 1600];
+    const altMax = [0, 1800, 5500, 12000];
+    for (let i = 0; i < this.labels.length; i++) {
+      const l = this.labels[i];
+      const st = l.st;
+      const r = Math.max(1, Math.min(3, st.rank));
+      const maxD = base[r] * altK;
+      const dist = Math.hypot(st.c[0] - cp.x, -st.c[1] - cp.z);
+      const inRange = alt < altMax[r] && dist < maxD;
+      if (!inRange) {
+        if (l.el && l.attached && dist > maxD * 1.3 + 500) { labelBoard.remove(l.el); l.el.remove(); l.attached = false; }
+        continue;
+      }
+      if (!l.el) {
+        l.el = document.createElement('div');
+        l.el.className = `stn-label r${r}`;
+        l.el.innerHTML = l.html;
+      }
+      if (!l.attached) { this.root.appendChild(l.el); l.attached = true; }
+      if (Number.isNaN(l.h) || ctx.frame % 90 === i % 90) {
+        const b = this.built.get(st.id);
+        l.h = b ? Math.max(b.labelH, this.engine.heightAt(st.c[0], st.c[1])) : this.engine.heightAt(st.c[0], st.c[1]);
+      }
+      const ah = l.h + (r === 3 ? 18 : 12);
+      this.v.set(st.c[0], ah, -st.c[1]).project(cam);
+      if (!(this.v.z > -1 && this.v.z < 1 && Math.abs(this.v.x) < 1.05 && Math.abs(this.v.y) < 1.05)) continue;
+      // line of sight (terrain + loaded buildings), refreshed ~3×/s per label
+      if (ctx.time - l.occAt > 0.3 + (i % 7) * 0.02) {
+        l.occAt = ctx.time;
+        l.occ = alt < 1500 && !visibleFrom(this.engine, cp.x, cp.y, cp.z, st.c[0], st.c[1], ah, 45);
+      }
+      if (l.occ) continue;
+      const x = (this.v.x * 0.5 + 0.5) * width, y = (-this.v.y * 0.5 + 0.5) * height;
+      const fd = Math.max(0, Math.min(1, (maxD - dist) / (maxD * 0.25)));
+      const fa = Math.max(0, Math.min(1, (altMax[r] - alt) / (altMax[r] * 0.25)));
+      const want = fd * fa;
+      if (want < 0.03) continue;
+      labelBoard.submit(l.el, x, y, r * 100000 - dist, want, { ax: -0.5, ay: -1, dy: -5, pad: 3 });
+      nVis++;
+    }
+    this.stats.labels = nVis;
+  }
+
+  dispose() {
+    if (active === this) active = null;
+    this.lit.removeFromParent();
+    this.lit.geometry.dispose();
+    this.under.removeFromParent();
+    this.under.geometry.dispose();
+    this.litMat.dispose();
+    this.underMat.dispose();
+    for (const m of this.signMeshes.values()) this.disposeSign(m);
+    for (const t of this.atlases.values()) t.dispose();
+    for (const l of this.labels) if (l.el) labelBoard.remove(l.el);
+    this.root.remove();
+  }
+}
+
+// ---------------------------------------------------------------- helpers
 function cleanName(s: string): string {
   return s
     .replace(/^UP Express\s+/i, '')
@@ -166,405 +430,8 @@ function cleanName(s: string): string {
     .trim();
 }
 
-let cssInjected = false;
-function injectCss() {
-  if (cssInjected) return;
-  cssInjected = true;
-  const st = document.createElement('style');
-  st.textContent = `
-.stations-layer { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
-.stn-label { position: absolute; left: 0; top: 0; display: flex; align-items: center; gap: 4px; white-space: nowrap;
-  font: 700 11px var(--ui, system-ui, sans-serif); color: #1d232b; background: rgba(255,255,255,0.88); border-radius: 4px;
-  padding: 2px 6px 2px 3px; box-shadow: 0 1px 3px rgba(0,0,0,0.3); will-change: transform; transition: opacity 0.25s; }
-.stn-label::after { content: ''; position: absolute; left: 50%; bottom: -5px; margin-left: -4px; border: 4px solid transparent;
-  border-bottom: 0; border-top-color: rgba(255,255,255,0.88); }
-.stn-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; padding: 0 3px;
-  border-radius: 8px; font: 800 10px/1 var(--ui, system-ui, sans-serif); box-sizing: border-box; }
-.stn-badge.sq { border-radius: 3px; }
-`;
-  document.head.appendChild(st);
-}
-
-export class StationsLayer implements Layer {
-  readonly id = 'stations';
-  private engine!: Engine;
-  private system: TransitSystem;
-  private tracks: TrackIndex | null = null;
-  private stations: StationMeta[] = [];
-  private built = new Map<string, BuiltStation | null>();
-  private groups: LabelGroup[] = [];
-  private mesh: THREE.Mesh;
-  private material: THREE.MeshStandardMaterial;
-  private dataSig = '';
-  private buildCentre = new THREE.Vector2(Infinity, Infinity);
-  private anchorVersion = -1;
-  private root = document.createElement('div');
-  private v = new THREE.Vector3();
-  /** stats for debugging: stations in the current batch, triangles */
-  stats = { stations: 0, tris: 0, labels: 0 };
-
-  constructor(system: TransitSystem) {
-    this.system = system;
-    this.material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.85, metalness: 0.05 });
-    this.material.name = 'stations';
-    this.mesh = new THREE.Mesh(new THREE.BufferGeometry(), this.material);
-    this.mesh.name = 'stations';
-    this.mesh.castShadow = true;
-    this.mesh.receiveShadow = true;
-    this.mesh.frustumCulled = false;
-  }
-
-  init(engine: Engine) {
-    this.engine = engine;
-    injectCss();
-    this.root.className = 'stations-layer';
-    engine.renderer.domElement.parentElement?.appendChild(this.root);
-    engine.scene.add(this.mesh);
-  }
-
-  private railSignature(): string {
-    return this.system.feedsInfo().filter((f) => f.kind === 'rail').map((f) => `${f.agency}:${f.profile}`).join(',');
-  }
-
-  /** (Re)build the track index + label groups when the loaded rail feeds change. */
-  private prepare() {
-    const idx = this.system.index;
-    if (!idx) return;
-    const t = new TrackIndex();
-    for (const m of RAIL_MODES) {
-      for (const rl of this.system.routeLines({ modes: [m] })) for (const l of rl.lines) t.add(m, l);
-    }
-    this.tracks = t;
-    this.stations = idx.stations.filter((s) => s.modes.some((m) => (RAIL_MODES as Mode[]).includes(m)));
-    this.built.clear();
-    this.buildLabels();
-    this.buildCentre.set(Infinity, Infinity);
-  }
-
-  // ---------------------------------------------------------------- labels
-  private buildLabels() {
-    for (const g of this.groups) g.el.remove();
-    this.groups = [];
-    const routes = new Map(this.system.routes.map((r) => [r.id, r]));
-    const clusters: { st: StationMeta[]; e: number; n: number }[] = [];
-    for (const s of this.stations) {
-      const c = clusters.find((c) => Math.hypot(c.e - s.pos[0], c.n - s.pos[1]) < 380);
-      if (c) c.st.push(s);
-      else clusters.push({ st: [s], e: s.pos[0], n: s.pos[1] });
-    }
-    for (const c of clusters) {
-      const names = c.st.map((s) => cleanName(s.name));
-      names.sort((a, b) => a.length - b.length);
-      const name = names[0];
-      const badges: string[] = [];
-      const seen = new Set<string>();
-      const add = (key: string, html: string) => { if (!seen.has(key)) { seen.add(key); badges.push(html); } };
-      // order: subway lines, LRT, GO, UP, VIA
-      const order: Mode[] = ['subway', 'lrt', 'commuter_rail', 'airport_rail', 'intercity_rail'];
-      for (const m of order) {
-        for (const s of c.st) {
-          if (!s.modes.includes(m)) continue;
-          if (m === 'subway' || m === 'lrt') {
-            for (const rid of s.routes) {
-              const r = routes.get(rid);
-              if (!r || r.mode !== m) continue;
-              add(rid, `<span class="stn-badge" style="background:${r.color};color:${r.textColor}">${r.short}</span>`);
-            }
-          } else if (m === 'commuter_rail') add('go', `<span class="stn-badge sq" style="background:#3e8a36;color:#fff">GO</span>`);
-          else if (m === 'airport_rail') add('up', `<span class="stn-badge sq" style="background:#f58220;color:#fff">UP</span>`);
-          else add('via', `<span class="stn-badge sq" style="background:#f5c400;color:#1a2a55">VIA</span>`);
-        }
-      }
-      const el = document.createElement('div');
-      el.className = 'stn-label';
-      el.innerHTML = `${badges.join('')}<span>${escapeHtml(name)}</span>`;
-      el.style.opacity = '0';
-      this.groups.push({ name, e: c.e, n: c.n, h: NaN, el, badges: badges.join(''), attached: false });
-    }
-  }
-
-  // ---------------------------------------------------------------- geometry
-  private buildStation(s: StationMeta, m: RailMode, placed: { e: number; n: number; m: RailMode }[]): BuiltStation | null {
-    const tr = this.tracks!;
-    const spec = SPEC[m];
-    const [se, sn] = s.pos;
-    const heavy = HEAVY.has(m);
-    const modeSet = new Set<Mode>(heavy ? ['commuter_rail', 'airport_rail', 'intercity_rail'] : [m]);
-    const own = tr.near(se, sn, spec.search, new Set<Mode>([m]));
-    if (!own.length) return null;
-    const ref = own[0];
-    // dedupe (e.g. "Kennedy Station" + "Kennedy Station - Subway", VIA at a GO station)
-    const dup = placed.some((p) => Math.hypot(p.e - ref.x, p.n - ref.y) < (heavy ? 150 : 80) && (p.m === m || (heavy && HEAVY.has(p.m))));
-    if (dup) return null;
-    placed.push({ e: ref.x, n: ref.y, m });
-    const sRef = tr.arc(ref.poly, ref.seg, ref.t);
-    const c = tr.at(ref.poly, sRef);
-    const nx = -c.ty, ny = c.tx; // left normal
-    // lateral offsets of all parallel tracks near the reference point
-    const offs: number[] = [0];
-    for (const h of tr.near(ref.x, ref.y, heavy ? 70 : 30, modeSet)) {
-      if (h.poly === ref.poly) continue;
-      const q = tr.at(h.poly, tr.arc(h.poly, h.seg, h.t));
-      if (Math.abs(q.tx * c.tx + q.ty * c.ty) < 0.94) continue;
-      offs.push((h.x - ref.x) * nx + (h.y - ref.y) * ny);
-    }
-    offs.sort((a, b) => a - b);
-    const tracks: number[] = [];
-    for (const o of offs) if (!tracks.length || o - tracks[tracks.length - 1] > 1.4) tracks.push(o);
-    // platform lateral extents [a, b] and which sides face a track
-    const plats: { a: number; b: number; trackA: boolean; trackB: boolean }[] = [];
-    const E = spec.edge;
-    const stationSide = (se - ref.x) * nx + (sn - ref.y) * ny >= 0 ? 1 : -1;
-    if (tracks.length === 1) {
-      const t0 = tracks[0];
-      if (m === 'subway') {
-        plats.push({ a: t0 - E - spec.width, b: t0 - E, trackA: false, trackB: true });
-        plats.push({ a: t0 + E, b: t0 + E + spec.width, trackA: true, trackB: false });
-      } else if (stationSide > 0) plats.push({ a: t0 + E, b: t0 + E + spec.width, trackA: true, trackB: false });
-      else plats.push({ a: t0 - E - spec.width, b: t0 - E, trackA: false, trackB: true });
-    } else {
-      let islands = 0;
-      for (let i = 0; i < tracks.length - 1; i++) {
-        const gap = tracks[i + 1] - tracks[i];
-        if (gap >= 8.5) {
-          plats.push({ a: tracks[i] + E, b: tracks[i + 1] - E, trackA: true, trackB: true });
-          islands++;
-        }
-      }
-      if (islands === 0 && tracks.length <= 4) {
-        plats.push({ a: tracks[0] - E - spec.width, b: tracks[0] - E, trackA: false, trackB: true });
-        plats.push({ a: tracks[tracks.length - 1] + E, b: tracks[tracks.length - 1] + E + spec.width, trackA: true, trackB: false });
-      } else if (islands === 0) {
-        const t0 = stationSide > 0 ? tracks[tracks.length - 1] : tracks[0];
-        plats.push(stationSide > 0
-          ? { a: t0 + E, b: t0 + E + spec.width, trackA: true, trackB: false }
-          : { a: t0 - E - spec.width, b: t0 - E, trackA: false, trackB: true });
-      }
-    }
-    // sample the reference line
-    const L = spec.length;
-    const poly = tr.polys[ref.poly];
-    const total = poly.cum[poly.cum.length - 1];
-    let s0 = sRef - L / 2, s1 = sRef + L / 2;
-    if (s0 < 0) { s1 = Math.min(total, s1 - s0); s0 = 0; }
-    if (s1 > total) { s0 = Math.max(0, s0 - (s1 - total)); s1 = total; }
-    const nSeg = Math.max(2, Math.ceil((s1 - s0) / 12));
-    const samples: { e: number; n: number; z: number; nx: number; ny: number; s: number }[] = [];
-    for (let i = 0; i <= nSeg; i++) {
-      const s = s0 + ((s1 - s0) * i) / nSeg;
-      const p = tr.at(ref.poly, s);
-      // smooth tangent over ±6 m
-      const pa = tr.at(ref.poly, s - 6), pb = tr.at(ref.poly, s + 6);
-      let tx = pb.e - pa.e, ty = pb.n - pa.n;
-      const l = Math.hypot(tx, ty) || 1;
-      tx /= l; ty /= l;
-      samples.push({ e: p.e, n: p.n, z: p.z, nx: -ty, ny: tx, s });
-    }
-    const oe = ref.x, on = ref.y;
-    const b = new MeshBuilder();
-    const P = (i: number, lat: number, dy: number) => {
-      const q = samples[i];
-      return new THREE.Vector3(q.e + q.nx * lat - oe, q.z + dy, -(q.n + q.ny * lat - on));
-    };
-    const up = new THREE.Vector3(0, 1, 0);
-    const H = spec.height;
-    for (const pl of plats) {
-      const midLat = (pl.a + pl.b) / 2;
-      for (let i = 0; i < samples.length - 1; i++) {
-        // top surface (tactile strips along track edges)
-        const ta = pl.trackA ? pl.a + 0.6 : pl.a, tb = pl.trackB ? pl.b - 0.6 : pl.b;
-        b.quad(P(i, ta, H), P(i + 1, ta, H), P(i + 1, tb, H), P(i, tb, H), COL.concrete, 0, up);
-        if (pl.trackA) b.quad(P(i, pl.a, H), P(i + 1, pl.a, H), P(i + 1, ta, H), P(i, ta, H), COL.tactile, 0, up);
-        if (pl.trackB) b.quad(P(i, tb, H), P(i + 1, tb, H), P(i + 1, pl.b, H), P(i, pl.b, H), COL.tactile, 0, up);
-        // side faces
-        const q = samples[i];
-        const outA = new THREE.Vector3(-q.nx, 0, q.ny), outB = new THREE.Vector3(q.nx, 0, -q.ny);
-        b.quad(P(i, pl.a, -0.3), P(i + 1, pl.a, -0.3), P(i + 1, pl.a, H), P(i, pl.a, H), COL.concreteSide, 0, outA);
-        b.quad(P(i, pl.b, -0.3), P(i + 1, pl.b, -0.3), P(i + 1, pl.b, H), P(i, pl.b, H), COL.concreteSide, 0, outB);
-      }
-      // end caps
-      const last = samples.length - 1;
-      const t0 = samples[0], tl = samples[last];
-      b.quad(P(0, pl.a, -0.3), P(0, pl.b, -0.3), P(0, pl.b, H), P(0, pl.a, H), COL.concreteSide, 0, new THREE.Vector3(-t0.ny, 0, -t0.nx));
-      b.quad(P(last, pl.a, -0.3), P(last, pl.b, -0.3), P(last, pl.b, H), P(last, pl.a, H), COL.concreteSide, 0, new THREE.Vector3(tl.ny, 0, tl.nx));
-
-      // canopy (GO / UP / VIA) over the middle of the platform
-      const w = pl.b - pl.a;
-      if (spec.canopy > 0 && w >= 3) {
-        const ca = pl.a + 0.4, cb = pl.b - 0.4;
-        const roofY = H + 3.6;
-        let lastPost = -1e9;
-        for (let i = 0; i < samples.length - 1; i++) {
-          const sm = (samples[i].s + samples[i + 1].s) / 2;
-          if (Math.abs(sm - sRef) > spec.canopy / 2) continue;
-          b.quad(P(i, ca, roofY + 0.25), P(i + 1, ca, roofY + 0.25), P(i + 1, cb, roofY + 0.25), P(i, cb, roofY + 0.25), COL.roof, 0, up);
-          b.quad(P(i, ca, roofY), P(i + 1, ca, roofY), P(i + 1, cb, roofY), P(i, cb, roofY), COL.roofUnder, 0, new THREE.Vector3(0, -1, 0));
-          const q = samples[i];
-          const fasc = m === 'commuter_rail' ? COL.go : m === 'airport_rail' ? COL.up : COL.via;
-          b.quad(P(i, ca, roofY), P(i + 1, ca, roofY), P(i + 1, ca, roofY + 0.25), P(i, ca, roofY + 0.25), fasc, 0, new THREE.Vector3(-q.nx, 0, q.ny));
-          b.quad(P(i, cb, roofY), P(i + 1, cb, roofY), P(i + 1, cb, roofY + 0.25), P(i, cb, roofY + 0.25), fasc, 0, new THREE.Vector3(q.nx, 0, -q.ny));
-          if (samples[i].s - lastPost >= 11.5) {
-            lastPost = samples[i].s;
-            post(b, P(i, midLat, H), 0.3, roofY - H, COL.post);
-          }
-        }
-      }
-      // LRT shelter
-      if (spec.shelter && w >= 2.5) {
-        const i = Math.floor(samples.length / 2);
-        const c0 = P(i, midLat, H);
-        orientedBox(b, c0, samples[i], 8, Math.min(2.2, w - 0.8), H + 0.05, H + 2.7, COL.glass, true);
-        orientedBox(b, c0, samples[i], 8.6, Math.min(2.8, w - 0.4), H + 2.7, H + 2.95, COL.roof, false);
-      }
-      // name sign on two posts at the reference point
-      const im = samples.findIndex((q) => q.s >= sRef) >= 0 ? samples.findIndex((q) => q.s >= sRef) : samples.length >> 1;
-      const sc = P(im, midLat, H);
-      const sgCol: RGB = m === 'commuter_rail' ? COL.go : m === 'airport_rail' ? COL.up : m === 'intercity_rail' ? COL.via : COL.sign;
-      orientedBox(b, sc, samples[im], 3.2, 0.14, H + 2.2, H + 2.9, sgCol, false);
-      post(b, P(im, midLat, H).addScaledVector(dirOf(samples[im]), 1.3), 0.12, 2.2, COL.post);
-      post(b, P(im, midLat, H).addScaledVector(dirOf(samples[im]), -1.3), 0.12, 2.2, COL.post);
-    }
-    if (!b.triCount) return null;
-    return {
-      key: `${s.id}|${m}`, e: oe, n: on,
-      pos: new Float32Array(b.pos), nrm: new Float32Array(b.nrm), col: new Float32Array(b.col), idx: new Uint32Array(b.idx),
-    };
-  }
-
-  private rebuild(ctx: FrameContext) {
-    const fe = ctx.focus.x, fn = -ctx.focus.z;
-    this.buildCentre.set(fe, fn);
-    const anchor = ctx.anchor.origin;
-    const parts: BuiltStation[] = [];
-    // built lazily and cached; `placedAll` dedupes stations that share a track spot
-    for (const s of this.stations) {
-      if (Math.hypot(s.pos[0] - fe, s.pos[1] - fn) > STREAM_RADIUS + 400) continue;
-      for (const m of RAIL_MODES) {
-        if (!s.modes.includes(m)) continue;
-        const key = `${s.id}|${m}`;
-        let bs = this.built.get(key);
-        if (bs === undefined) {
-          bs = this.buildStation(s, m, this.placedAll);
-          this.built.set(key, bs);
-        }
-        if (bs) parts.push(bs);
-      }
-    }
-    let nV = 0, nI = 0;
-    for (const p of parts) { nV += p.pos.length / 3; nI += p.idx.length; }
-    const pos = new Float32Array(nV * 3), nrm = new Float32Array(nV * 3), col = new Float32Array(nV * 3), idx = new Uint32Array(nI);
-    let v = 0, k = 0;
-    for (const p of parts) {
-      const dx = p.e - anchor.x, dz = -p.n - anchor.z;
-      const cnt = p.pos.length / 3;
-      for (let i = 0; i < cnt; i++) {
-        pos[3 * (v + i)] = p.pos[3 * i] + dx;
-        pos[3 * (v + i) + 1] = p.pos[3 * i + 1];
-        pos[3 * (v + i) + 2] = p.pos[3 * i + 2] + dz;
-      }
-      nrm.set(p.nrm, 3 * v);
-      col.set(p.col, 3 * v);
-      for (let i = 0; i < p.idx.length; i++) idx[k + i] = p.idx[i] + v;
-      v += cnt; k += p.idx.length;
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    g.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
-    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
-    g.setIndex(new THREE.BufferAttribute(idx, 1));
-    g.computeBoundingSphere();
-    this.mesh.geometry.dispose();
-    this.mesh.geometry = g;
-    this.mesh.position.copy(anchor);
-    this.stats.stations = parts.length;
-    this.stats.tris = nI / 3;
-  }
-
-  private placedAll: { e: number; n: number; m: RailMode }[] = [];
-
-  update(ctx: FrameContext) {
-    const sig = this.railSignature();
-    if (sig !== this.dataSig && this.system.tripCount > 0) {
-      this.dataSig = sig;
-      this.placedAll = [];
-      this.prepare();
-    }
-    const on = useApp.getState().layers.rail;
-    this.mesh.visible = on && !!this.tracks;
-    this.root.style.display = on ? '' : 'none';
-    if (!this.tracks || !on) return;
-    const fe = ctx.focus.x, fn = -ctx.focus.z;
-    if (ctx.anchor.version !== this.anchorVersion || Math.hypot(fe - this.buildCentre.x, fn - this.buildCentre.y) > REBUILD_DIST) {
-      this.anchorVersion = ctx.anchor.version;
-      this.rebuild(ctx);
-    }
-    this.updateLabels(ctx);
-  }
-
-  private updateLabels(ctx: FrameContext) {
-    const { width, height } = ctx.viewport;
-    const cam = ctx.camera;
-    const show = ctx.altitude < LABEL_MAX_ALT;
-    let nVis = 0;
-    for (const g of this.groups) {
-      const dist = Math.hypot(g.e - ctx.cameraPos.x, -g.n - ctx.cameraPos.z);
-      if (!show || dist > LABEL_MAX_DIST + 500) {
-        if (g.attached) { g.el.remove(); g.attached = false; }
-        continue;
-      }
-      if (!g.attached) { this.root.appendChild(g.el); g.attached = true; }
-      if (Number.isNaN(g.h) || ctx.frame % 90 === 0) g.h = this.engine.heightAt(g.e, g.n);
-      this.v.set(g.e, g.h + 14, -g.n).project(cam);
-      const vis = this.v.z > -1 && this.v.z < 1 && Math.abs(this.v.x) < 1.05 && Math.abs(this.v.y) < 1.05;
-      if (!vis) { g.el.style.opacity = '0'; continue; }
-      const x = (this.v.x * 0.5 + 0.5) * width, y = (-this.v.y * 0.5 + 0.5) * height;
-      g.el.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%) translateY(-5px)`;
-      const fd = Math.max(0, Math.min(1, (LABEL_MAX_DIST - dist) / 1000));
-      const fa = Math.max(0, Math.min(1, (LABEL_MAX_ALT - ctx.altitude) / 1500));
-      const o = fd * fa;
-      g.el.style.opacity = o.toFixed(2);
-      g.el.style.zIndex = String(Math.round(10000 - dist / 2));
-      if (o > 0.05) nVis++;
-    }
-    this.stats.labels = nVis;
-  }
-
-  dispose() {
-    this.mesh.removeFromParent();
-    this.mesh.geometry.dispose();
-    this.material.dispose();
-    this.root.remove();
-  }
-}
-
-// ---------------------------------------------------------------- helpers
-function dirOf(q: { nx: number; ny: number }) {
-  // along-track unit vector in three coords (tangent = (ny, -nx) in E/N → (ny, 0, nx))
-  return new THREE.Vector3(q.ny, 0, q.nx);
-}
-
-/** vertical square post from base point p (three coords) */
-function post(b: MeshBuilder, p: THREE.Vector3, w: number, h: number, c: RGB) {
-  b.box(p.x - w / 2, p.x + w / 2, p.y, p.y + h, p.z - w / 2, p.z + w / 2, c, 0, 'bottom');
-}
-
-/** box aligned with the track at sample q: length along track, width across; y absolute (relative to q.z) */
-function orientedBox(b: MeshBuilder, c: THREE.Vector3, q: { z: number; nx: number; ny: number }, len: number, wid: number, y0: number, y1: number, col: RGB, skipBottom: boolean) {
-  const t = dirOf(q);
-  const n = new THREE.Vector3(q.nx, 0, -q.ny);
-  const base = q.z;
-  const corner = (a: number, s: number, y: number) =>
-    new THREE.Vector3(c.x + t.x * a + n.x * s, base + y, c.z + t.z * a + n.z * s);
-  const hl = len / 2, hw = wid / 2;
-  const up = new THREE.Vector3(0, 1, 0);
-  b.quad(corner(-hl, -hw, y1), corner(hl, -hw, y1), corner(hl, hw, y1), corner(-hl, hw, y1), col, 0, up);
-  if (!skipBottom) b.quad(corner(-hl, -hw, y0), corner(hl, -hw, y0), corner(hl, hw, y0), corner(-hl, hw, y0), col, 0, up.clone().negate());
-  b.quad(corner(-hl, hw, y0), corner(hl, hw, y0), corner(hl, hw, y1), corner(-hl, hw, y1), col, 0, n);
-  b.quad(corner(-hl, -hw, y0), corner(hl, -hw, y0), corner(hl, -hw, y1), corner(-hl, -hw, y1), col, 0, n.clone().negate());
-  b.quad(corner(hl, -hw, y0), corner(hl, hw, y0), corner(hl, hw, y1), corner(hl, -hw, y1), col, 0, t);
-  b.quad(corner(-hl, -hw, y0), corner(-hl, hw, y0), corner(-hl, hw, y1), corner(-hl, -hw, y1), col, 0, t.clone().negate());
-}
-
 function escapeHtml(s: string) {
   return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 }
+
+void HEAVY;

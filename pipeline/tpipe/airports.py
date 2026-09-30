@@ -19,9 +19,12 @@ actually laid out instead of rasterising OSM lines into blocky pixels:
   runway holding position markings (OSM `aeroway=holding_position` where mapped,
   else computed at the TP 312 distance), stand lead-in lines + stop bars.
 - lights: runway edge / threshold / end, taxiway edge (instanced at night).
-- underlay: grass-coloured polygons covering what the *old* tile raster painted
-  as runway/taxiway/apron (classes 20), so the layer looks right before the
-  tiles are regenerated with the aeroway-free raster (osm_tiles.py).
+- airside service roads: OSM roads lying on the aprons are listed in
+  airside_roads.json (the road mesh skips them) and painted as apron service
+  roads instead (white edges, dashed centre, zipper where aircraft cross).
+- stands: lead-in lines, stop bars, red safety envelopes, stand numbers, GSE
+  staged at the head of stand; OSM jet bridges (docked to the stand's door);
+  apron floodlight masts.
 
 Output: app/public/data/air/surfaces.bin.gz (TBN1, layout in docs/AIR.md).
 
@@ -124,7 +127,7 @@ def load():
                     x, y = geo.project(o.location.lon, o.location.lat)
                     F["n_" + a].append(dict(g=Point(x, y), tags=tags, id=o.id))
             elif t == "w":
-                if a in ("runway", "taxiway", "taxilane", "parking_position", "stopway", "holding_position"):
+                if a in ("runway", "taxiway", "taxilane", "parking_position", "stopway", "holding_position", "jet_bridge"):
                     ids = [n.ref for n in o.nodes]
                     g = proj(shapely.from_wkb(wkb.create_linestring(o)))
                     # keep node ids aligned with (deduplicated) coordinates
@@ -164,14 +167,17 @@ def group_airports(F):
 
     def get(key, **kw):
         if key not in groups:
-            groups[key] = dict(key=key, rw=[], tw=[], ap=[], ta=[], hp=[], pp=[], ppn=[], hold=[], holdn=[], sw=[], rwa=[], bl=[], **kw)
+            groups[key] = dict(key=key, rw=[], tw=[], ap=[], ta=[], hp=[], pp=[], ppn=[], hold=[], holdn=[], sw=[], rwa=[], bl=[],
+                               jb=[], poly=None, **kw)
         return groups[key]
 
     def key_for(g, near_m=2500.0):
         i = which(g)
         if i is not None:
             a = aps[i]
-            return get(a["icao"] or f"osm{a['id']}", icao=a["icao"], name=a["name"])
+            grp = get(a["icao"] or f"osm{a['id']}", icao=a["icao"], name=a["name"])
+            grp["poly"] = grp["poly"] or a["poly"]
+            return grp
         c = g.centroid
         best = min(nodes, key=lambda n: n["pt"].distance(c), default=None)
         if best and best["pt"].distance(c) < near_m:
@@ -193,7 +199,7 @@ def group_airports(F):
     for kind, dst in (("w_taxiway", "tw"), ("w_taxilane", "tw"), ("a_apron", "ap"), ("a_taxiway", "ta"),
                       ("a_helipad", "hp"), ("w_parking_position", "pp"), ("n_parking_position", "ppn"),
                       ("w_holding_position", "hold"), ("n_holding_position", "holdn"), ("w_stopway", "sw"),
-                      ("a_terminal", "bl"), ("a_hangar", "bl")):
+                      ("a_terminal", "bl"), ("a_hangar", "bl"), ("w_jet_bridge", "jb")):
         for f in F[kind]:
             g = key_for(f["g"], 3000.0)
             if g is not None:
@@ -575,6 +581,13 @@ def add_polygon(mesh, geom, drape, surf):
                 mesh.add(V, drape(V[:, 0], V[:, 1]), np.full((len(V), 1), surf), T)
 
 
+def fill_holes(g, amax):
+    out = []
+    for p in polys_of(g):
+        out.append(Polygon(p.exterior, [r for r in p.interiors if Polygon(r).area > amax]))
+    return unary_union(out) if out else Polygon()
+
+
 def densify(xy, step):
     xy = np.asarray(xy, float)
     out = [xy[0]]
@@ -630,7 +643,9 @@ def add_ribbon(mesh, line_xy, drape, hw_geom, kind, line_hw, v0=0.0):
 
 # --------------------------------------------------------------------------- per airport
 
-MK_CENTRE, MK_EDGE, MK_HOLD, MK_LEAD, MK_BAR = 0, 1, 2, 3, 4
+MK_CENTRE, MK_EDGE, MK_HOLD, MK_LEAD, MK_BAR, MK_SVC, MK_ZIP, MK_RED = 0, 1, 2, 3, 4, 5, 6, 7
+BORDER = 16  # + kind: black border (yellow lines on light concrete, TP 312)
+GSE_TUG, GSE_CART, GSE_BELT = 0, 1, 2
 LT_EDGE, LT_THR, LT_END, LT_TAXI = 0, 1, 2, 3
 
 
@@ -642,7 +657,7 @@ def hold_distance(r):
     return 45.0
 
 
-def build_group(g, drape, stands_json):
+def build_group(g, drape, stands_json, roads=None):
     icao = g.get("icao")
     rws = build_runways(icao, g["rw"])
     rws += runway_area_rects(g["rwa"], rws)
@@ -717,14 +732,40 @@ def build_group(g, drape, stands_json):
                     arcs.append((arc[1:-1], wd, "taxiway"))
 
     # ---- pavement: taxi ribbons + fillets + aprons + taxiway areas, closed, minus runways
-    ribbons = [LineString(xy).buffer(w / 2, cap_style="flat", join_style="round", quad_segs=6)
-               for xy, w, kind in centre_lines + arcs if len(xy) >= 2 and LineString(xy).length > 0.5]
+    lines_all = [(LineString(xy), w, kind) for xy, w, kind in centre_lines + arcs if len(xy) >= 2]
+    lines_all = [t for t in lines_all if t[0].length > 0.5]
+    ribbons = [ln.buffer(w / 2, cap_style="flat", join_style="round", quad_segs=6) for ln, w, kind in lines_all]
     taxi = unary_union(ribbons + [ta]) if ribbons or not ta.is_empty else Polygon()
     taxi = taxi.buffer(4.0, quad_segs=6).buffer(-4.0, quad_segs=6)
-    pave = unary_union([taxi, aprons])
+    # aircraft corridors (for service-road zipper crossings)
+    corridor = unary_union([ln.buffer(w / 2, cap_style="flat") for ln, w, kind in lines_all]) if lines_all else Polygon()
+
+    # ---- airside service roads: roads lying on the aprons / taxi pavement are removed from
+    # the road mesh (airside_roads.json) and drawn here as apron service-road markings
+    svc = []  # (LineString, width, osm id)
+    core = unary_union([taxi, aprons])
+    if roads and g.get("poly") is not None and not core.is_empty:
+        zone = core.buffer(3.0)
+        poly = g["poly"].buffer(25)
+        for rid, xy, wd in roads:
+            ln = LineString(xy)
+            if ln.length < 4 or not poly.intersects(ln) or ln.intersection(poly).length < 0.9 * ln.length:
+                continue
+            if ln.intersection(zone).length >= 0.35 * ln.length:
+                svc.append((ln, float(min(max(wd, 6.0), 12.0)), rid))
+    svc_pave = unary_union([ln.buffer(w / 2, cap_style="flat") for ln, w, _ in svc]) if svc else Polygon()
+
+    # continuous pavement: close narrow gaps between aprons, taxiways, service roads and
+    # terminals, and fill enclosed slivers (< 2500 m2; real grass islands are larger)
+    pave = unary_union([taxi, aprons, svc_pave])
+    pave = fill_holes(pave.buffer(8.0, quad_segs=4).buffer(-8.0, quad_segs=4), 2500)
     pave = pave.difference(rw_union).simplify(0.3)
-    apron_part = pave.intersection(aprons) if not aprons.is_empty else Polygon()
-    taxi_part = pave.difference(aprons) if not aprons.is_empty else pave
+    aprons_f = fill_holes(aprons.buffer(12.0, join_style="mitre").buffer(-12.0, join_style="mitre"), 2500) \
+        if not aprons.is_empty else aprons
+    apron_part = pave.intersection(aprons_f) if not aprons_f.is_empty else Polygon()
+    taxi_part = pave.difference(aprons_f) if not aprons_f.is_empty else pave
+    aprons = aprons_f
+    apron_in = aprons_f.buffer(-0.6) if not aprons_f.is_empty else aprons_f
     # turf runways: nothing paved
     rw_paved = unary_union([rect(r) for r in paved_rws]) if paved_rws else Polygon()
 
@@ -732,17 +773,32 @@ def build_group(g, drape, stands_json):
     mk = Mesh(4)
     lights = []
     clip = rw_union.buffer(0.5)
-    for xy, w, kind in centre_lines + arcs:
-        ln = LineString(xy)
-        for piece in lines_of(ln.difference(clip)):
-            if piece.length > 3:
-                add_ribbon(mk, np.asarray(piece.coords), drape, 0.55, MK_CENTRE, 0.15)
+    for ln, w, kind in lines_all:
+        cl = ln.difference(clip)
+        on = cl.intersection(apron_in) if not apron_in.is_empty else Polygon()
+        off = cl.difference(apron_in) if not apron_in.is_empty else cl
+        for part, border in ((off, 0), (on, BORDER)):
+            for piece in lines_of(part):
+                if piece.length > 2:
+                    add_ribbon(mk, np.asarray(piece.coords), drape, 0.6, MK_CENTRE + border, 0.15)
+    # apron service roads: white edge lines + dashed centreline; "zipper" edges where an
+    # aircraft taxi route crosses (TP 312 / ICAO Annex 14 5.2.16 apron service road markings)
+    airside_ids = []
+    for ln, w, rid in svc:
+        airside_ids.append(rid)
+        cl = ln.difference(rw_union.buffer(1.0))
+        zp = cl.intersection(corridor) if not corridor.is_empty else Polygon()
+        nz = cl.difference(corridor) if not corridor.is_empty else cl
+        for part, kind in ((nz, MK_SVC), (zp, MK_ZIP)):
+            for piece in lines_of(part):
+                if piece.length > 1.5:
+                    add_ribbon(mk, np.asarray(piece.coords), drape, w / 2 + 0.4, kind, w / 2)
     # taxiway edge lines (double yellow) where the taxiway meets grass
     if not taxi_part.is_empty:
         inner = taxi_part.buffer(-0.9, join_style="mitre")
         edge = unary_union([ln for p in polys_of(inner) for ln in [p.exterior, *p.interiors]]) if not inner.is_empty else None
         if edge is not None and not edge.is_empty:
-            edge = edge.difference(unary_union([aprons.buffer(3.0), rw_union.buffer(3.0)]))
+            edge = edge.difference(unary_union([aprons.buffer(3.0), rw_union.buffer(3.0), svc_pave.buffer(2.0)]))
             for piece in lines_of(linemerge(edge) if isinstance(edge, MultiLineString) else edge):
                 if piece.length > 12:
                     xy = np.asarray(piece.simplify(0.4).coords)
@@ -788,20 +844,82 @@ def build_group(g, drape, stands_json):
                 if d[0] * (c - xy[0])[1] - d[1] * (c - xy[0])[0] < 0:  # runway must lie to the left
                     xy = xy[::-1]
                 add_ribbon(mk, xy, drape, 1.4, MK_HOLD, 0.15)
-    # stands
-    for s in stands_json or []:
+    # stands: lead-in line, stop bar, stand safety envelope (red), stand number, GSE
+    labels, gse, bridges, masts = [], [], [], []
+    bld = unary_union([b["g"] for b in g["bl"]]) if g["bl"] else Polygon()
+    free = lambda q: not bld.contains(Point(q)) and apron_in.contains(Point(q))  # noqa: E731
+    for si, s in enumerate(stands_json or []):
         p = np.array(s["pos"], float)
         lead = np.array(s["lead"], float)
-        if np.linalg.norm(p - lead) > 2:
-            add_ribbon(mk, np.array([lead, p]), drape, 0.5, MK_LEAD, 0.12)
         hd = np.array(s["hdg"], float)
-        nrm = np.array([hd[1], -hd[0]])
-        add_ribbon(mk, np.array([p - nrm * 2.5, p + nrm * 2.5]), drape, 0.6, MK_BAR, 0.3)
+        rt = np.array([hd[1], -hd[0]])  # right of the nose direction
+        bd = BORDER if apron_in.contains(Point(p)) else 0
+        if np.linalg.norm(p - lead) > 2:
+            add_ribbon(mk, np.array([lead, p]), drape, 0.6, MK_LEAD + bd, 0.15)
+        add_ribbon(mk, np.array([p - rt * 2.5, p + rt * 2.5]), drape, 0.8, MK_BAR + bd, 0.3)
+        span = float(s["span"])
+        if span < 22:
+            continue
+        Lac = span * 1.05
+        half = span / 2
+        fl, fr = p + hd * 3 - rt * half, p + hd * 3 + rt * half
+        bl_, br = p - hd * (Lac + 3) - rt * half, p - hd * (Lac + 3) + rt * half
+        add_ribbon(mk, np.array([fl, bl_, br, fr, fl]), drape, 0.45, MK_RED, 0.1)
+        if s.get("ref"):
+            q = lead + (p - lead) / max(np.linalg.norm(p - lead), 1e-6) * 6 if np.linalg.norm(p - lead) > 12 else p - hd * (Lac + 8)
+            labels.append((s["ref"], q[0], q[1], math.atan2(hd[0], hd[1])))
+        # ground support equipment staged at the head of stand (outside the envelope)
+        head = p + hd * 8
+        for k, (off_r, ang_r, kind) in enumerate(((0.3, 0, GSE_TUG), (-0.05, 0, GSE_CART), (-0.2, 0, GSE_CART),
+                                                  (-0.35, 0, GSE_CART), (0.42, 1, GSE_BELT))):
+            q = head + rt * (off_r * span) + (hd * 3 if kind == GSE_BELT else 0)
+            if free(q):
+                ang = math.atan2(rt[1], rt[0]) if ang_r == 0 else math.atan2(-hd[1], -hd[0])
+                gse.append((q[0], q[1], ang, kind))
     if stands_json is None:
         for pp in g["pp"]:
             xy = np.asarray(pp["g"].coords)
             if LineString(xy).length > 5:
-                add_ribbon(mk, np.array(fillet(xy, 15.0)), drape, 0.5, MK_LEAD, 0.12)
+                add_ribbon(mk, np.array(fillet(xy, 15.0)), drape, 0.6, MK_LEAD + BORDER, 0.15)
+    # jet bridges (OSM aeroway=jet_bridge): rotunda at the terminal end; the cab docks at
+    # the forward left door of the aircraft on the matched stand
+    st = stands_json or []
+    for jb in g["jb"]:
+        xy = np.asarray(jb["g"].coords)
+        e0, e1 = xy[0], xy[-1]
+        best = None
+        for si, s in enumerate(st):
+            p = np.array(s["pos"], float)
+            for rot, cab in ((e0, e1), (e1, e0)):
+                d = float(np.linalg.norm(cab - p))
+                if d < 45 and (best is None or d < best[0]):
+                    best = (d, si, rot, cab)
+        if best:
+            _, si, rot, cab = best
+            s = st[si]
+            p, hd = np.array(s["pos"], float), np.array(s["hdg"], float)
+            lf = np.array([-hd[1], hd[0]])
+            wide = s["span"] >= 42
+            door = p - hd * (8.5 if wide else 5.0) + lf * (3.6 if wide else 2.6)
+            if 8 < np.linalg.norm(door - rot) < 50:
+                cab = door
+        else:
+            si, rot, cab = -1, e0, e1
+            if np.linalg.norm(e1 - e0) < 6:
+                continue
+        bridges.append((rot[0], rot[1], cab[0], cab[1], si, 5.2 if (best and st[si]["span"] >= 42) else 4.2))
+    # apron floodlight masts along the apron edge, clear of taxi routes and buildings
+    if not apron_part.is_empty and apron_part.area > 30000:
+        keep_out = unary_union([corridor.buffer(12), bld.buffer(8), rw_union.buffer(60)])
+        for poly in polys_of(apron_part):
+            ring = poly.buffer(-5).exterior if not poly.buffer(-5).is_empty and isinstance(poly.buffer(-5), Polygon) else None
+            if ring is None or ring.length < 200:
+                continue
+            for k in range(int(ring.length // 160)):
+                q = ring.interpolate((k + 0.5) * ring.length / max(1, int(ring.length // 160)))
+                if keep_out.contains(q) or any(math.hypot(q.x - m[0], q.y - m[1]) < 90 for m in masts):
+                    continue
+                masts.append((q.x, q.y))
 
     # ---- runway mesh + lights
     rwm = Mesh(12)
@@ -855,9 +973,6 @@ def build_group(g, drape, stands_json):
     pv = Mesh(1)
     add_polygon(pv, taxi_part, drape, 0)
     add_polygon(pv, apron_part, drape, 1)
-    under = underlay(g)
-    if under is not None:
-        add_polygon(pv, under.difference(unary_union([pave, rw_paved])).simplify(0.5), drape, 2)
 
     # origin: 64 m aligned (keeps world-periodic texture phases)
     allg = unary_union([pave, rw_union]) if not pave.is_empty or not rw_union.is_empty else None
@@ -866,26 +981,9 @@ def build_group(g, drape, stands_json):
     b = allg.bounds
     origin = (math.floor((b[0] + b[2]) / 2 / 64) * 64, math.floor((b[1] + b[3]) / 2 / 64) * 64)
     return dict(origin=origin, bbox=[round(v, 1) for v in b], rw=rwm, pv=pv, mk=mk, lights=lights,
+                labels=labels, gse=gse, bridges=bridges, masts=masts, airside=airside_ids,
                 runways=[dict(des="/".join(r["des"]), len=round(r["L"]), width=round(r["w"], 1),
                               disp=[round(d) for d in r["disp"]], kind=r["kind"]) for r in rws])
-
-
-def underlay(g):
-    """what the old raster painted as class 20 (runway/taxiway/apron) + a margin"""
-    parts = []
-    for w in g["rw"] + g["tw"]:
-        tg = w["tags"]
-        wd = _metres(tg.get("width"))
-        if not (wd == wd and 5 < wd < 100):
-            wd = 45.0 if tg.get("aeroway") == "runway" else 23.0
-        if tg.get("aeroway") == "taxilane":
-            continue
-        parts.append(w["g"].buffer(wd / 2 + 2.5, cap_style="flat"))
-    for a in g["ap"] + g["hp"] + g["ta"] + [x for x in g["rwa"] if x.get("area")]:
-        parts.append(a["g"].buffer(2.5))
-    if not parts:
-        return None
-    return unary_union(parts)
 
 
 # --------------------------------------------------------------------------- main
@@ -897,7 +995,26 @@ def stands_for(icao, air):
     out = []
     for s in ap["stands"]:
         nd = ap["nodes"][s["node"]]
-        out.append(dict(pos=s["pos"], hdg=s["hdg"], lead=nd[:2]))
+        out.append(dict(pos=s["pos"], hdg=s["hdg"], lead=nd[:2], span=s["span"], ref=s["ref"]))
+    return out
+
+
+def load_roads(groups):
+    """drivable roads (service / unclassified, not tunnels) near the aerodromes -> per group lists"""
+    d = np.load(geo.WORK / "osm_lines.npz", allow_pickle=True)
+    off = np.concatenate([[0], np.cumsum(d["len"].astype(np.int64))])
+    kind, cls, fl = d["kind"], d["cls"], d["flags"]
+    sel = np.nonzero((kind == 0) & np.isin(cls, [5, 6]) & ((fl & 4) == 0))[0]
+    # NpzFile members decompress on every access: read each array once
+    xy, ids, width = d["xy"], d["id"], d["width"]
+    first = xy[off[sel]]
+    out = {}
+    for key, g in groups.items():
+        if g.get("poly") is None or not g["ap"]:
+            continue
+        x0, y0, x1, y1 = g["poly"].bounds
+        m = (first[:, 0] > x0 - 300) & (first[:, 0] < x1 + 300) & (first[:, 1] > y0 - 300) & (first[:, 1] < y1 + 300)
+        out[key] = [(int(ids[i]), xy[off[i]:off[i + 1]], float(width[i])) for i in sel[m]]
     return out
 
 
@@ -907,6 +1024,8 @@ def main():
     print("airports: OSM")
     F = load()
     groups = group_airports(F)
+    roads = load_roads(groups)
+    airside = []
     try:
         airj = json.loads((geo.OUT / "air" / "airports.json").read_text())
         air = {a["icao"]: a for a in airj["airports"]}
@@ -917,7 +1036,7 @@ def main():
     meta = []
     for key, g in sorted(groups.items(), key=lambda kv: str(kv[0])):
         try:
-            res = build_group(g, drape, stands_for(g.get("icao"), air))
+            res = build_group(g, drape, stands_for(g.get("icao"), air), roads.get(key))
         except Exception as e:  # keep going: one broken aerodrome shouldn't sink the region
             print(f"  ! {key}: {e}")
             continue
@@ -942,17 +1061,43 @@ def main():
             cnt["lt"] += len(L)
         else:
             m["lt"] = [cnt["lt"], 0]
+        ox, oy = res["origin"]
+
+        def put(name, rows, cols):
+            rows = np.array(rows, float).reshape(-1, cols)
+            m[name] = [cnt[name], len(rows)]
+            cnt[name] += len(rows)
+            return rows
+
+        # jet bridges: rotunda (x, ground h, z), cab end (x, z), stand index, floor height
+        J = put("jb", res["bridges"], 6)
+        if len(J):
+            arrays["jb"].append(np.column_stack([J[:, 0] - ox, drape(J[:, 0], J[:, 1]), -(J[:, 1] - oy), J[:, 2] - ox,
+                                                 -(J[:, 3] - oy), J[:, 4], J[:, 5], drape(J[:, 2], J[:, 3])]).astype(np.float32).ravel())
+        G_ = put("gse", res["gse"], 4)
+        if len(G_):
+            arrays["gse"].append(np.column_stack([G_[:, 0] - ox, drape(G_[:, 0], G_[:, 1]), -(G_[:, 1] - oy), G_[:, 2], G_[:, 3]]).astype(np.float32).ravel())
+        M_ = put("mast", res["masts"], 2)
+        if len(M_):
+            arrays["mast"].append(np.column_stack([M_[:, 0] - ox, drape(M_[:, 0], M_[:, 1]), -(M_[:, 1] - oy)]).astype(np.float32).ravel())
+        m["labels"] = [[ref, round(x - ox, 2), round(float(drape(np.array([x]), np.array([y]))[0]), 2), round(-(y - oy), 2), round(a, 4)]
+                       for ref, x, y, a in res["labels"]]
+        airside += res["airside"]
         meta.append(m)
         rs = ", ".join(f"{r['des']} {r['len']}x{r['width']}" + (f" disp{r['disp']}" if any(r["disp"]) else "") +
                        (" turf" if r["kind"] == 2 else "") for r in res["runways"])
         print(f"  {key:>10} {g.get('name') or '':<45.45} rw {m['rw'][3] // 3:>5} pv {m['pv'][3] // 3:>6} "
               f"mk {m['mk'][3] // 3:>6} lt {m['lt'][1]:>5}  {rs}")
     out = {k: np.concatenate(v) if v else np.zeros(0, np.float32) for k, v in arrays.items()}
-    for k in ("rw_pos", "rw_attr", "pv_pos", "mk_pos", "mk_attr", "lt_pos"):
+    for k in ("rw_pos", "rw_attr", "pv_pos", "mk_pos", "mk_attr", "lt_pos", "jb", "gse", "mast"):
+        out.setdefault(k, np.zeros(0, np.float32))
         out[k] = out[k].astype(np.float32)
     out["pv_attr"] = out["pv_attr"].astype(np.uint8)
     out["lt_kind"] = out.get("lt_kind", np.zeros(0, np.uint8)).astype(np.uint8)
-    n = tbn.write(OUT, out, version=1, airports=meta)
+    n = tbn.write(OUT, out, version=2, airports=meta)
+    ids = sorted(set(airside))
+    (OUT.parent / "airside_roads.json").write_text(json.dumps(ids))
+    print(f"  airside_roads.json: {len(ids)} OSM road ways painted as apron service roads (road mesh skips them)")
     print(f"  {OUT.name}: {n / 1024:.0f} KB, {len(meta)} airports")
 
 

@@ -428,11 +428,36 @@ impl Peds {
                 }
                 let (s, along, face) = self.stop_snap[i].unwrap_or((self.stops[i], 0.0, 0.0));
                 let (ah, ac) = along.sin_cos();
+                // waiting people take places along the curb ~1 m apart facing the road, a second
+                // row further back, a few standing back near the buildings; places already
+                // taken (also by the crowd of another stop at the same pole) are skipped
+                let taken: Vec<[f64; 3]> = self.list.iter().filter(|p| p.state == IDLE && (p.pos[0] - s[0]).abs() < 12.0 && (p.pos[1] - s[1]).abs() < 12.0).map(|p| p.pos).collect();
+                let mut placed: Vec<[f64; 3]> = Vec::new();
+                let mut slot = 0usize;
                 for _ in have..want {
-                    // spread along the curb, ~1 m either side of the sidewalk centre line
-                    let u = rng.range(-5.0, 5.0) as f64;
-                    let w = rng.range(-0.9, 0.9) as f64;
-                    let pos = [s[0] + u * ac as f64 + w * ah as f64, s[1] + u * ah as f64 - w * ac as f64, s[2]];
+                    let mut pos = s;
+                    let mut ok = false;
+                    while slot < 48 {
+                        let k = slot;
+                        slot += 1;
+                        let (col, row) = ((k % 12) as f64, (k / 12) as f64);
+                        // centre out: 0, +1, -1, +2, -2 ...
+                        let u = if col as usize % 2 == 0 { col * 0.5 } else { -(col + 1.0) * 0.5 } * 1.05 + rng.range(-0.15, 0.15) as f64;
+                        let back = rng.f32() < 0.15;
+                        // + = towards the road (right of `along` is the carriageway side via `face`)
+                        let w = if back { -1.6 } else { 0.45 - row * 1.05 } + rng.range(-0.12, 0.12) as f64;
+                        let (fs, fc) = face.sin_cos();
+                        let cand = [s[0] + u * ac as f64 + w * fc as f64, s[1] + u * ah as f64 + w * fs as f64, s[2]];
+                        if taken.iter().chain(placed.iter()).all(|q| (q[0] - cand[0]).hypot(q[1] - cand[1]) > 0.8) {
+                            pos = cand;
+                            ok = true;
+                            break;
+                        }
+                    }
+                    if !ok {
+                        break;
+                    }
+                    placed.push(pos);
                     self.list.push(Ped {
                         edge: NONE,
                         egen: 0,
@@ -453,7 +478,7 @@ impl Peds {
                         stop: i as u32,
                         life: rng.range(40.0, 420.0),
                         pos,
-                        h: face + rng.range(-0.7, 0.7),
+                        h: face + rng.range(-0.45, 0.45),
                         dead: false,
                     });
                 }

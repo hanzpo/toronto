@@ -175,6 +175,18 @@ class Collector:
         self.l_layer = array("b")
         self.l_name = []
         self.l_side = array("B")  # sidewalk code (SIDEWALK below)
+        # street detail (roads agent, docs/ROADS.md): service subtype, sub-kind of paths,
+        # bike infrastructure, per-direction lanes, surface, raw width tag, crossing markings
+        self.l_svc = array("B")
+        self.l_sub = array("B")
+        self.l_cyc = array("B")
+        self.l_lf = array("B")
+        self.l_lb = array("B")
+        self.l_surf = array("B")
+        self.l_wraw = array("f")
+        self.l_xmark = array("B")
+        self.l_turnf = []
+        self.l_turnb = []
         # landcover areas
         self.a_class = array("B")
         self.a_id = array("d")
@@ -184,7 +196,7 @@ class Collector:
         self.a_lat = array("d")
         # nodes of interest: 0 signals, 1 stop sign, 2 crossing, 3 tree, 4 street lamp
         self.n_kind = array("B")
-        self.n_var = array("B")  # crossing: 0 unmarked, 1 zebra/ladder, 2 lines · tree: 0 broadleaf, 1 conifer
+        self.n_var = array("B")  # crossing: 0 unmarked, 1 zebra/ladder, 2 lines · tree: bit 0 conifer, bits 1-4 genus (TREE_GENUS)
         self.n_id = array("q")
         self.n_lon = array("d")
         self.n_lat = array("d")
@@ -304,7 +316,10 @@ class Collector:
                 width = 3.0
             else:
                 width = lanes * (3.6 if cls <= 1 else 3.3) + (3.0 if cls <= 1 else 1.0)
-        elif rw in RAIL_CLASS and t.get("service") is None and t.get("usage") not in ("tourism",):
+        elif rw in RAIL_CLASS and (t.get("service") is None or (rw == "tram" and t.get("service") != "yard")) \
+                and t.get("usage") not in ("tourism",):
+            # streetcar sidings / crossovers / short-turn loops are street track (class 4); only
+            # carhouse yards (service=yard) become class 1
             kind, cls = 1, RAIL_CLASS[rw]
             width = 3.2
         elif rw in RAIL_CLASS:
@@ -358,19 +373,46 @@ class Collector:
         self.l_layer.append(int(max(-5, min(5, layer))) if layer == layer else 0)
         self.l_name.append(t.get("name") or t.get("ref") or "")
         self.l_side.append(_sidewalk(t) if kind == 0 else 0)
+        self._detail(t, kind, hw)
         sp = _metres(t.get("maxspeed"))
         if sp == sp and "mph" in (t.get("maxspeed") or ""):
             sp *= 1.609
         self.l_speed.append(sp)
+
+    def _detail(self, t, kind, hw) -> None:
+        road = kind == 0
+        self.l_svc.append(SERVICE.get(t.get("service"), 6 if t.get("service") else 0) if road and hw == "service" else 0)
+        self.l_sub.append(SUBKIND.get(hw, 0) if road else 0)
+        self.l_cyc.append(_cycleway(t) if road else 0)
+        lf, lb = _metres(t.get("lanes:forward")), _metres(t.get("lanes:backward"))
+        self.l_lf.append(int(min(15, lf)) if lf == lf and lf > 0 else 0)
+        self.l_lb.append(int(min(15, lb)) if lb == lb and lb > 0 else 0)
+        self.l_surf.append(SURFACE.get(t.get("surface"), 0) if road else 0)
+        w = _metres(t.get("width:carriageway") or t.get("width"))
+        self.l_wraw.append(w if w == w else np.nan)
+        self.l_xmark.append(_crossing_markings(t) if road and t.get("footway") == "crossing" else 0)
+        self.l_turnf.append((t.get("turn:lanes:forward") or t.get("turn:lanes") or "") if road else "")
+        self.l_turnb.append((t.get("turn:lanes:backward") or "") if road else "")
 
     def node(self, n) -> None:
         t = n.tags
         hw = t.get("highway")
         k = {"traffic_signals": 0, "stop": 1, "crossing": 2, "street_lamp": 4}.get(hw)
         var = 0
+        rw = t.get("railway")
+        if k is None and rw in ("level_crossing", "crossing"):
+            # 5 railway level crossing (road) / 6 railway foot crossing; var bit0 gates, bit1 lights
+            k = 5 if rw == "level_crossing" else 6
+            bar = t.get("crossing:barrier")
+            var = (1 if bar not in (None, "no") else 0) | (2 if t.get("crossing:light") not in (None, "no") or t.get("crossing:bell") == "yes" else 0)
+        if k is None and (rw == "tram_stop" or (t.get("public_transport") == "stop_position" and t.get("tram") == "yes")):
+            k = 7  # streetcar stop (safety zone / island)
+        if k is None:
+            k, var = _street_furniture(t)  # kinds 20+ (buildings/props agent, docs/SPEC.md)
         if k is None and t.get("natural") == "tree":
             k = 3
-            var = 1 if t.get("leaf_type") == "needleleaved" else 0
+            g = _tree_genus(t)
+            var = (1 if t.get("leaf_type") == "needleleaved" or g in CONIFER_GENERA else 0) | (g << 1)
         if k is None:
             return
         if k == 2:
@@ -380,6 +422,36 @@ class Collector:
         self.n_id.append(n.id)
         self.n_lon.append(n.location.lon)
         self.n_lat.append(n.location.lat)
+
+
+# tree genus codes packed into p_var bits 1-4 (bit 0 = conifer); the client
+# (workers/vegetation.ts GENUS) maps them to its species models. 0 = unknown.
+TREE_GENUS = {
+    "acer": 1, "gleditsia": 2, "tilia": 3, "platanus": 4, "quercus": 5, "salix": 6, "pinus": 7,
+    "picea": 8, "thuja": 9, "tsuga": 10, "fagus": 11, "ulmus": 12, "ginkgo": 13, "malus": 14,
+    "prunus": 14, "amelanchier": 14, "syringa": 14, "pyrus": 14, "cercis": 14,
+}
+CONIFER_GENERA = {7, 8, 9, 10}
+# common-name fallbacks (species / taxon tags in Toronto's OSM data are mostly Latin)
+_TREE_COMMON = (("maple", 1), ("locust", 2), ("linden", 3), ("basswood", 3), ("plane", 4), ("sycamore", 4),
+                ("oak", 5), ("willow", 6), ("pine", 7), ("spruce", 8), ("cedar", 9), ("arborvitae", 9),
+                ("hemlock", 10), ("beech", 11), ("elm", 12), ("ginkgo", 13), ("crab", 14), ("cherry", 14),
+                ("serviceberry", 14), ("lilac", 14), ("pear", 14), ("redbud", 14))
+
+
+def _tree_genus(t) -> int:
+    """Genus code (TREE_GENUS) from genus / species / taxon tags, 0 if unknown."""
+    for key in ("genus", "species", "taxon", "genus:en", "species:en", "taxon:en"):
+        v = (t.get(key) or "").strip().lower()
+        if not v:
+            continue
+        g = TREE_GENUS.get(v.split()[0])
+        if g:
+            return g
+        for name, code in _TREE_COMMON:
+            if name in v:
+                return code
+    return 0
 
 
 # r_side codes (docs/SPEC.md): 0 untagged, 1 none, 2 left, 3 right, 4 both, 5 separate,
@@ -411,11 +483,70 @@ def _sidewalk(t) -> int:
     return 0
 
 
+SERVICE = {"parking_aisle": 1, "driveway": 2, "alley": 3, "drive-through": 4, "emergency_access": 5}
+SUBKIND = {"footway": 1, "cycleway": 2, "path": 3, "steps": 4, "bridleway": 5, "pedestrian": 1, "living_street": 2,
+           "busway": 7}
+SURFACE = {"asphalt": 0, "concrete": 1, "concrete:plates": 1, "paving_stones": 2, "sett": 2, "brick": 2,
+           "cobblestone": 2, "unhewn_cobblestone": 2, "gravel": 3, "fine_gravel": 3, "compacted": 3, "dirt": 3,
+           "ground": 3, "earth": 3, "unpaved": 3, "grass": 3, "wood": 4}
+CYC = {"lane": 1, "track": 2, "shared_lane": 3, "share_busway": 3, "opposite_lane": 1, "opposite_track": 2,
+       "separate": 0, "buffered_lane": 4}
+
+
+def _cycleway(t) -> int:
+    """Bike infrastructure: low nibble right side, high nibble left side.
+    1 painted lane · 2 separated track · 3 shared lane (sharrows) · 4 buffered lane."""
+    both = CYC.get(t.get("cycleway") or t.get("cycleway:both") or "", 0)
+    r = CYC.get(t.get("cycleway:right") or "", 0) or both
+    left = CYC.get(t.get("cycleway:left") or "", 0) or both
+    for side, key in ((0, "cycleway:right:buffer"), (1, "cycleway:left:buffer"), (2, "cycleway:both:buffer")):
+        if t.get(key) not in (None, "no"):
+            if side in (0, 2) and r == 1:
+                r = 4
+            if side in (1, 2) and left == 1:
+                left = 4
+    return (r & 15) | ((left & 15) << 4)
+
+
+# ---- street furniture nodes (buildings/props agent; client: workers/props.ts)
+# p_kind 20 bike-share dock (var = capacity, ≤ 255) · 21 post box · 22 bench ·
+# 23 waste basket / recycling · 24 fire hydrant · 25 bus stop (var bit0 shelter,
+# bit1 bench, bit2 bin) · 26 newspaper box · 27 bicycle parking (var = capacity) ·
+# 29 parking pay station / meter
+def _street_furniture(t):
+    am = t.get("amenity")
+    if am == "bicycle_rental":
+        cap = _metres(t.get("capacity"))
+        return 20, int(min(255, cap)) if cap == cap else 0
+    if am == "post_box":
+        return 21, 0
+    if am == "bench" or t.get("leisure") == "picnic_table":
+        return 22, 0
+    if am in ("waste_basket", "recycling") and t.get("recycling_type") != "centre":
+        return 23, 1 if am == "recycling" else 0
+    if t.get("emergency") == "fire_hydrant":
+        return 24, 0
+    if t.get("highway") == "bus_stop":
+        v = (1 if t.get("shelter") == "yes" else 0) | (2 if t.get("bench") == "yes" else 0) | (4 if t.get("bin") == "yes" else 0)
+        return 25, v
+    if am == "vending_machine" and "newspaper" in (t.get("vending") or ""):
+        return 26, 0
+    if am == "bicycle_parking":
+        cap = _metres(t.get("capacity"))
+        return 27, int(min(255, cap)) if cap == cap else 0
+    if am in ("parking_entrance",) or t.get("vending") == "parking_tickets":
+        return 29, 0
+    return None, 0
+
+
 def _crossing_markings(t) -> int:
-    """0 unmarked, 1 zebra/ladder (continental bars), 2 two transverse lines."""
+    """0 unmarked, 1 zebra/ladder (continental bars), 2 two transverse lines,
+    3 pedestrian crossover (Ontario PXO: ladder + side-mounted / overhead signs)."""
     m = t.get("crossing:markings")
     c = t.get("crossing")
     ref = t.get("crossing_ref")
+    if (ref or "").lower() in ("pxo", "pedestrian_crossover") or t.get("crossing:signals") == "pxo":
+        return 3
     if m in ("no", "surface"):
         return 0
     if m in ("zebra", "ladder", "ladder:skewed", "zebra:double", "dashes") or c == "zebra" or ref == "zebra":
@@ -426,7 +557,8 @@ def _crossing_markings(t) -> int:
 
 
 KEYS = ("building", "building:part", "highway", "railway", "waterway", "natural", "landuse",
-        "leisure", "amenity", "aeroway", "water", "place", "man_made", "public_transport")
+        "leisure", "amenity", "aeroway", "water", "place", "man_made", "public_transport",
+        "emergency")  # emergency: fire hydrants (street furniture)
 
 
 def run(path: str) -> None:
@@ -475,6 +607,10 @@ def run(path: str) -> None:
         lanes=arr(c.l_lanes, np.uint8), flags=arr(c.l_flags, np.uint8), layer=arr(c.l_layer, np.int8),
         name=np.array(c.l_name, dtype=object), nid=arr(c.l_nid, np.int64), speed=arr(c.l_speed, np.float32),
         side=arr(c.l_side, np.uint8),
+        svc=arr(c.l_svc, np.uint8), sub=arr(c.l_sub, np.uint8), cyc=arr(c.l_cyc, np.uint8),
+        lf=arr(c.l_lf, np.uint8), lb=arr(c.l_lb, np.uint8), surf=arr(c.l_surf, np.uint8),
+        wraw=arr(c.l_wraw, np.float32), xmark=arr(c.l_xmark, np.uint8),
+        turnf=np.array(c.l_turnf, dtype=object), turnb=np.array(c.l_turnb, dtype=object),
     )
     np.savez(
         geo.WORK / "osm_areas.npz",
@@ -506,7 +642,7 @@ def run(path: str) -> None:
             var = np.concatenate([var, np.zeros(len(R), np.uint8)])
             nid = np.concatenate([nid, np.zeros(len(R), np.int64)])
         print(f"tree rows: {len(toff) - 1:,} -> {sum(len(r) for r in rows):,} trees")
-    print("nodes by kind:", np.bincount(kind, minlength=5).tolist())
+    print("nodes by kind:", np.bincount(kind, minlength=8).tolist())
     np.savez(geo.WORK / "osm_nodes.npz", kind=kind, var=var, id=nid, xy=nxy)
     print(f"done in {time.time() - t0:.0f}s")
 

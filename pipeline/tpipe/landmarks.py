@@ -37,9 +37,15 @@ from shapely.ops import transform, unary_union
 
 from . import geo, terrain
 
-# Areas we scan (lon/lat boxes): downtown/midtown Toronto, Niagara Falls, Pearson.
+# Areas we scan (lon/lat boxes): downtown/midtown Toronto (incl. the Distillery
+# District), Niagara Falls, Pearson, Scarborough Town Centre, Square One,
+# Hamilton & Kitchener city halls.
 BOXES = [
-    (-79.42, 43.635, -79.36, 43.682),
+    (-79.42, 43.635, -79.35, 43.682),
+    (-79.266, 43.769, -79.250, 43.781),
+    (-79.650, 43.586, -79.632, 43.598),
+    (-79.878, 43.251, -79.866, 43.260),
+    (-80.497, 43.448, -80.487, 43.456),
     (-79.10, 43.06, -79.04, 43.10),
     (-79.63, 43.67, -79.59, 43.70),
 ]
@@ -51,6 +57,11 @@ BOXES = [
 #  - parts_only: suppress only these ids (+ anchors), no containment search
 #  - lonlat: position when there is no OSM object (planned/new buildings)
 #  - rotation_deg: explicit rotation override (degrees CCW)
+#  - rot_from: anchor alias whose dominant edge direction sets the rotation
+#  - osm_all: also export whole buildings (not just building:parts) in osmParts
+#    (kind "building", `whole` true; `outline` true when parts lie inside it)
+#  - holes: export courtyard rings as `holes: {alias: [[ring], ...]}`
+#  - exclude: ids never suppressed (e.g. owned by another landmark)
 LANDMARKS: list[dict] = [
     dict(id="cn_tower", name="CN Tower", height=553.3,
          anchors={"base": 32742038, "leg": 288273458}, rot="cn_leg"),
@@ -117,6 +128,63 @@ LANDMARKS: list[dict] = [
          bridge=-14629795, contain=False),
     dict(id="pearson_t1", name="Pearson Terminal 1", height=40,
          anchors={"terminal": 59439578}),
+    # --- pass 2: downtown retail & theatres
+    dict(id="eaton_centre", terrain_z=True, name="CF Toronto Eaton Centre", height=151,
+         anchors={"mall": 4321312, "bay": 31728272, "simpson": 34587440}, center="mall"),
+    dict(id="yonge_dundas_square", terrain_z=True, name="Sankofa Square (Yonge-Dundas Square)", height=40,
+         anchors={"hardrock": 127288086, "citytv": 8033925, "tenor": 366547307,
+                  "canopy": 61014138, "stage": 1105572886},
+         center="hardrock", rot_from="hardrock", osm_all=True),
+    dict(id="massey_hall", terrain_z=True, name="Massey Hall", height=24,
+         anchors={"hall": 62004062}),
+    dict(id="elgin_winter_garden", terrain_z=True, name="Elgin and Winter Garden Theatre Centre", height=30,
+         anchors={"hall": 104934673, "front": 104934674}, osm_all=True,
+         suppress_extra=[965009580]),
+    # --- University of Toronto St. George & Queen's Park
+    dict(id="university_college", terrain_z=True, name="University College", height=36,
+         anchors={"uc": 8032167}, osm_all=True),
+    dict(id="hart_house", terrain_z=True, name="Hart House & Soldiers' Tower", height=43.6,
+         anchors={"hh": -1989, "tower": 28822997}, center="hh", holes=True),
+    dict(id="convocation_hall", terrain_z=True, name="Convocation Hall", height=33,
+         anchors={"hall": 330718925}),
+    dict(id="robarts_library", terrain_z=True, name="Robarts Library", height=63,
+         anchors={"lib": 7991747, "fisher": 9916090}, center="lib", osm_all=True),
+    dict(id="knox_college", terrain_z=True, name="Knox College", height=36,
+         anchors={"knox": -2032}, osm_all=True, holes=True),
+    dict(id="trinity_college", terrain_z=True, name="Trinity College", height=33,
+         anchors={"tc": -2687}, holes=True),
+    dict(id="victoria_college", terrain_z=True, name="Victoria College (Old Vic)", height=38,
+         anchors={"vic": 204323029}),
+    dict(id="ontario_legislature", terrain_z=True, name="Ontario Legislative Building", height=60,
+         anchors={"leg": 15089986}),
+    dict(id="kings_college_circle", name="King's College Circle", height=0,
+         lonlat=(-79.39513, 43.66177), size=(140, 110), rotation_deg=16.7, contain=False),
+    dict(id="rom_heritage", terrain_z=True, name="Royal Ontario Museum (1914/1933 wings)", height=36,
+         anchors={"rom": 4942687}, osm_all=True,
+         exclude=[992716633, 992716634, 992716635, 992716636, 992716637, 992716638,
+                  992716639, 992716640]),
+    # --- markets, industrial heritage, culture
+    dict(id="st_lawrence_market", terrain_z=True, name="St. Lawrence Market", height=33,
+         anchors={"south": 24626769, "north": 1290813314, "hall": 24626954}, center="south",
+         osm_all=True),
+    dict(id="distillery_district", terrain_z=True, name="Distillery District", height=36,
+         anchors={"a": 43807812, "b": 43812197, "c": 327171381, "d": 205006663, "e": 205006662,
+                  "f": 43806108, "g": 945953414, "h": 192836912, "i": 43805649, "j": 178676583,
+                  "k": 43805353, "l": 205006666, "m": 43804881, "n": 192836911, "o": 43807811,
+                  "p": 43807808, "q": 1040906356},
+         center="a", osm_all=True),
+    dict(id="reference_library", terrain_z=True, name="Toronto Reference Library", height=26,
+         anchors={"lib": 28156063}),
+    dict(id="ago", terrain_z=True, name="Art Gallery of Ontario", height=41,
+         anchors={"ago": 141693334}, osm_all=True),
+    dict(id="meridian_hall", terrain_z=True, name="Meridian Hall", height=30,
+         anchors={"hall": 42334918}),
+    dict(id="hamilton_city_hall", terrain_z=True, name="Hamilton City Hall", height=39,
+         anchors={"hall": 167846117}, osm_all=True),
+    dict(id="kitchener_city_hall", terrain_z=True, name="Kitchener City Hall", height=48,
+         anchors={"hall": 138175760}),
+    dict(id="roy_thomson_hall", terrain_z=True, name="Roy Thomson Hall", height=32,
+         anchors={"hall": 141694015}),
 ]
 
 WATERFALLS = [
@@ -176,6 +244,14 @@ def _num(v):
         return round(float(str(v).split()[0].replace("m", "")), 2)
     except (TypeError, ValueError):
         return None
+
+
+def _zoff(ter, g, base: float) -> float:
+    """Min terrain under a footprint relative to the landmark base (m, >= 0)."""
+    if isinstance(g, MultiPolygon):
+        g = max(g.geoms, key=lambda p: p.area)
+    c = np.asarray(g.exterior.coords)
+    return round(max(0.0, float(np.min(ter.sample(c[:, 0], c[:, 1]))) - base), 2)
 
 
 def dominant_angle(poly) -> float:
@@ -251,6 +327,7 @@ def main() -> None:
                     suppress.add(i)
         for i in L.get("parts_only", []) + L.get("suppress_extra", []):
             suppress.add(i)
+        suppress -= set(L.get("exclude", []))
 
         # Position & rotation
         if "center" in L:
@@ -268,6 +345,8 @@ def main() -> None:
             a = math.atan2(leg.y - pos[1], leg.x - pos[0])
             # canonical: one leg points +y (90°); legs are 120° apart
             rot = (a - math.pi / 2 + math.pi / 3) % (2 * math.pi / 3) - math.pi / 3
+        elif "rot_from" in L:
+            rot = dominant_angle(geoms[L["rot_from"]])
         elif "rotation_deg" in L:
             rot = math.radians(L["rotation_deg"])
         elif "bridge" in L:
@@ -308,6 +387,18 @@ def main() -> None:
                 entry["suppress"] = sorted(set(entry["suppress"]) | {i}, key=lambda v: (v < 0, abs(v)))
             else:
                 print(f"!! {L['id']}: missing part {a}={i}")
+        if L.get("terrain_z", L.get("osm_all")):
+            entry["partZ"] = {a: _zoff(ter, g, base) for a, g in geoms.items()}
+        if L.get("holes"):
+            hs = {}
+            for a, g in geoms.items():
+                lg = to_local(g, pos, rot)
+                big = max(lg.geoms, key=lambda p: p.area) if isinstance(lg, MultiPolygon) else lg
+                rs = [r for r in big.interiors if Polygon(r).area > 20]
+                if rs:
+                    hs[a] = [ring(Polygon(r)) for r in rs]
+            if hs:
+                entry["holes"] = hs
         if "parts_only" in L:
             parts["crystal"] = ring(to_local(union, pos, rot))
         if parts:
@@ -316,17 +407,26 @@ def main() -> None:
         # frame — builders may use them for exact massing.
         op = []
         for i in entry["suppress"]:
-            if i not in bld or "building:part" not in bld[i][0]:
+            if i not in bld:
                 continue
             t, g = bld[i]
-            if g.area < 0.3:
+            whole = "building:part" not in t
+            if (whole and not L.get("osm_all")) or g.area < 0.3:
                 continue
-            op.append({"id": i, "poly": ring(to_local(g, pos, rot), 0.2),
+            extra = {}
+            if whole:
+                gb = g.buffer(0.5)
+                extra = {"whole": True, "name": t.get("name"),
+                         "outline": any(j != i and j in bld and "building:part" in bld[j][0] and gb.contains(reps[j])
+                                        for j in entry["suppress"])}
+            if L.get("osm_all") or L.get("terrain_z"):
+                extra["z"] = _zoff(ter, g, base)
+            op.append({**extra,"id": i, "poly": ring(to_local(g, pos, rot), 0.2),
                        "h": _num(t.get("height")), "minH": _num(t.get("min_height")) or 0.0,
                        "roof": t.get("roof:shape", "flat"), "roofH": _num(t.get("roof:height")) or 0.0,
                        "roofDir": _num(t.get("roof:direction")),
                        "levels": _num(t.get("building:levels")), "minLevel": _num(t.get("building:min_level")),
-                       "kind": t.get("building:part")})
+                       "kind": t.get("building:part") or "building"})
         if op:
             entry["osmParts"] = op
         if "bridge" in L:

@@ -49,7 +49,7 @@ HOUSE_MIN_AREA = 10.0
 FLOAT_ABOVE = 1.5  # m: base above the highest terrain under the footprint
 BURIED = 3.0  # m: base below the lowest terrain under the footprint
 SHORE_MIN_PX = 60  # water/land edge pixels (4 m) per tile to report
-VECTOR_WATER_KEYS = ("w_off", "water_off", "g_off", "gv_off", "wv_off")  # vector ground present -> skip
+VECTOR_WATER_KEYS = ("gw_poly", "gp_off", "w_off", "water_off", "g_off", "gv_off", "wv_off")  # vector ground present -> skip
 
 SPECIES = ["norway maple", "silver maple", "sugar maple", "honey locust", "linden", "london plane", "oak", "willow",
            "beech", "columnar", "ornamental", "pine", "shrub", "cedar hedge", "white spruce", "blue spruce",

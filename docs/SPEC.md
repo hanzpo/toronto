@@ -101,6 +101,13 @@ Roads (level 0: all; higher levels: filtered + simplified)
 - `r_v0` f32 — distance along the OSM way (m) at the piece's first vertex, so
   lane-dash phase is continuous across tile borders.
 
+Border pieces (level 0; for placement only, never meshed)
+- `xr_off` u32 · `xr_xyz` f32 · `xr_class` u8 · `xr_flags` u8 · `xr_width` f32 —
+  road pieces of the 8 neighbouring tiles with a vertex within 40 m of this
+  tile (tile-local coords); `xl_off` · `xl_xyz` · `xl_class` · `xl_flags` —
+  the same for rail. Trees / props near a border keep clear of carriageways
+  and tracks that run just outside it.
+
 Junctions (level 0; ≥ 3 arms of road classes 0–5, tunnels excluded; duplicated
 into every tile within 80 m)
 - `j_xy` f32 [2n] (tile-local; equals the shared road vertex exactly) ·
@@ -115,8 +122,16 @@ into every tile within 80 m)
 Street points (level 0)
 - `p_xy` f32 [2n] · `p_kind` u8 (`0 traffic signals · 1 stop sign · 2 marked
   crossing · 3 tree (incl. natural=tree_row sampled every 8 m) · 4 street
-  lamp`) · `p_var` u8 (crossing: `1 zebra/ladder · 2 lines`; tree: `0 broadleaf
-  · 1 conifer`) · `p_osm` f64 (0 for tree-row samples).
+  lamp`) · `p_var` u8 (crossing: `1 zebra/ladder · 2 lines`; tree: bit 0
+  conifer, bits 1–4 genus `0 unknown · 1 Acer · 2 Gleditsia · 3 Tilia ·
+  4 Platanus · 5 Quercus · 6 Salix · 7 Pinus · 8 Picea · 9 Thuja · 10 Tsuga ·
+  11 Fagus · 12 Ulmus · 13 Ginkgo · 14 small ornamental (Malus, Prunus, …)`) · `p_osm` f64 (0 for tree-row samples).
+- Street furniture kinds (from OSM nodes; `workers/props.ts` places procedural
+  furniture where these are absent): `20 bike-share dock` (var = capacity) ·
+  `21 post box` · `22 bench` · `23 waste basket` (var 1 = recycling) ·
+  `24 fire hydrant` · `25 bus stop` (var bit 0 shelter, bit 1 bench, bit 2 bin) ·
+  `26 newspaper box` · `27 bicycle parking` (var = capacity) ·
+  `29 parking pay station`.
 
 Rail
 - `l_off` u32 · `l_xyz` f32 · `l_class` u8 (`0 main rail · 1 siding/yard/spur ·

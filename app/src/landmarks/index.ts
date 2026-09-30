@@ -21,11 +21,21 @@ import {
   buildBrookfieldPlace, buildCibcSquare, buildTd160Front,
 } from './financial'
 import {
-  buildCityHall, buildOldCityHall, buildUnionStation, buildScotiabankArena, buildRoyalYork,
+  buildCityHall, buildOldCityHall, buildScotiabankArena, buildRoyalYork,
   buildGooderham, buildCasaLoma, buildRomCrystal, buildPearsonT1,
 } from './civic'
+import { buildUnionStation } from './union'
 import { buildPinnacle, buildAura, buildOneBloorEast, buildStRegis, buildShangriLa, buildLTower } from './towers'
 import { buildSkylon, buildRainbowBridge } from './niagara'
+import {
+  buildUniversityCollege, buildHartHouse, buildConvocationHall, buildRobartsLibrary, buildKnoxCollege,
+  buildTrinityCollege, buildVictoriaCollege, buildLegislature, buildKingsCollegeCircle, buildRomHeritage,
+} from './uoft'
+import {
+  buildStLawrenceMarket, buildDistillery, buildReferenceLibrary, buildAgo, buildMeridianHall, buildRoyThomsonHall,
+  buildHamiltonCityHall, buildKitchenerCityHall,
+} from './culture'
+import { buildEatonCentre, buildYongeDundasSquare, buildMasseyHall, buildElginWinterGarden } from './eaton'
 
 export { setNight, setCnTowerColor, MATS } from './materials'
 export type { LandmarkEntry, LandmarkDef, BuildCtx } from './types'
@@ -58,6 +68,29 @@ export const LANDMARKS: Record<string, LandmarkDef> = {
   skylon_tower: { name: 'Skylon Tower', height: 160, build: buildSkylon },
   rainbow_bridge: { name: 'Rainbow Bridge', height: 0, build: buildRainbowBridge, lodDistance: 1500 },
   pearson_t1: { name: 'Pearson Terminal 1', height: 40, build: buildPearsonT1 },
+  // pass 2
+  eaton_centre: { name: 'CF Toronto Eaton Centre', height: 151, build: buildEatonCentre },
+  yonge_dundas_square: { name: 'Sankofa Square (Yonge-Dundas)', height: 44, build: buildYongeDundasSquare, lodDistance: 1200 },
+  massey_hall: { name: 'Massey Hall', height: 29, build: buildMasseyHall, lodDistance: 1200 },
+  elgin_winter_garden: { name: 'Elgin & Winter Garden Theatres', height: 30, build: buildElginWinterGarden, lodDistance: 1200 },
+  university_college: { name: 'University College', height: 40, build: buildUniversityCollege, lodDistance: 1400 },
+  hart_house: { name: "Hart House & Soldiers' Tower", height: 43.6, build: buildHartHouse, lodDistance: 1400 },
+  convocation_hall: { name: 'Convocation Hall', height: 27, build: buildConvocationHall, lodDistance: 1400 },
+  robarts_library: { name: 'Robarts Library', height: 63, build: buildRobartsLibrary },
+  knox_college: { name: 'Knox College', height: 27, build: buildKnoxCollege, lodDistance: 1400 },
+  trinity_college: { name: 'Trinity College', height: 34, build: buildTrinityCollege, lodDistance: 1400 },
+  victoria_college: { name: 'Victoria College (Old Vic)', height: 38.5, build: buildVictoriaCollege, lodDistance: 1400 },
+  ontario_legislature: { name: 'Ontario Legislative Building', height: 60, build: buildLegislature },
+  kings_college_circle: { name: "King's College Circle", height: 0, build: buildKingsCollegeCircle, lodDistance: 1000 },
+  rom_heritage: { name: 'Royal Ontario Museum', height: 36, build: buildRomHeritage, lodDistance: 1400 },
+  st_lawrence_market: { name: 'St. Lawrence Market', height: 38, build: buildStLawrenceMarket, lodDistance: 1400 },
+  distillery_district: { name: 'Distillery District', height: 40, build: buildDistillery, lodDistance: 1400 },
+  reference_library: { name: 'Toronto Reference Library', height: 30, build: buildReferenceLibrary, lodDistance: 1400 },
+  ago: { name: 'Art Gallery of Ontario', height: 38, build: buildAgo, lodDistance: 1400 },
+  meridian_hall: { name: 'Meridian Hall', height: 38, build: buildMeridianHall, lodDistance: 1400 },
+  roy_thomson_hall: { name: 'Roy Thomson Hall', height: 28, build: buildRoyThomsonHall, lodDistance: 1400 },
+  hamilton_city_hall: { name: 'Hamilton City Hall', height: 43, build: buildHamiltonCityHall },
+  kitchener_city_hall: { name: 'Kitchener City Hall', height: 48, build: buildKitchenerCityHall },
 }
 
 export function makeCtx(entry: LandmarkEntry | null, detail: Detail): BuildCtx {

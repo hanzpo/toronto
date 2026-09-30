@@ -3,6 +3,7 @@
 //! The crate is plain Rust (tested with `cargo test`); `Sim` is the thin
 //! wasm-bindgen facade the Web Worker drives (see app/src/sim/sim.worker.ts).
 
+pub mod bus;
 pub mod collide;
 pub mod demand;
 pub mod graph;
@@ -154,6 +155,35 @@ impl Sim {
         self.w.peds.write(&self.w.g, origin_e, origin_n);
         self.w.write_signals(origin_e, origin_n);
         self.rail.write(origin_e, origin_n);
+        self.w.write_buses(origin_e, origin_n);
+    }
+
+    // ------------------------------------------------------------------ buses (bus.rs)
+
+    /// pattern shape (world E/N pairs) + stop centre distances / flags
+    pub fn bus_pattern(&mut self, id: u32, xy: &[f64], stop_d: &[f32], stop_flag: &[u8]) {
+        self.w.bus_pattern(id, xy, stop_d, stop_flag);
+    }
+    /// place bus trip `trip` with its front at `front` along pattern `pat`
+    #[allow(clippy::too_many_arguments)]
+    pub fn bus_spawn(&mut self, trip: u32, pat: u32, len: f32, front: f32, v: f32, arr: &[f64], dep: &[f64]) -> u8 {
+        self.w.bus_spawn(trip, pat, len, front, v, arr, dep)
+    }
+    pub fn bus_count(&self) -> u32 {
+        (self.w.out_buses.len() / bus::BUS_STRIDE) as u32
+    }
+    pub fn bus_ptr(&self) -> *const f32 {
+        self.w.out_buses.as_ptr()
+    }
+    pub fn bus_path_len(&self) -> u32 {
+        (self.w.out_bus_path.len() / 3) as u32
+    }
+    pub fn bus_path_ptr(&self) -> *const f32 {
+        self.w.out_bus_path.as_ptr()
+    }
+    /// buses that stopped being agents since the last call: [trip, delay]*
+    pub fn bus_gone(&mut self) -> Vec<f32> {
+        std::mem::take(&mut self.w.bus_gone)
     }
 
     /// signalised approaches: [dE, dN, bearing, halfWidth, light]* (light 0 green, 1 amber, 2 red)

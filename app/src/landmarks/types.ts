@@ -13,8 +13,15 @@ export interface OsmPart {
   roofDir: number | null
   levels?: number | null
   minLevel?: number | null
-  /** building:part value, e.g. "yes", "column", "steps" */
+  /** building:part value, e.g. "yes", "column", "steps" ("building" for whole buildings) */
   kind?: string | null
+  /** whole OSM building (osm_all entries), not a building:part */
+  whole?: boolean
+  /** whole building that has parts inside it (render the parts instead) */
+  outline?: boolean
+  name?: string | null
+  /** terrain lift (m) of this part's footprint above the landmark base */
+  z?: number
 }
 
 /** An entry of data/landmarks.json (see docs/SPEC.md). */
@@ -33,6 +40,10 @@ export interface LandmarkEntry {
   footprint?: V2[]
   parts?: Record<string, V2[]>
   osmParts?: OsmPart[]
+  /** terrain lift (m) per named part footprint */
+  partZ?: Record<string, number>
+  /** courtyard rings per named part footprint */
+  holes?: Record<string, V2[][]>
   kind?: string
   // bridge extras
   span?: number

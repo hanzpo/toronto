@@ -1,13 +1,16 @@
-// Street furniture placement (tile worker): OSM trees / lamps + procedural
-// street trees, park/forest trees, street lights along urban roads and traffic
-// signal heads at signalized junctions. Deterministic (hash-seeded), so the
-// same tile always produces the same furniture.
+// Street furniture placement (tile worker): OSM / procedural street lights
+// along urban roads, traffic signal heads at signalized junctions, and the
+// vegetation (workers/vegetation.ts). Deterministic (hash-seeded), so the same
+// tile always produces the same furniture.
 import type { TypedArray } from '../data/tbn';
 import type { StreetRoad, Terrain } from './roads';
+import { placeVegetation } from './vegetation';
 
 export interface StreetBuf {
-  /** stride 6: x, n (tile-local E, N), z (datum), scale, kind (0 broadleaf · 1 conifer · 2 small), seed (0..1) */
-  trees: Float32Array;
+  /** vegetation records (layers/vegetation/species.ts VEG_STRIDE), sorted by (64 m cell, family) */
+  veg: Float32Array;
+  /** bucket starts into `veg` (bucket = cell·2 + family), VEG_CELLS²·2 + 1 entries */
+  vegCells: Uint32Array;
   /** stride 5: x, n, z, angle (rad CCW from +E: direction the lamp arm points), height */
   lamps: Float32Array;
   /** stride 7: x, n, z, angle (heads face this way), junction index, phase (0 | 1), mast length */
@@ -16,7 +19,7 @@ export interface StreetBuf {
   signalIds: Float64Array;
 }
 
-const TREE = 6, LAMP = 5, SIG = 7;
+const LAMP = 5, SIG = 7;
 
 function rnd(a: number, b = 0, c = 0): number {
   let h = Math.imul((a | 0) ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul((b | 0) + 0x27d4eb2f, 0xc2b2ae35) ^ Math.imul((c | 0) + 0x165667b1, 0x27d4eb2f);
@@ -46,7 +49,7 @@ class Grid<T> {
   }
 }
 
-interface Seg { x0: number; y0: number; x1: number; y1: number; hw: number }
+interface Seg { x0: number; y0: number; x1: number; y1: number; hw: number; cls: number }
 
 function segDist(s: Seg, x: number, y: number): number {
   const dx = s.x1 - s.x0, dy = s.y1 - s.y0;
@@ -73,7 +76,7 @@ export function buildStreet(
   terr: Terrain, ground: Uint8Array, tx: number, ty: number,
 ): StreetBuf {
   const S = terr.S;
-  const trees: number[] = [], lamps: number[] = [], signals: number[] = [];
+  const lamps: number[] = [], signals: number[] = [];
   const signalIds: number[] = [];
   const inTile = (x: number, y: number) => x >= 0 && x < S && y >= 0 && y < S;
   const gAt = (x: number, y: number) => ground[Math.min(255, Math.max(0, Math.floor((y / S) * 256))) * 256 + Math.min(255, Math.max(0, Math.floor((x / S) * 256)))];
@@ -91,7 +94,7 @@ export function buildStreet(
   const roads = new Grid<Seg>(24);
   for (const r of streets) {
     for (let k = 0; k < r.x.length - 1; k++) {
-      const s: Seg = { x0: r.x[k], y0: r.y[k], x1: r.x[k + 1], y1: r.y[k + 1], hw: r.hw };
+      const s: Seg = { x0: r.x[k], y0: r.y[k], x1: r.x[k + 1], y1: r.y[k + 1], hw: r.hw, cls: r.cls };
       const m = r.hw + 4;
       roads.add(Math.min(s.x0, s.x1) - m, Math.min(s.y0, s.y1) - m, Math.max(s.x0, s.x1) + m, Math.max(s.y0, s.y1) + m, s);
     }
@@ -138,17 +141,11 @@ export function buildStreet(
 
   // ---- OSM points
   const pk = a.p_kind as Uint8Array | undefined, pxy = a.p_xy as Float32Array | undefined, pv = a.p_var as Uint8Array | undefined;
-  const osmTrees = new Grid<number>(16);
   const osmLamps = new Grid<number>(32);
   if (pk && pxy) {
     for (let i = 0; i < pk.length; i++) {
       const x = pxy[i * 2], y = pxy[i * 2 + 1];
-      if (pk[i] === 3) {
-        if (airfield(x, y)) continue;
-        const r = rnd(tx * 131 + i, ty, 7);
-        trees.push(x, y, terr.at(x, y), 0.75 + r * 0.55, pv && pv[i] === 1 ? 1 : 0, rnd(i, tx, ty));
-        osmTrees.add(x - 5, y - 5, x + 5, y + 5, i);
-      } else if (pk[i] === 4) {
+      if (pk[i] === 4) {
         // face the nearest road
         let best: Seg | null = null, bd = 25;
         const c = roads.at(x, y);
@@ -164,21 +161,14 @@ export function buildStreet(
       }
     }
   }
-  const nearOsmTree = (x: number, y: number) => {
-    const c = osmTrees.at(x, y);
-    if (c && pxy) for (const i of c) if (Math.hypot(pxy[i * 2] - x, pxy[i * 2 + 1] - y) < 5) return true;
-    return false;
-  };
   const nearOsmLamp = (x: number, y: number) => {
     const c = osmLamps.at(x, y);
     if (c && pxy) for (const i of c) if (Math.hypot(pxy[i * 2] - x, pxy[i * 2 + 1] - y) < 22) return true;
     return false;
   };
 
-  // ---- procedural street trees and lamps along urban roads
-  let ri = 0;
+  // ---- procedural street lamps along urban roads
   for (const r of streets) {
-    ri++;
     if (!r.urban || r.cls < 2 || r.cls > 5) continue;
     const at = (s: number) => {
       let k = 0;
@@ -191,7 +181,6 @@ export function buildStreet(
     const lampStep = r.cls <= 3 ? 32 : 38;
     for (const sd of [1, -1]) {
       const hasSW = (r.side & (sd === 1 ? 1 : 2)) !== 0;
-      const ws = hasSW ? r.ws : 0;
       for (const [c0, c1] of r.clear) {
         // lamps: just behind the curb; both sides staggered on arterials, one side on locals
         if (r.cls <= 3 || sd === 1) {
@@ -205,47 +194,27 @@ export function buildStreet(
             lamps.push(x, y, terr.at(x, y), Math.atan2(-sd * p.ny, -sd * p.nx), r.cls <= 3 ? 9.5 : 7.5);
           }
         }
-        // trees: boulevard beyond the sidewalk (residential / parks) or pits in the sidewalk (commercial)
-        if (r.cls < 3) continue;
-        const step = 10 + rnd(ri, sd, 1) * 4;
-        for (let s = Math.ceil((c0 + 6) / step) * step; s < c1 - 6; s += step) {
-          const js = s + (rnd(ri, Math.round(s), sd) - 0.5) * 3;
-          const p = at(js);
-          const probe = gAt(p.x + sd * p.nx * (r.hw + ws + 2), p.y + sd * p.ny * (r.hw + ws + 2));
-          const pit = hasSW && (probe === 5 || probe === 6 || probe === 11 || probe === 21);
-          const prob = probe === 4 || probe === 0 ? 0.72 : probe === 2 ? 0.8 : probe === 17 || probe === 12 ? 0.55 : pit ? 0.3 : 0.2;
-          if (rnd(ri, Math.round(s * 7), sd + 9) > prob) continue;
-          const off = pit ? r.hw + 1.0 : r.hw + ws + (hasSW ? 1.3 : 2.5) + rnd(ri, Math.round(s), 5) * 1.2;
-          const x = p.x + sd * p.nx * off, y = p.y + sd * p.ny * off;
-          if (!inTile(x, y) || nearOsmTree(x, y) || onRoad(x, y, pit ? 0.5 : 1.0) || inBuilding(x, y, 2.0)) continue;
-          const g = gAt(x, y);
-          if (g === 1 || g === 10 || g === 20 || airfield(x, y)) continue;
-          const sc = pit ? 0.6 + rnd(ri, s, 11) * 0.3 : 0.75 + rnd(ri, s, 12) * 0.6;
-          trees.push(x, y, terr.at(x, y), sc, rnd(ri, s, 13) < 0.08 ? 1 : 0, rnd(ri, s, 14));
-        }
       }
     }
   }
 
-  // ---- parks, forests, cemeteries: scattered trees on the 4 m land-cover raster
-  const DENS: Record<number, number> = { 3: 0.3, 2: 0.035, 12: 0.07, 13: 0.03, 16: 0.06 };
-  const px = S / 256;
-  let scatter = 0;
-  for (let j = 0; j < 256 && scatter < 6000; j++) {
-    for (let i = 0; i < 256; i++) {
-      const g = ground[j * 256 + i];
-      const d = DENS[g];
-      if (!d || rnd(tx * 256 + i, ty * 256 + j, 21) > d) continue;
-      const x = (i + rnd(i, j, 22)) * px, y = (j + rnd(i, j, 23)) * px;
-      if (nearOsmTree(x, y) || onRoad(x, y, 1.5) || inBuilding(x, y, 1.5) || airfield(x, y)) continue;
-      const conifer = g === 3 ? rnd(i, j, 24) < 0.3 : rnd(i, j, 24) < 0.1;
-      trees.push(x, y, terr.at(x, y), (g === 3 ? 0.85 : 0.75) + rnd(i, j, 25) * 0.6, conifer ? 1 : 0, rnd(i, j, 26));
-      scatter++;
+  // ---- traffic signals
+  // Network-model tiles (docs/ROADS.md): one logical intersection per cluster of junction
+  // nodes, poles on the corners behind the curb (far-right with a mast arm over the
+  // approach lanes, near-right with a short arm, median noses on divided roads).
+  const sgxy = a.sg_xy as Float32Array | undefined, sgang = a.sg_ang as Float32Array | undefined;
+  const sgm = a.sg_mast as Float32Array | undefined, sgcl = a.sg_cl as Float64Array | undefined;
+  if (sgxy && sgang && sgm && sgcl) {
+    const byCl = new Map<number, { ji: number; a0: number }>();
+    for (let i = 0; i < sgang.length; i++) {
+      const x = sgxy[i * 2], y = sgxy[i * 2 + 1];
+      let e = byCl.get(sgcl[i]);
+      if (!e) { e = { ji: signalIds.length, a0: sgang[i] }; byCl.set(sgcl[i], e); signalIds.push(sgcl[i]); }
+      const phase = Math.abs(Math.sin(sgang[i] - e.a0)) > 0.7 ? 1 : 0;
+      signals.push(x, y, terr.at(x, y), sgang[i], e.ji, phase, sgm[i]);
     }
   }
-
-  // ---- traffic signals: a pole on the far-right corner of every approach
-  for (const jn of junctions) {
+  for (const jn of sgxy ? [] : junctions) {
     if (!(jn.flags & 1) || !inTile(jn.x, jn.y)) continue;
     const ji = signalIds.length;
     signalIds.push(jn.osm);
@@ -263,7 +232,15 @@ export function buildStreet(
     }
   }
 
-  return { trees: Float32Array.from(trees), lamps: Float32Array.from(lamps), signals: Float32Array.from(signals), signalIds: Float64Array.from(signalIds) };
+  // ---- trees, shrubs, hedges
+  const veg = placeVegetation({
+    S, tx, ty, terr, ground, a, gAt, inBuilding, airfield, streets, lamps,
+    roadsAt: (x, y) => roads.at(x, y),
+    houses: hxy && hang && hl && hwd ? { xy: hxy, angle: hang, len: hl, wid: hwd, type: a.h_type as Uint8Array | undefined } : null,
+    osm: pk && pxy ? { kind: pk, xy: pxy, v: pv } : null,
+  });
+
+  return { veg: veg.veg, vegCells: veg.cells, lamps: Float32Array.from(lamps), signals: Float32Array.from(signals), signalIds: Float64Array.from(signalIds) };
 }
 
-export const STREET_STRIDE = { TREE, LAMP, SIG };
+export const STREET_STRIDE = { LAMP, SIG };

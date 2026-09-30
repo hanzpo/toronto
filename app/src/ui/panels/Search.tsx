@@ -4,6 +4,7 @@ import { getEngine } from '../../engine/instance';
 import { useInteract } from '../../interact/state';
 import { useApp } from '../../state/store';
 import { RouteBadge } from './InfoPanels';
+import { Icon } from '../icons';
 import { MODE_LABEL, getInteract, getTransit } from './common';
 
 const PLACES: { name: string; e: number; n: number; dist: number }[] = [
@@ -97,7 +98,7 @@ export function SearchBox() {
 
   return (
     <div className="search panel">
-      <svg viewBox="0 0 16 16" aria-hidden><circle cx="7" cy="7" r="4.5" /><path d="M10.5 10.5 L14 14" /></svg>
+      <Icon.search />
       <input
         placeholder="Search stations, routes, places…" value={q}
         onChange={(e) => { setQ(e.target.value); setSel(0); }} onFocus={() => setFocus(true)} onBlur={() => setTimeout(() => setFocus(false), 150)}
@@ -115,7 +116,7 @@ export function SearchBox() {
             return (
               <li key={`${h.kind}:${h.name}:${i}`}>
                 <button className={`sr ${i === sel ? 'sel' : ''}`} onMouseDown={() => go(h)} onMouseEnter={() => setSel(i)}>
-                  {r ? <RouteBadge short={r.short} color={r.color} text={r.textColor} /> : <span className={`sr-ico ${h.kind}`} />}
+                  {r ? <RouteBadge short={r.short} color={r.color} text={r.textColor} /> : <span className={`sr-ico ${h.kind}`}>{h.kind === 'station' ? <Icon.station /> : <Icon.place />}</span>}
                   <span className="sr-name">{r ? r.long : h.name}</span>
                   <small>{h.kind === 'route' ? `${MODE_LABEL[r!.mode]} route` : h.kind === 'station' ? h.sub : 'place'}</small>
                 </button>

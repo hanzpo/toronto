@@ -1,0 +1,393 @@
+// Vegetation runtime: instanced LOD pools fed incrementally from 64 m cells.
+//
+// Level-0 tiles carry per-tree records bucketed by (cell, family); each cell
+// sits in the pools whose LOD window its distance range overlaps (with
+// hysteresis), so moving the camera only moves the few cells crossing a
+// boundary — no per-frame rebuilds. The shader then selects each instance's
+// exact LOD by its own distance and cross-fades (material.ts), so the
+// pools only need to be a superset. Level-1 tiles add far canopy clumps to
+// the impostor pool, which carries trees to the horizon.
+//
+// Pools / draws (main + shadow): lobed high ✓shadow, lobed mid near ✓shadow,
+// lobed mid far, tiered high ✓shadow, tiered mid near ✓shadow, tiered mid
+// far, impostors — 7 + 4 draws at most.
+import * as THREE from 'three/webgpu';
+import type { Engine } from '../../engine/Engine';
+import type { FrameContext } from '../../engine/types';
+import { VEG_CELLS } from '../../workers/vegetation';
+import { VEG_STRIDE } from './species';
+import { impostorQuad, lobedHigh, lobedMid, tieredHigh, tieredMid } from './geometry';
+import { impostorMaterial, lobedMaterial, tieredMaterial, VU } from './material';
+
+const LOD_HIGH = 120, LOD_MID = 600;
+/** cells within this range put their mid-LOD trees in the shadow-casting pool */
+const SHADOW_MID = 260;
+const HYST = 14;
+/** instance writes per frame (cell moves / tile activations beyond this wait a frame) */
+const WRITE_BUDGET = 40000;
+
+interface Owner {
+  slots: Int32Array;
+  src: Float32Array;
+  /** record index per slot entry */
+  idx: Int32Array;
+  e0: number; n0: number;
+}
+
+class VegPool {
+  mesh!: THREE.Mesh;
+  geo!: THREE.InstancedBufferGeometry;
+  ia!: THREE.InstancedBufferAttribute;
+  ib!: THREE.InstancedBufferAttribute;
+  cap: number;
+  count = 0;
+  owners: (Owner | null)[] = [];
+  entries: Int32Array;
+  live = new Set<Owner>();
+  /** dirty slot ranges (inclusive pairs) since the last flush */
+  private dirty: number[] = [];
+  readonly tris: number;
+  private tmpl: THREE.BufferGeometry; private mat: THREE.Material; private parent: THREE.Object3D; readonly name: string; private shadow: boolean;
+  constructor(tmpl: THREE.BufferGeometry, mat: THREE.Material, cap: number, parent: THREE.Object3D, name: string, shadow: boolean) {
+    this.tmpl = tmpl; this.mat = mat; this.parent = parent; this.name = name; this.shadow = shadow;
+    this.cap = cap;
+    this.entries = new Int32Array(cap);
+    this.tris = (tmpl.userData.tris as number) ?? 0;
+    this.make(new Float32Array(cap * 4), new Float32Array(cap * 4));
+  }
+  private make(a: Float32Array, b: Float32Array) {
+    const g = new THREE.InstancedBufferGeometry();
+    for (const k of Object.keys(this.tmpl.attributes)) g.setAttribute(k, this.tmpl.attributes[k].clone());
+    if (this.tmpl.index) g.setIndex(this.tmpl.index.clone());
+    this.ia = new THREE.InstancedBufferAttribute(a, 4);
+    this.ib = new THREE.InstancedBufferAttribute(b, 4);
+    g.setAttribute('ia', this.ia);
+    g.setAttribute('ib', this.ib);
+    g.instanceCount = this.count;
+    const m = new THREE.Mesh(g, this.mat);
+    m.name = this.name;
+    m.frustumCulled = false;
+    m.castShadow = this.shadow;
+    m.receiveShadow = true;
+    m.matrixAutoUpdate = false;
+    if (this.mesh) {
+      m.position.copy(this.mesh.position);
+      m.visible = this.mesh.visible;
+      this.parent.remove(this.mesh);
+      this.geo.dispose();
+    }
+    m.updateMatrix();
+    this.parent.add(m);
+    this.mesh = m; this.geo = g;
+  }
+  setOrigin(x: number, z: number) {
+    this.mesh.position.set(x, 0, z);
+    this.mesh.updateMatrix();
+  }
+  private ensure(n: number) {
+    if (n <= this.cap) return;
+    let cap = this.cap;
+    while (cap < n) cap *= 2;
+    const a = new Float32Array(cap * 4); a.set(this.ia.array as Float32Array);
+    const b = new Float32Array(cap * 4); b.set(this.ib.array as Float32Array);
+    const e = new Int32Array(cap); e.set(this.entries); this.entries = e;
+    this.cap = cap;
+    this.make(a, b);
+    this.dirty.length = 0; // fresh buffers upload whole
+  }
+  private mark(a: number, b = a) { this.dirty.push(a, b); }
+  write(o: Owner, j: number, ox: number, oz: number, mark = true) {
+    const s = o.slots[j], r = o.idx[j] * VEG_STRIDE, src = o.src;
+    const A = this.ia.array as Float32Array, B = this.ib.array as Float32Array;
+    A[s * 4] = o.e0 + src[r] - ox; A[s * 4 + 1] = src[r + 2]; A[s * 4 + 2] = -(o.n0 + src[r + 1]) - oz; A[s * 4 + 3] = src[r + 3];
+    B[s * 4] = src[r + 4]; B[s * 4 + 1] = src[r + 5]; B[s * 4 + 2] = src[r + 6]; B[s * 4 + 3] = src[r + 7];
+    if (mark) this.mark(s);
+  }
+  /** allocate slots for records [a0, a1) (+ [b0, b1)) of `src` */
+  alloc(src: Float32Array, e0: number, n0: number, ranges: number[], ox: number, oz: number): Owner {
+    let n = 0;
+    for (let q = 0; q < ranges.length; q += 2) n += ranges[q + 1] - ranges[q];
+    this.ensure(this.count + n);
+    const o: Owner = { slots: new Int32Array(n), src, idx: new Int32Array(n), e0, n0 };
+    const first = this.count;
+    let j = 0;
+    for (let q = 0; q < ranges.length; q += 2) {
+      for (let r = ranges[q]; r < ranges[q + 1]; r++) {
+        const s = this.count++;
+        o.slots[j] = s; o.idx[j] = r; this.owners[s] = o; this.entries[s] = j;
+        this.write(o, j, ox, oz, false);
+        j++;
+      }
+    }
+    if (n) this.mark(first, first + n - 1);
+    this.live.add(o);
+    this.geo.instanceCount = this.count;
+    return o;
+  }
+  free(o: Owner) {
+    const A = this.ia.array as Float32Array, B = this.ib.array as Float32Array;
+    for (let j = 0; j < o.slots.length; j++) {
+      const s = o.slots[j], last = this.count - 1;
+      if (s !== last) {
+        A.copyWithin(s * 4, last * 4, last * 4 + 4);
+        B.copyWithin(s * 4, last * 4, last * 4 + 4);
+        this.mark(s);
+        const lo = this.owners[last]!, e = this.entries[last];
+        lo.slots[e] = s; this.owners[s] = lo; this.entries[s] = e;
+      }
+      this.owners[last] = null;
+      this.count--;
+    }
+    this.live.delete(o);
+    this.geo.instanceCount = this.count;
+  }
+  rewriteAll(ox: number, oz: number) {
+    for (const o of this.live) for (let j = 0; j < o.slots.length; j++) this.write(o, j, ox, oz, false);
+    if (this.count) this.mark(0, this.count - 1);
+  }
+  flush() {
+    const d = this.dirty;
+    if (!d.length) return;
+    this.ia.clearUpdateRanges(); this.ib.clearUpdateRanges();
+    const ranges: number[] = [];
+    if (d.length > 512) {
+      let lo = Infinity, hi = -1;
+      for (let i = 0; i < d.length; i += 2) { lo = Math.min(lo, d[i]); hi = Math.max(hi, d[i + 1]); }
+      ranges.push(lo, hi);
+    } else {
+      const ord: number[] = [];
+      for (let i = 0; i < d.length; i += 2) ord.push(i);
+      ord.sort((x, y) => d[x] - d[y]);
+      let a = d[ord[0]], b = d[ord[0] + 1];
+      for (let q = 1; q < ord.length; q++) {
+        const s0 = d[ord[q]], s1 = d[ord[q] + 1];
+        if (s0 <= b + 8) { b = Math.max(b, s1); continue; }
+        ranges.push(a, b); a = s0; b = s1;
+      }
+      ranges.push(a, b);
+    }
+    for (let i = 0; i < ranges.length; i += 2) {
+      if (ranges[i] >= this.cap) continue;
+      const n = Math.min(ranges[i + 1], this.cap - 1) - ranges[i] + 1;
+      this.ia.addUpdateRange(ranges[i] * 4, n * 4);
+      this.ib.addUpdateRange(ranges[i] * 4, n * 4);
+    }
+    this.ia.needsUpdate = true; this.ib.needsUpdate = true;
+    d.length = 0;
+  }
+  dispose() { this.parent.remove(this.mesh); this.geo.dispose(); }
+}
+
+// pool membership bits
+const HIGH = 1, MIDN = 2, MIDF = 4, IMP = 8;
+
+interface Cell {
+  /** bucket ranges into the tile records: lobed [l0, l1), tiered [t0, t1) */
+  l0: number; l1: number; t0: number; t1: number;
+  cx: number; cy: number; cz: number; r: number;
+  mask: number;
+  own: (Owner | null)[]; // per pool index
+}
+
+interface VegTile { key: string; e0: number; n0: number; src: Float32Array; cells: Cell[]; dist: number }
+interface Canopy { key: string; owner: Owner | null; src: Float32Array; e0: number; n0: number }
+
+export class Vegetation {
+  readonly group = new THREE.Group();
+  private pools: VegPool[] = [];
+  private tiles = new Map<string, VegTile>();
+  private canopies = new Map<string, Canopy>();
+  private anchorVer = -1;
+  private at = new THREE.Vector3(Infinity, 0, 0);
+  private lodKey = '';
+  private dirty = true;
+  private pending = false;
+  private tileOrder: VegTile[] = [];
+
+  private engine: Engine;
+  constructor(engine: Engine) {
+    this.engine = engine;
+    this.group.name = 'vegetation';
+    this.group.matrixWorldAutoUpdate = true;
+    const g = this.group;
+    const lh = lobedMaterial(0), lm = lobedMaterial(1), th = tieredMaterial(0), tm = tieredMaterial(1), im = impostorMaterial();
+    const LH = lobedHigh(), LM = lobedMid(), TH = tieredHigh(), TM = tieredMid(), IQ = impostorQuad();
+    this.pools = [
+      new VegPool(LH, lh, 4096, g, 'vegLobedHigh', true), // 0
+      new VegPool(LM, lm, 8192, g, 'vegLobedMidNear', true), // 1
+      new VegPool(LM, lm, 32768, g, 'vegLobedMidFar', false), // 2
+      new VegPool(TH, th, 2048, g, 'vegTieredHigh', true), // 3
+      new VegPool(TM, tm, 4096, g, 'vegTieredMidNear', true), // 4
+      new VegPool(TM, tm, 8192, g, 'vegTieredMidFar', false), // 5
+      new VegPool(IQ, im, 131072, g, 'vegImpostors', false), // 6
+    ];
+    engine.scene.add(this.group);
+  }
+
+  /** compile the pipelines up front (a pool's first use would otherwise stall) */
+  async prewarm() {
+    for (const p of this.pools) p.geo.instanceCount = 1;
+    const e = this.engine;
+    const pr = e.renderer.compileAsync(this.group, e.camera, e.scene).catch(() => {});
+    for (const p of this.pools) p.geo.instanceCount = p.count;
+    await pr;
+  }
+
+  /** instance / triangle counts per pool (diagnostics) */
+  stats() {
+    return this.pools.map((p) => ({ name: p.name, n: p.count, tris: p.count * p.tris }));
+  }
+
+  update(ctx: FrameContext) {
+    const eng = this.engine;
+    const o = ctx.anchor.origin;
+    if (this.anchorVer !== ctx.anchor.version) {
+      this.anchorVer = ctx.anchor.version;
+      for (const p of this.pools) { p.setOrigin(o.x, o.z); p.rewriteAll(o.x, o.z); }
+    }
+    const cam = ctx.cameraPos;
+    const E = cam.x, Nn = -cam.z, Hc = cam.y;
+    const alt = ctx.altitude;
+    const sc = ctx.view.scale;
+    // impostors reach further from the air; nothing above ~5 km altitude (sub-pixel, the land cover carries it)
+    let far = Math.min(7000, 4800 + Math.max(0, alt) * 1.2);
+    if (alt > 3500) far *= Math.max(0, (5000 - alt) / 1500);
+    far *= Math.max(0.75, sc);
+    const lodH = LOD_HIGH * sc, lodM = LOD_MID * sc;
+    VU.cam.value.set(cam.x - o.x, cam.y, cam.z - o.z);
+    VU.lod.value.set(lodH, lodM, Math.max(far, 1), 0);
+    VU.doy.value = dayOfYear(ctx.simMs);
+    this.group.visible = far > 1;
+
+    // ---- tile sets: drawn level-0 tiles with records, drawn level-1 tiles with canopy
+    const want0 = new Set<string>(), want1 = new Set<string>();
+    let changed = false;
+    if (far > 1) {
+      for (const t of eng.tiles.drawn) {
+        const dx = Math.max(0, Math.abs(E - (t.tx + 0.5) * t.S) - t.S / 2), dy = Math.max(0, Math.abs(Nn - (t.ty + 0.5) * t.S) - t.S / 2);
+        const d = Math.hypot(dx, dy, Math.max(0, alt - 60));
+        if (t.L === 0 && t.street && t.street.veg.length) {
+          if (d > far + 100) continue;
+          want0.add(t.key);
+          let rec = this.tiles.get(t.key);
+          if (!rec) { rec = this.makeTile(t.key, t.tx * t.S, t.ty * t.S, t.street.veg, t.street.vegCells, t.S); this.tiles.set(t.key, rec); changed = true; }
+          rec.dist = d;
+        } else if (t.L === 1 && t.canopy && t.canopy.length) {
+          if (d > far + (this.canopies.has(t.key) ? 400 : 0)) continue;
+          want1.add(t.key);
+        }
+      }
+    }
+    for (const [k, rec] of this.tiles) if (!want0.has(k)) { this.dropTile(rec); this.tiles.delete(k); changed = true; }
+    for (const [k, c] of this.canopies) if (!want1.has(k)) { if (c.owner) this.pools[6].free(c.owner); this.canopies.delete(k); }
+    let budget = WRITE_BUDGET;
+    for (const t of eng.tiles.drawn) {
+      if (t.L !== 1 || !want1.has(t.key) || this.canopies.has(t.key) || budget <= 0) continue;
+      const src = t.canopy!;
+      const n = src.length / VEG_STRIDE;
+      const owner = this.pools[6].alloc(src, t.tx * t.S, t.ty * t.S, [0, n], o.x, o.z);
+      this.canopies.set(t.key, { key: t.key, owner, src, e0: t.tx * t.S, n0: t.ty * t.S });
+      budget -= n;
+    }
+
+    // ---- cells → pools (only when the camera / LOD distances moved or tiles changed)
+    const lodKey = `${lodH.toFixed(1)}|${lodM.toFixed(1)}|${far.toFixed(0)}`;
+    const moved = Math.hypot(E - this.at.x, Nn - this.at.y, Hc - this.at.z) > 2;
+    if (changed || moved || lodKey !== this.lodKey || this.pending || this.dirty) {
+      if (changed) this.tileOrder = [...this.tiles.values()];
+      this.tileOrder.sort((a, b) => a.dist - b.dist);
+      this.at.set(E, Nn, Hc);
+      this.lodKey = lodKey;
+      this.dirty = false;
+      this.pending = this.assign(E, Nn, Hc, lodH, lodM, far, budget, o.x, o.z);
+    }
+    for (const p of this.pools) p.flush();
+  }
+
+  /** move cells between pools; returns true when the write budget ran out (continue next frame) */
+  private assign(E: number, N: number, Hc: number, lodH: number, lodM: number, far: number, budget: number, ox: number, oz: number): boolean {
+    const H1 = lodH * 1.13, H0 = lodH * 0.87, M1 = lodM * 1.1, M0 = lodM * 0.9;
+    for (const t of this.tileOrder) {
+      for (const c of t.cells) {
+        const d = Math.hypot(c.cx - E, c.cy - N, c.cz - Hc);
+        const dmin = Math.max(0, d - c.r), dmax = d + c.r;
+        const has = c.mask;
+        let want = 0;
+        if (dmin < H1 + (has & HIGH ? HYST : 0)) want |= HIGH;
+        const hm = has & (MIDN | MIDF) ? HYST : 0;
+        if (dmax > H0 - hm && dmin < M1 + hm) want |= dmin < SHADOW_MID + (has & MIDN ? HYST : 0) ? MIDN : MIDF;
+        const hi = has & IMP ? HYST : 0;
+        if (dmax > M0 - hi && dmin < far + hi) want |= IMP;
+        if (want === has) continue;
+        if (budget <= 0) return true;
+        budget -= this.apply(t, c, want, ox, oz);
+      }
+    }
+    return false;
+  }
+
+  private apply(t: VegTile, c: Cell, want: number, ox: number, oz: number): number {
+    let writes = 0;
+    const set = (bit: number, lobedPool: number, tieredPool: number) => {
+      const on = (want & bit) !== 0, was = (c.mask & bit) !== 0;
+      if (on === was) return;
+      for (const [pi, a, b] of [[lobedPool, c.l0, c.l1], [tieredPool, c.t0, c.t1]] as const) {
+        if (b <= a) continue;
+        if (on) { c.own[pi] = this.pools[pi].alloc(t.src, t.e0, t.n0, [a, b], ox, oz); writes += b - a; }
+        else if (c.own[pi]) { this.pools[pi].free(c.own[pi]!); c.own[pi] = null; writes += b - a; }
+      }
+    };
+    set(HIGH, 0, 3);
+    set(MIDN, 1, 4);
+    set(MIDF, 2, 5);
+    // impostors: one owner for both families
+    const on = (want & IMP) !== 0, was = (c.mask & IMP) !== 0;
+    if (on !== was) {
+      if (on) { c.own[6] = this.pools[6].alloc(t.src, t.e0, t.n0, [c.l0, c.l1, c.t0, c.t1], ox, oz); writes += c.t1 - c.l0; }
+      else if (c.own[6]) { this.pools[6].free(c.own[6]!); c.own[6] = null; writes += c.t1 - c.l0; }
+    }
+    c.mask = want;
+    return writes + 8;
+  }
+
+  private makeTile(key: string, e0: number, n0: number, src: Float32Array, buckets: Uint32Array, S: number): VegTile {
+    const cells: Cell[] = [];
+    const cs = S / VEG_CELLS;
+    for (let b = 0; b < VEG_CELLS * VEG_CELLS; b++) {
+      const l0 = buckets[b * 2], l1 = buckets[b * 2 + 1], t1 = buckets[b * 2 + 2];
+      if (t1 <= l0) continue;
+      const i = b % VEG_CELLS, j = Math.floor(b / VEG_CELLS);
+      const cx = e0 + (i + 0.5) * cs, cy = n0 + (j + 0.5) * cs;
+      let zs = 0;
+      for (let r = l0; r < t1; r++) zs += src[r * VEG_STRIDE + 2] + src[r * VEG_STRIDE + 4] * 0.5;
+      const cz = zs / (t1 - l0);
+      let rr = 0;
+      for (let r = l0; r < t1; r++) {
+        const q = r * VEG_STRIDE;
+        rr = Math.max(rr, Math.hypot(e0 + src[q] - cx, n0 + src[q + 1] - cy, src[q + 2] + src[q + 4] * 0.5 - cz));
+      }
+      cells.push({ l0, l1, t0: l1, t1, cx, cy, cz, r: rr + 1, mask: 0, own: [null, null, null, null, null, null, null] });
+    }
+    return { key, e0, n0, src, cells, dist: 0 };
+  }
+
+  private dropTile(t: VegTile) {
+    for (const c of t.cells) {
+      for (let pi = 0; pi < 7; pi++) if (c.own[pi]) { this.pools[pi].free(c.own[pi]!); c.own[pi] = null; }
+      c.mask = 0;
+    }
+    this.dirty = true;
+  }
+
+  dispose() {
+    for (const p of this.pools) p.dispose();
+    this.group.removeFromParent();
+  }
+}
+
+/** fractional day of year (UTC; Toronto's seasons don't care about the hours) */
+export function dayOfYear(ms: number): number {
+  const d = new Date(ms);
+  const y0 = Date.UTC(d.getUTCFullYear(), 0, 1);
+  return (ms - y0) / 86400000 + 1;
+}

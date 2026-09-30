@@ -55,10 +55,13 @@ export function vehicleSurface(o: VehicleShadingOpts = {}) {
   const head = is(1).mul(float(0.25).add(night.mul(2.8)).add(headOn.mul(1.5)));
   const tail = is(2).mul(night.mul(1.1).add(brake.mul(2.4)));
   const ind = is(3).mul(left).add(is(4).mul(right)).mul(blink).mul(2.5);
+  // flag 32: powered down (a train stabled in a depot) — no lamps, no signs
+  const on = float(1).sub(bit(flags, 32));
   const emissive = vec3(1.0, 0.93, 0.78).mul(head)
     .add(vec3(1.0, 0.06, 0.03).mul(tail))
     .add(vec3(1.0, 0.5, 0.05).mul(ind))
-    .add(vec3(1.0, 0.62, 0.12).mul(sign.mul(float(0.3).add(night.mul(1.4)))));
+    .add(vec3(1.0, 0.62, 0.12).mul(sign.mul(float(0.3).add(night.mul(1.4)))))
+    .mul(on);
   return { albedo, emissive, glass };
 }
 

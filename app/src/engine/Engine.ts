@@ -9,6 +9,7 @@ import { clock } from '../state/clock';
 import { simSpeed, useApp } from '../state/store';
 import { Atmosphere } from '../render/atmosphere';
 import { TileManager } from '../render/tiles/TileManager';
+import { BuildingIndex } from './buildingIndex';
 import { QualityGovernor, ViewCull } from './view';
 import { Rum } from './rum';
 
@@ -44,6 +45,8 @@ export class Engine {
   controls!: CameraController;
   atmosphere!: Atmosphere;
   tiles!: TileManager;
+  /** building footprint queries (camera collision, label occlusion) */
+  buildings!: BuildingIndex;
   anchor = new FloatingAnchor();
   readonly view = new ViewCull();
   readonly quality = new QualityGovernor();
@@ -132,6 +135,7 @@ export class Engine {
       (probe.material as THREE.Material).dispose();
     }
     this.tiles = new TileManager(this.dataRoot);
+    this.buildings = new BuildingIndex(this.tiles);
     this.tiles.lodScale = config.lodScale * (0.55 + 0.45 * this.quality.scale);
     await this.tiles.init();
     performance.mark('engine-init');
@@ -154,6 +158,7 @@ export class Engine {
       dom: renderer.domElement,
       heightAt: (e, n) => this.heightAt(e, n),
       pickGround: (x, y) => this.pickGround(x, y),
+      buildingTop: (e, n, h) => this.buildings.topAt(e, n, h),
     }, start);
     this.controls.apply();
 

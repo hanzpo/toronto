@@ -5,7 +5,7 @@ import init, { Sim } from './pkg/sim.js';
 import { decodeTbn, type Tbn } from '../data/tbn';
 import {
   bottleneckOf, CAR_STRIDE, H, HEADER_BYTES, HF, HF_COUNT, MAX_CARS, MAX_PEDS, MAX_RAIL, MAX_RAIL_PTS, MAX_SIGNALS, PED_STRIDE, RAIL_OFFSET, RAIL_PATH_OFFSET,
-  RAIL_STRIDE, SIG_OFFSET, SIG_STRIDE, SLOT_BYTES, SLOT_HEADER, SLOTS,
+  RAIL_STRIDE, SIG_OFFSET, SIG_STRIDE, SLOT_BYTES, SLOT_HEADER, SLOTS, MAX_BUS, MAX_BUS_PTS, BUS_OFFSET, BUS_PATH_OFFSET, BUS_STRIDE,
   type FromWorker, type TickMsg, type ToWorker,
 } from './protocol';
 
@@ -219,9 +219,17 @@ function publish(m: TickMsg) {
     new Float32Array(sab, base + RAIL_OFFSET, nr * RAIL_STRIDE).set(new Float32Array(mem, sim.rail_ptr(), nr * RAIL_STRIDE));
     if (npts) new Float32Array(sab, base + RAIL_PATH_OFFSET, npts * 3).set(new Float32Array(mem, sim.rail_path_ptr(), npts * 3));
   }
+  let nb = Math.min(sim.bus_count(), MAX_BUS);
+  const nbp = sim.bus_path_len();
+  if (nbp > MAX_BUS_PTS) nb = 0;
+  if (nb) {
+    new Float32Array(sab, base + BUS_OFFSET, nb * BUS_STRIDE).set(new Float32Array(mem, sim.bus_ptr(), nb * BUS_STRIDE));
+    new Float32Array(sab, base + BUS_PATH_OFFSET, nbp * 3).set(new Float32Array(mem, sim.bus_path_ptr(), nbp * 3));
+  }
   const si = new Int32Array(sab, base, 12);
   const sf = new Float64Array(sab, base, 4);
-  si[0] = nc; si[1] = np; si[8] = ns; si[9] = nr; si[10] = nr ? npts : 0;
+  si[0] = nc; si[1] = np; si[8] = ns; si[9] = nr; si[10] = nr ? npts : 0; si[11] = nb;
+  new Float64Array(sab, base, 8)[6] = nb ? nbp : 0;
   sf[1] = m.originE; sf[2] = m.originN; sf[3] = m.simMs;
   Atomics.store(hdr, H.SLOT, slot);
   Atomics.add(hdr, H.SEQ, 1);
@@ -255,6 +263,8 @@ function tick(m: TickMsg) {
       sim.rail_set_radius(m.railRadius ?? 0);
       if (m.railCmd) sim.rail_player_input(m.railCmd.cmd, m.railCmd.emergency);
       if (m.camera) sim.rail_set_camera(m.camera[0], m.camera[1], m.camera[2], m.camera[3]);
+      if (m.busPatterns) for (const p of m.busPatterns) sim.bus_pattern(p.id, p.xy, p.stopD, p.stopFlag);
+      if (m.busSpawn) for (const b of m.busSpawn) { const r = sim.bus_spawn(b.trip, b.pat, b.len, b.front, b.v, b.arr, b.dep); hf[HF.BUSX + Math.min(r, 5)]++; }
       const pl = m.player;
       sim.set_obstacles(m.obst ?? new Float64Array(0));
       if (pl) manageFootprints(hf[HF.PLAYER + 1], hf[HF.PLAYER + 2]);
@@ -278,6 +288,7 @@ function tick(m: TickMsg) {
       sim.set_fast(fast);
       // rail agents (cheap) follow the full sim time in their own steps; only when the clock
       // runs far too fast for them does the timetable take over (never under the player)
+      const tr0 = performance.now();
       let rrem = Math.min(m.simDt, 3600);
       let rt = m.tod - rrem;
       let rk = 0;
@@ -289,6 +300,8 @@ function tick(m: TickMsg) {
         rk++;
       }
       if (rrem > 1 && !sim.rail_has_player()) sim.rail_reset();
+      const rms = performance.now() - tr0;
+      hf[HF.RAIL_MS] = hf[HF.RAIL_MS] ? hf[HF.RAIL_MS] * 0.95 + rms * 0.05 : rms;
       sim.write_output(m.originE, m.originN);
       const ms = performance.now() - t0;
       stepAvg = stepAvg ? stepAvg * 0.95 + ms * 0.05 : ms;

@@ -7,6 +7,7 @@
 // the size in metres one texture repeat covers; Parts.build() divides the
 // metre-UVs by it.
 import * as THREE from 'three/webgpu'
+import { floor, mod, texture, time, uv, vec2 } from 'three/tsl'
 
 export interface MatSpec {
   material: THREE.MeshStandardMaterial
@@ -129,6 +130,74 @@ function glow(color: string, base: string, day: number, night: number): MatSpec 
   }
 }
 
+// Animated LED billboard screens (Yonge-Dundas Square). The atlas holds 4
+// columns × 4 rows of generic ads; a panel's UV spans one column (u) and the
+// full height (v); the shown row cycles with time, phase-shifted per column.
+const SCREEN_COLS = 4, SCREEN_ROWS = 4
+
+function screenAtlas(): THREE.CanvasTexture {
+  const W = 1024, H = 1024
+  const c = document.createElement('canvas')
+  c.width = W
+  c.height = H
+  const g = c.getContext('2d')!
+  const cw = W / SCREEN_COLS, ch = H / SCREEN_ROWS
+  const words = ['SALE', 'LIVE', 'NEW', 'TORONTO', 'FILM', 'MUSIC', 'SUMMER', 'COFFEE',
+    'SPORTS', 'NEWS', 'GAME', 'TOUR', 'SHOP', 'FASHION', 'NIGHT', 'EVENT']
+  const pals = [['#ff2d55', '#ffd60a'], ['#0a84ff', '#64d2ff'], ['#30d158', '#e5ff3a'], ['#bf5af2', '#ff9f0a'],
+    ['#ff375f', '#ffffff'], ['#1c1c1e', '#ff453a'], ['#ff9f0a', '#1c1c1e'], ['#5e5ce6', '#ffd60a']]
+  const r = rng(99)
+  for (let j = 0; j < SCREEN_ROWS; j++) {
+    for (let i = 0; i < SCREEN_COLS; i++) {
+      const k = j * SCREEN_COLS + i
+      const [a, b] = pals[(k * 3 + j) % pals.length]
+      const x = i * cw, y = j * ch
+      const grd = g.createLinearGradient(x, y, x + cw, y + ch)
+      grd.addColorStop(0, a)
+      grd.addColorStop(1, b)
+      g.fillStyle = grd
+      g.fillRect(x, y, cw, ch)
+      // abstract product shape / face
+      g.fillStyle = r() < 0.5 ? '#ffffffcc' : '#00000066'
+      g.beginPath()
+      g.arc(x + cw * (0.25 + r() * 0.5), y + ch * (0.3 + r() * 0.2), cw * (0.12 + r() * 0.12), 0, Math.PI * 2)
+      g.fill()
+      g.fillStyle = '#ffffff'
+      g.font = `900 ${Math.round(ch * 0.2)}px Impact, Arial Black, sans-serif`
+      g.textAlign = 'center'
+      g.textBaseline = 'middle'
+      g.fillText(words[k], x + cw / 2, y + ch * 0.72, cw * 0.9)
+      g.fillStyle = '#00000055'
+      g.fillRect(x, y + ch * 0.88, cw, ch * 0.12)
+    }
+  }
+  const t = new THREE.CanvasTexture(c)
+  t.colorSpace = THREE.SRGBColorSpace
+  t.anisotropy = 4
+  return t
+}
+
+function ledScreen(): MatSpec {
+  const tex = screenAtlas()
+  const m = new THREE.MeshStandardNodeMaterial({ color: '#0b0b0d', roughness: 0.35, metalness: 0.1 })
+  const u = uv()
+  const col = floor(u.x.mul(SCREEN_COLS))
+  const row = mod(floor(time.div(7).add(col.mul(1.37))), SCREEN_ROWS)
+  m.emissiveNode = texture(tex, vec2(u.x, row.add(u.y.clamp(0.01, 0.99)).div(SCREEN_ROWS))).mul(1.4)
+  return { material: m as unknown as THREE.MeshStandardMaterial, castShadow: false }
+}
+
+/** UV rect for one screen panel showing atlas column `col` (0..3). */
+export function screenUV(col: number): [number, number] {
+  const c = ((col % SCREEN_COLS) + SCREEN_COLS) % SCREEN_COLS
+  return [(c + 0.01) / SCREEN_COLS, (c + 0.99) / SCREEN_COLS]
+}
+
+function grass(): MatSpec {
+  const material = new THREE.MeshStandardMaterial({ color: '#5f8a3e', roughness: 1, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 })
+  return { material, castShadow: false }
+}
+
 function build() {
   return {
     // --- plain surfaces
@@ -166,6 +235,10 @@ function build() {
     glassTeal: facade({ cols: 8, rows: 8, bay: 1.5, floor: 3.2, frame: '#a7bcbd', glass: '#4b7876', glass2: '#588886', mullion: 0.08, spandrel: 0.14 }, 0.25, 0.2, 1.0, 18),
     glassGrey: facade({ cols: 8, rows: 8, bay: 1.5, floor: 3.2, frame: '#c4c8ca', glass: '#56646f', glass2: '#62717c', mullion: 0.1, spandrel: 0.18 }, 0.3, 0.2, 1.0, 19),
     cibcGlass: facade({ cols: 16, rows: 16, bay: 1.5, floor: 4.2, frame: '#b9c6cf', glass: '#5a7f96', glass2: '#6689a0', mullion: 0.08, spandrel: 0.12, diag: { color: '#eef2f4', width: 10, floors: 16 } }, 0.25, 0.2, 1.0, 20),
+    /** smooth Indiana limestone (no window texture): Union Station head house */
+    limestoneSmooth: plain('#d7cfbb', 0.88),
+    /** train-shed roof soffits: faint bounce light so they don't go black in their own shadow */
+    shedUnder: plain('#a9a59c', 0.9, 0, { emissive: '#4a4740', emissiveIntensity: 1 }),
     limestone: facade({ cols: 8, rows: 4, bay: 2.4, floor: 4.2, frame: '#d9ceb6', glass: '#3b3f44', mullion: 0.55, spandrel: 0.4, lit: 0.3 }, 0.9, 0, 0.9, 21),
     sandstone: facade({ cols: 8, rows: 4, bay: 2.6, floor: 4.5, frame: '#a98a6c', glass: '#34383c', mullion: 0.6, spandrel: 0.45, lit: 0.25 }, 0.95, 0, 0.8, 22),
     castleStone: facade({ cols: 8, rows: 4, bay: 3.0, floor: 4.5, frame: '#b0a38e', glass: '#34383c', mullion: 0.65, spandrel: 0.5, lit: 0.3 }, 0.95, 0, 0.8, 23),
@@ -174,6 +247,25 @@ function build() {
     romAlu: facade({ cols: 4, rows: 4, bay: 6, floor: 6, frame: '#cdd0d0', glass: '#cdd0d0', mullion: 0.9, spandrel: 0.9, lit: 0, diag: { color: '#46505a', width: 14, floors: 4 } }, 0.45, 0.35, 0.6, 26),
     condoWhite: facade({ cols: 8, rows: 8, bay: 1.5, floor: 3.1, frame: '#eef0f0', glass: '#4f7388', glass2: '#5b8196', mullion: 0.05, spandrel: 0.3, lit: 0.45 }, 0.3, 0.1, 1.1, 28),
     shellConcrete: facade({ cols: 16, rows: 8, bay: 1.2, floor: 3.6, frame: '#e4e0d6', glass: '#565c62', mullion: 0.72, spandrel: 0.04, lit: 0.3 }, 0.85, 0, 0.9, 29),
+    // --- pass 2 (Eaton Centre, UofT, markets, culture)
+    vaultGlass: plain('#a9c3cf', 0.12, 0.45),
+    wood: plain('#b27a48', 0.7),
+    titanium: plain('#8fb2cc', 0.4, 0.25),
+    zinc: plain('#8c9396', 0.5, 0.5),
+    grass: grass(),
+    ledScreen: ledScreen(),
+    signRed: glow('#ff3b2f', '#9a1d16', 0.35, 3),
+    signWarm: glow('#ffd68a', '#d9c7a0', 0.15, 3),
+    bronzeGlass: facade({ cols: 8, rows: 8, bay: 1.5, floor: 3.8, frame: '#4a3d33', glass: '#6a5646', glass2: '#7a6552', mullion: 0.14, spandrel: 0.3 }, 0.3, 0.3, 1.0, 31),
+    ecPrecast: facade({ cols: 8, rows: 4, bay: 3, floor: 4.6, frame: '#c3ae93', glass: '#3a3f45', mullion: 0.2, spandrel: 0.72, lit: 0.35 }, 0.85, 0, 0.9, 32),
+    victorianBrick: facade({ cols: 8, rows: 4, bay: 2.4, floor: 4.2, frame: '#a4503a', glass: '#2c2f33', mullion: 0.62, spandrel: 0.45, lit: 0.35 }, 0.9, 0, 0.9, 33),
+    buffBrick: facade({ cols: 8, rows: 4, bay: 2.6, floor: 4.4, frame: '#c7a57a', glass: '#33373c', mullion: 0.6, spandrel: 0.45, lit: 0.3 }, 0.9, 0, 0.8, 34),
+    pinkSandstone: facade({ cols: 8, rows: 4, bay: 2.8, floor: 5, frame: '#b4786a', glass: '#2e3034', mullion: 0.62, spandrel: 0.48, lit: 0.3 }, 0.95, 0, 0.8, 35),
+    ucStone: facade({ cols: 8, rows: 4, bay: 2.6, floor: 4.6, frame: '#a9967a', glass: '#2f3236', mullion: 0.64, spandrel: 0.46, lit: 0.3 }, 0.95, 0, 0.8, 36),
+    gothicStone: facade({ cols: 8, rows: 4, bay: 2.2, floor: 4.4, frame: '#b2a893', glass: '#2d3034', mullion: 0.7, spandrel: 0.42, lit: 0.3 }, 0.95, 0, 0.8, 37),
+    brutalist: facade({ cols: 16, rows: 4, bay: 1.4, floor: 4.5, frame: '#b9b4aa', glass: '#3b3f44', mullion: 0.72, spandrel: 0.2, lit: 0.35 }, 0.9, 0, 0.8, 38),
+    rthGlass: facade({ cols: 8, rows: 8, bay: 2.2, floor: 2.2, frame: '#c7d0d6', glass: '#6b8799', glass2: '#7c98aa', mullion: 0.04, spandrel: 0.04, lit: 0.2, diag: { color: '#dfe6ea', width: 6, floors: 8 } }, 0.2, 0.5, 0.8, 39),
+    storefront: facade({ cols: 4, rows: 1, bay: 4, floor: 5, frame: '#2f3134', glass: '#56646e', glass2: '#62717c', mullion: 0.12, spandrel: 0.18, lit: 0.8 }, 0.3, 0.3, 1.2, 40),
     hotelWarm: facade({ cols: 8, rows: 8, bay: 1.5, floor: 3.1, frame: '#9aa7ad', glass: '#3f5b6c', glass2: '#4a6878', mullion: 0.1, spandrel: 0.22, lit: 0.5 }, 0.3, 0.2, 1.1, 27),
   } satisfies Record<string, MatSpec>
 }

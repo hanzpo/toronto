@@ -49,7 +49,7 @@ self.addEventListener('fetch', (e) => {
   const url = new URL(req.url);
   if (url.origin === self.location.origin) {
     const p = url.pathname;
-    if (p.startsWith('/assets/') || p.startsWith('/textures/')) return e.respondWith(cacheFirst(req, SHELL));
+    if (p.startsWith('/assets/') || p.startsWith('/textures/') || p.startsWith('/fonts/')) return e.respondWith(cacheFirst(req, SHELL));
     if (p.startsWith('/data/transit/')) return e.respondWith(networkFirst(req, DATA));
     if (p.startsWith('/data/tiles/') || p.startsWith('/data/graph/') || p === '/rum') return; // tile workers cache these
     if (req.mode === 'navigate') return e.respondWith(networkFirst(req, SHELL));

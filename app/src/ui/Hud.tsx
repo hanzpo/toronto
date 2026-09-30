@@ -6,13 +6,15 @@ import { getEngine } from '../engine/instance';
 import { Panels } from './panels/Panels';
 import { SearchBox } from './panels/Search';
 import { useInteract } from '../interact/state';
+import { Icon } from './icons';
 
 // ---------------------------------------------------------------------------- helpers
 
 const pad = (n: number) => String(n).padStart(2, '0');
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const SPEED_LABEL = (s: number) => (s >= 3600 ? `${s / 3600}h/s` : s >= 60 ? `${s / 60}m/s` : `${s}×`);
+const SPEED_LABEL = (s: number) => (s >= 3600 ? `${s / 3600} h/s` : s >= 60 ? `${s / 60} m/s` : `${s}×`);
+const DAY_LABEL: Record<DayType, string> = { weekday: 'Weekday', saturday: 'Saturday', sunday: 'Sunday' };
 
 function useSimClock(hz = 8) {
   const [, setT] = useState(0);
@@ -60,39 +62,28 @@ function TopBar() {
 
   return (
     <header className="topbar panel">
-      <div className="brand">
-        <span className="brand-mark" aria-hidden>
-          <i style={{ background: 'var(--l1)' }} /><i style={{ background: 'var(--l2)' }} /><i style={{ background: 'var(--go)' }} />
-        </span>
-        <span className="brand-name">GTA<b>·</b>TWIN</span>
-      </div>
-
-      <div className="clock">
-        <div className="clock-time">
-          {pad(p.hour)}<span className="blink">:</span>{pad(p.minute)}<small>:{pad(p.second)}</small>
-        </div>
-        <div className="clock-date">
-          <span>{DAY_NAMES[p.weekday]} {p.day} {MONTHS[p.month - 1]} {p.year}</span>
-          <button className={`daytype ${override ? 'forced' : ''}`} onClick={cycle} title="Service day profile — click to override">
-            {day}{override ? ' ·ovr' : ''}
-          </button>
-        </div>
-      </div>
-
       <div className="transport">
-        <button className="btn play" onClick={() => useApp.getState().togglePlay()} title="Play / pause (Space)">
-          {playing ? (
-            <svg viewBox="0 0 16 16"><rect x="3" y="2" width="3.5" height="12" /><rect x="9.5" y="2" width="3.5" height="12" /></svg>
-          ) : (
-            <svg viewBox="0 0 16 16"><path d="M4 2 L14 8 L4 14 Z" /></svg>
-          )}
+        <button className="btn play" onClick={() => useApp.getState().togglePlay()} title={playing ? 'Pause (Space)' : 'Play (Space)'} aria-label={playing ? 'Pause' : 'Play'}>
+          {playing ? <Icon.pause /> : <Icon.play />}
         </button>
-        <div className="speeds" role="group" aria-label="Simulation speed">
+        <div className="seg speeds" role="group" aria-label="Simulation speed">
           {SPEEDS.slice(1).map((s, i) => (
-            <button key={s} className={`speed ${speedIndex === i + 1 ? 'on' : ''}`} onClick={() => useApp.getState().setSpeedIndex(i + 1)} title="[ / ] to change">
+            <button key={s} className={speedIndex === i + 1 ? 'on' : ''} onClick={() => useApp.getState().setSpeedIndex(i + 1)} title="Simulation speed ( [ and ] )">
               {SPEED_LABEL(s)}
             </button>
           ))}
+        </div>
+      </div>
+
+      <div className="clock">
+        <div className="clock-time" aria-label="Simulation time">
+          {pad(p.hour)}:{pad(p.minute)}<small>:{pad(p.second)}</small>
+        </div>
+        <div className="clock-date">
+          <span>{DAY_NAMES[p.weekday]} {p.day} {MONTHS[p.month - 1]}</span>
+          <button className={`daytype ${override ? 'forced' : ''}`} onClick={cycle} title="Service-day timetable (click to override)">
+            {DAY_LABEL[day]}{override ? ' · set' : ''}
+          </button>
         </div>
       </div>
 
@@ -104,7 +95,7 @@ function TopBar() {
           aria-label="Time of day"
         />
         <div className="scrub-ticks" aria-hidden>
-          {[0, 3, 6, 9, 12, 15, 18, 21, 24].map((h) => <span key={h}>{pad(h % 24)}</span>)}
+          {[0, 3, 6, 9, 12, 15, 18, 21, 24].map((h) => <span key={h} className={h % 6 ? 'minor' : ''}>{pad(h % 24)}</span>)}
         </div>
       </div>
     </header>
@@ -142,15 +133,16 @@ function LayersPanel() {
   const st = useApp.getState();
   return (
     <aside className={`layers panel ${open ? '' : 'collapsed'}`}>
-      <button className="panel-head" onClick={() => setOpen(!open)}>
-        <span>Layers</span><span className="chev">{open ? '–' : '+'}</span>
+      <button className="panel-head" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <Icon.layers /><span>Layers</span><span className="chev">{open ? <Icon.chevronUp /> : <Icon.chevronDown />}</span>
       </button>
       {open && (
         <div className="panel-body">
           <label className={`mode-switch ${mode ? 'on' : ''}`}>
             <input type="checkbox" checked={mode} onChange={() => st.setAnalyticsMode(!mode)} />
             <span className="mode-track"><span className="mode-knob" /></span>
-            <span className="mode-text"><b>Analytics mode</b><small>dim base map · V</small></span>
+            <span className="mode-text"><b>Analytics mode</b><small>Dim the base map</small></span>
+            <kbd>V</kbd>
           </label>
 
           <h4>Analytics</h4>
@@ -160,7 +152,7 @@ function LayersPanel() {
                 <button className={`line ${analytics[k] ? 'on' : ''}`} onClick={() => st.toggleAnalytics(k)} style={{ ['--c' as string]: color }}>
                   <span className="line-swatch" />
                   <span className="line-label">{label}{sub && <small>{sub}</small>}</span>
-                  <span className="line-state">{analytics[k] ? 'ON' : 'OFF'}</span>
+                  <span className="switch" aria-hidden><i /></span>
                 </button>
               </li>
             ))}
@@ -190,11 +182,11 @@ function LayersPanel() {
 
 function Stats() {
   const s = useApp((x) => x.stats);
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(() => window.innerWidth >= 1280);
   const fpsClass = s.fps >= 55 ? 'good' : s.fps >= 30 ? 'ok' : 'bad';
   return (
-    <div className={`stats panel ${open ? '' : 'collapsed'}`} onClick={() => setOpen(!open)} title="click to collapse">
-      <div className="stat-main"><b className={fpsClass}>{s.fps.toFixed(0)}</b><span>fps</span><em>{s.frameMs.toFixed(1)} ms cpu</em></div>
+    <div className={`stats panel ${open ? '' : 'collapsed'}`} onClick={() => setOpen(!open)} title={open ? 'Hide details' : 'Show details'}>
+      <div className="stat-main"><b className={fpsClass}>{s.fps.toFixed(0)}</b><span>fps</span><em>{s.frameMs.toFixed(1)} ms</em></div>
       {open && (
         <dl>
           <dt>draw</dt><dd>{s.drawCalls}</dd>
@@ -232,8 +224,8 @@ function Compass() {
   return (
     <button className="compass panel" onClick={north} title="Reset to north">
       <div ref={needle} className="compass-rose">
+        <svg viewBox="0 0 40 40" aria-hidden><path d="M20 6 L25 20 L15 20 Z" className="up" /><path d="M20 34 L25 20 L15 20 Z" className="down" /></svg>
         <span className="n">N</span>
-        <svg viewBox="0 0 40 40"><path d="M20 5 L25 20 L20 18 L15 20 Z" className="up" /><path d="M20 35 L25 20 L20 22 L15 20 Z" className="down" /></svg>
       </div>
     </button>
   );
@@ -254,6 +246,43 @@ function ScaleBar() {
   );
 }
 
+// ---------------------------------------------------------------------------- shortcuts
+
+const KEYS: [string[], string][] = [
+  [['Click'], 'Select a vehicle or station'],
+  [['Drag'], 'Pan'],
+  [['Right-drag'], 'Rotate / tilt'],
+  [['Scroll'], 'Zoom'],
+  [['W', 'A', 'S', 'D'], 'Move'],
+  [['Q', 'E'], 'Turn'],
+  [['Space'], 'Play / pause'],
+  [['[', ']'], 'Slower / faster'],
+  [['V'], 'Analytics mode'],
+  [['H'], 'Hide the interface'],
+  [['Home'], 'Back to downtown'],
+];
+
+function Shortcuts() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="shortcuts">
+      <button className={`iconbtn panel ${open ? 'on' : ''}`} onClick={() => setOpen(!open)} title="Keyboard & mouse" aria-label="Keyboard and mouse shortcuts" aria-expanded={open}>
+        <Icon.keyboard />
+      </button>
+      {open && (
+        <div className="keys-pop panel" onClick={() => setOpen(false)}>
+          <h4>Controls</h4>
+          <dl>
+            {KEYS.map(([k, what]) => (
+              <div key={what}><dt>{k.map((x) => <kbd key={x}>{x}</kbd>)}</dt><dd>{what}</dd></div>
+            ))}
+          </dl>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------- root
 
 export function Hud() {
@@ -269,6 +298,7 @@ export function Hud() {
       <Stats />
       <div className="navcluster">
         <ScaleBar />
+        <Shortcuts />
         <Compass />
       </div>
       <Panels />
@@ -276,10 +306,9 @@ export function Hud() {
         <div className="selection panel">
           <small>{selected.kind}</small>
           <b>{selected.label ?? selected.id}</b>
-          <button onClick={() => useApp.getState().select(null)}>×</button>
+          <button className="ip-x" onClick={() => useApp.getState().select(null)} aria-label="Clear selection"><Icon.close /></button>
         </div>
       )}
-      <div className="hint">click a vehicle or station · drag pan · right-drag rotate · wheel zoom · WASD/QE · space pause · [ ] speed · V analytics · H hide</div>
     </div>
   );
 }

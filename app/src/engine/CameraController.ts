@@ -26,6 +26,11 @@ export interface ControllerHost {
   dom: HTMLElement;
   heightAt(e: number, n: number): number;
   pickGround(clientX: number, clientY: number): GroundHit | null;
+  /**
+   * Optional building volume query for camera collision: top elevation of a
+   * building containing (e, n) at elevation h, or -Infinity when free.
+   */
+  buildingTop?(e: number, n: number, h: number): number;
 }
 
 const MIN_DIST = 4;
@@ -56,6 +61,12 @@ export class CameraController {
   private time = 0;
   private ray = new THREE.Raycaster();
   private ndc = new THREE.Vector2();
+  /** camera collision: smoothed fraction of the orbit distance that is free (1 = unobstructed) */
+  private collFrac = 1;
+  /** camera collision: extra pitch (rad) that lifts the view over an obstacle */
+  private collLift = 0;
+  /** collision on/off (e.g. cab views that place the camera themselves) */
+  collide = true;
 
   private host: ControllerHost;
   constructor(host: ControllerHost, init: CamState) {
@@ -166,16 +177,27 @@ export class CameraController {
       c.heading += wrapPi(g.heading - c.heading) * kr;
       c.pitch += (g.pitch - c.pitch) * kr;
     }
+    // camera collision: pull in at once when something gets between the
+    // focus and the camera, ease back out when it clears
+    // (or, when pulling in would leave the eye right at the focus, lift the
+    // view over the obstacle); ease back out when it clears
+    const r = this.resolveCollision(this.cur);
+    if (r.lift > this.collLift) this.collLift += (r.lift - this.collLift) * (1 - Math.exp(-dt * 12));
+    else this.collLift += (r.lift - this.collLift) * (1 - Math.exp(-dt * 1.5));
+    const fi = this.freeFraction(this.lifted(this.cur));
+    if (fi < this.collFrac) this.collFrac = fi;
+    else this.collFrac += (fi - this.collFrac) * (1 - Math.exp(-dt * 2.5));
     this.apply();
   }
 
   /** Write `cur` into the camera transform (enforcing min altitude). */
   apply() {
-    const c = this.cur;
+    const c = this.lifted(this.cur);
     const cp = Math.cos(c.pitch);
-    const camE = c.e - Math.sin(c.heading) * cp * c.dist;
-    const camN = c.n - Math.cos(c.heading) * cp * c.dist;
-    let camH = c.h + Math.sin(c.pitch) * c.dist;
+    const dist = c.dist * Math.min(this.collFrac, this.freeFraction(c));
+    const camE = c.e - Math.sin(c.heading) * cp * dist;
+    const camN = c.n - Math.cos(c.heading) * cp * dist;
+    let camH = c.h + Math.sin(c.pitch) * dist;
     const ground = this.host.heightAt(camE, camN);
     if (camH < ground + MIN_ALTITUDE) camH = ground + MIN_ALTITUDE;
     const cam = this.host.camera;
@@ -183,6 +205,79 @@ export class CameraController {
     cam.up.set(0, 1, 0);
     cam.lookAt(c.e, c.h, -c.n);
     cam.updateMatrixWorld();
+  }
+
+  private liftTmp: CamState = { e: 0, n: 0, h: 0, dist: 1, heading: 0, pitch: 0 };
+  /** `c` with the collision pitch lift applied (shared temp object) */
+  private lifted(c: CamState): CamState {
+    if (this.collLift < 1e-3) return c;
+    const t = this.liftTmp;
+    t.e = c.e; t.n = c.n; t.h = c.h; t.dist = c.dist; t.heading = c.heading;
+    t.pitch = Math.min(MAX_PITCH, c.pitch + this.collLift);
+    return t;
+  }
+
+  /**
+   * Obstruction response for orbit state c: pull the eye in along the view ray
+   * when that still leaves a useful distance (close street-level views keep
+   * working), otherwise tilt the view up over the obstacle (courtyards,
+   * plazas, a tower right behind the camera). Chase cams only pull in.
+   */
+  private resolveCollision(c: CamState): { lift: number } {
+    if (!this.collide || !this.host.buildingTop) return { lift: 0 };
+    const f0 = this.freeFraction(c);
+    if (f0 >= 0.999 || this.followFn) return { lift: 0 };
+    if (f0 * c.dist >= Math.min(c.dist, Math.max(15, 0.35 * c.dist))) return { lift: 0 };
+    const t = this.liftTmp;
+    let best = 0, bestF = f0;
+    for (const dp of [0.12, 0.25, 0.4, 0.6, 0.85, 1.15]) {
+      t.e = c.e; t.n = c.n; t.h = c.h; t.dist = c.dist; t.heading = c.heading;
+      t.pitch = Math.min(MAX_PITCH, c.pitch + dp);
+      const f = this.freeFraction(t);
+      if (f > bestF + 0.05) { best = t.pitch - c.pitch; bestF = f; }
+      if (f >= 0.9) break;
+    }
+    return { lift: best };
+  }
+
+  /**
+   * Fraction of the orbit distance the camera can sit at without being inside
+   * a building volume or below the terrain between it and the focus. The ray
+   * is marched from the focus outwards; an initial stretch inside a building
+   * (focus on a footprint) is ignored. Only near the ground (< 400 m).
+   */
+  private freeFraction(c: CamState): number {
+    const top = this.host.buildingTop;
+    if (!this.collide || !top || c.dist < 3) return 1;
+    const sp = Math.sin(c.pitch), cp = Math.cos(c.pitch);
+    const ue = -Math.sin(c.heading) * cp, un = -Math.cos(c.heading) * cp;
+    // above the tallest towers (CN Tower aside) nothing can be hit
+    if (c.h + sp * c.dist > c.h + 480 && sp > 0.5) return 1;
+    const D = c.dist + 1.5; // keep ~1.5 m off walls
+    const step = Math.max(1, Math.min(12, D / 28));
+    // focus below ground (following an underground train): no terrain test
+    const terr = c.h > this.host.heightAt(c.e, c.n) - 2 ? 1.5 : Infinity;
+    let started = false;
+    let hitT = -1;
+    for (let t = Math.min(2, D); t <= D; t += step) {
+      const e = c.e + ue * t, n = c.n + un * t, h = c.h + sp * t;
+      const g = this.host.heightAt(e, n);
+      const blocked = top.call(this.host, e, n, h) > h || (started && h < g - terr);
+      if (!blocked) { started = true; continue; }
+      if (!started) continue;
+      hitT = t;
+      // refine between t - step and t
+      let a = Math.max(0, t - step), b = t;
+      for (let k = 0; k < 5; k++) {
+        const m = (a + b) / 2;
+        const me = c.e + ue * m, mn = c.n + un * m, mh = c.h + sp * m;
+        if (top.call(this.host, me, mn, mh) > mh || mh < this.host.heightAt(me, mn) - terr) b = m; else a = m;
+      }
+      hitT = a;
+      break;
+    }
+    if (hitT < 0) return 1;
+    return Math.max(2, hitT - 1.5) / c.dist;
   }
 
   // ------------------------------------------------------------------------ input

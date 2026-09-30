@@ -113,9 +113,12 @@ class Block:
         self._ground()
         self.nbuilt = np.array([
             (len(d.get("b_ring_off", [0])) - 1) + len(d.get("h_xy", [])) // 2 for d in self.data], dtype=np.int64)
-        self.roads = self._lines("r", ["class", "width", "lanes", "flags", "layer", "side", "osm", "v0", "name"])
+        self.roads = self._lines("r", ["class", "width", "lanes", "flags", "layer", "side", "osm", "v0", "name", "sw"])
         if self.roads.n:
             self.roads.attrs["w"] = render_width(self.roads.attrs["class"], self.roads.attrs["width"])
+            if any("r_pl" in d for d in self.data):
+                # network-model tiles (tpipe.roadnet): r_width is the drawn pavement width (no class minimum)
+                self.roads.attrs["w"] = np.where(self.roads.attrs["width"] > 0, self.roads.attrs["width"], self.roads.attrs["w"])
         self.rails = self._lines("l", ["class", "flags", "osm"])
         self._points()
         self._junctions()
@@ -210,6 +213,10 @@ class Block:
             tiles.append(np.full(npc, ti, np.int64))
             for k in names:
                 arr = d.get(f"{p}_{k}")
+                if k == "sw" and arr is not None and len(arr) == len(v) and npc:
+                    # network-model tiles: per-vertex sidewalk bits (tpipe.roadnet SW_*) -> OR per piece
+                    attrs[k].append(np.bitwise_or.reduceat(arr.astype(np.int64), off[:-1].astype(np.int64)).astype(np.float64))
+                    continue
                 attrs[k].append(arr[:npc].astype(np.float64) if arr is not None and len(arr) >= npc else np.zeros(npc))
         if len(offs) == 1:
             return _empty_lines(names)

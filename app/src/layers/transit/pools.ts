@@ -6,10 +6,13 @@ import * as THREE from 'three/webgpu';
 import { attribute, clamp, dot, float, floor, fract, mix, mod, normalView, positionViewDirection, pow, step, vec3 } from 'three/tsl';
 import type { CarSpec } from '../../models/consists';
 import { U } from '../../render/uniforms';
+import { OutlineSet } from '../../render/overlay/OutlineSet';
 
 /** instance flag bits understood by vehicleMaterial */
 export const FLAG_BRAKE = 1;
 export const FLAG_HEAD = 16;
+/** powered down: lamps and signs off (parked in a depot) */
+export const FLAG_OFF = 32;
 
 class Pool {
   mesh: THREE.InstancedMesh;
@@ -127,10 +130,13 @@ export class CarPools {
   readonly group = new THREE.Group();
   private pools = new Map<string, Pool>();
   private material: THREE.Material;
+  /** selection / hover outlines (render/overlay/OutlineSet) */
+  private outline: OutlineSet;
 
   constructor() {
     this.group.name = 'transit-cars';
     this.material = carMaterial();
+    this.outline = new OutlineSet(this.group);
   }
 
   private pool(spec: CarSpec, low: boolean): Pool {
@@ -146,11 +152,13 @@ export class CarPools {
 
   begin() {
     for (const p of this.pools.values()) p.count = 0;
+    this.outline.begin();
   }
 
   /** Add one car. Position is anchor-relative three.js coordinates (x = E, y = up, z = -N). */
-  add(spec: CarSpec, low: boolean, x: number, y: number, z: number, heading: number, pitch: number, color: THREE.Color, flags: number) {
+  add(spec: CarSpec, low: boolean, x: number, y: number, z: number, heading: number, pitch: number, color: THREE.Color, flags: number, outline = 0) {
     const p = this.pool(spec, low);
+    if (outline) this.outline.add(p.geom, x, y, z, heading, pitch, outline);
     if (p.count >= p.capacity) p.grow();
     const k = p.count++;
     const ch = Math.cos(heading), sh = Math.sin(heading), cp = Math.cos(pitch), sp = Math.sin(pitch);
@@ -167,6 +175,7 @@ export class CarPools {
 
   commit() {
     for (const p of this.pools.values()) p.commit();
+    this.outline.commit();
   }
 
   /** instances drawn this frame */
@@ -179,6 +188,7 @@ export class CarPools {
   dispose() {
     for (const p of this.pools.values()) { p.geom.dispose(); p.mesh.dispose(); }
     this.material.dispose();
+    this.outline.dispose();
     this.group.removeFromParent();
   }
 }

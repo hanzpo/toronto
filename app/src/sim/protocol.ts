@@ -18,9 +18,11 @@
 //     f64[26..30) RAIL      [trains, overlaps (total, must stay 0), authority overruns (total), turnbacks]
 //     f64[30..44) RAILP     player train: see Sim.rail_player_state (sim/src/rail.rs)
 //     f64[44..47) RAILX     [pull-outs, pull-ins (totals), parked trains]
+//     f64[54]     RAIL_MS   exponential average of the rail step time per tick (ms)
+//     f64[48..54) BUSX      bus spawn results (totals): [placed, unknown pattern, no road, road too far, at link end, no room]
 //   then 3 snapshot slots of SLOT_BYTES each:
 //     i32[0] carCount · i32[1] pedCount · f64[1] originE · f64[2] originN · f64[3] simMs · i32[8] signalCount
-//     i32[9] railCount · i32[10] railPathPoints
+//     i32[9] railCount · i32[10] railPathPoints · i32[11] busCount · f64[6] busPathPoints (as number)
 //     +64:             cars  MAX_CARS × CAR_STRIDE f32
 //                      [dE, dN, elev, heading, pitch, speed, meta u32, id u32]   (body centre)
 //                      meta = kind | colour << 8 | flags << 16 | ground << 24
@@ -36,6 +38,10 @@
 //                      feed = index into the 'railFeeds' agency list; trip / pattern = local indices in that
 //                      agency's rail file; flags RAIL_FLAG; PENDING records have no position (hide the trip)
 //     +…+railBytes:    rail paths MAX_RAIL_PTS × 3 f32: track under each consist, rear → front
+//     +…:              buses MAX_BUS × BUS_STRIDE f32 (sim/src/bus.rs World::write_buses)
+//                      [trip (global TransitSystem id), frontAlongPattern-len/2, speed, flags u32, delay, length, pathOff, pathN]
+//                      flags BUS_FLAG
+//     +…:              bus paths MAX_BUS_PTS × 3 f32 (lane path under the bus, rear → front)
 // Positions are relative to the slot's origin (the renderer's floating anchor).
 
 export const MAX_CARS = 16384;
@@ -60,11 +66,17 @@ export const SLOTS = 3;
 export const SIG_OFFSET = SLOT_HEADER + MAX_CARS * CAR_STRIDE * 4 + MAX_PEDS * PED_STRIDE * 4;
 export const RAIL_OFFSET = SIG_OFFSET + MAX_SIGNALS * SIG_STRIDE * 4;
 export const RAIL_PATH_OFFSET = RAIL_OFFSET + MAX_RAIL * RAIL_STRIDE * 4;
-export const SLOT_BYTES = RAIL_PATH_OFFSET + MAX_RAIL_PTS * 3 * 4;
+export const MAX_BUS = 2048;
+export const BUS_STRIDE = 8;
+export const MAX_BUS_PTS = 32768;
+export const BUS_FLAG = { DWELL: 1, DOORS: 2, BRAKE: 4, NIS: 8 } as const;
+export const BUS_OFFSET = RAIL_PATH_OFFSET + MAX_RAIL_PTS * 3 * 4;
+export const BUS_PATH_OFFSET = BUS_OFFSET + MAX_BUS * BUS_STRIDE * 4;
+export const SLOT_BYTES = BUS_PATH_OFFSET + MAX_BUS_PTS * 3 * 4;
 export const SAB_BYTES = HEADER_BYTES + SLOTS * SLOT_BYTES;
 
 export const H = { SEQ: 0, SLOT: 1, BUSY: 2, TILES: 3, PENDING: 4, SUBSTEPS: 5, FAST: 6, ACK: 7 } as const;
-export const HF = { STEP_MS: 8, STEP_AVG: 9, TARGET_CARS: 10, TARGET_PEDS: 11, PLAYER: 12, RAIL: 26, RAILP: 30, RAILX: 44 } as const;
+export const HF = { STEP_MS: 8, STEP_AVG: 9, TARGET_CARS: 10, TARGET_PEDS: 11, PLAYER: 12, RAIL: 26, RAILP: 30, RAILX: 44, BUSX: 48, RAIL_MS: 54 } as const;
 export const HF_COUNT = 64;
 /** RAILP fields */
 export const RAILP = { ACTIVE: 0, FEED: 1, TRIP: 2, CENTRE: 3, V: 4, A: 5, AHEAD: 6, ASPECT: 7, PENALTY: 8, LIMIT: 9, NEXT_LIMIT: 10, NEXT_LIMIT_DIST: 11, PATTERN: 12, WARN: 13 } as const;
@@ -98,6 +110,10 @@ export interface TickMsg {
   railRadius?: number;
   /** camera position + horizontal forward (E, N) — rail spawns / removals avoid the view */
   camera?: [number, number, number, number];
+  /** bus patterns first needed by `busSpawn` (sent once per pattern) */
+  busPatterns?: { id: number; xy: Float64Array; stopD: Float32Array; stopFlag: Uint8Array }[];
+  /** bus trips to place as agents at their scheduled positions */
+  busSpawn?: { trip: number; pat: number; len: number; front: number; v: number; arr: Float64Array; dep: Float64Array }[];
   /** player train command (-1 brake .. 1 power) */
   railCmd?: { cmd: number; emergency: boolean };
 }

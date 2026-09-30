@@ -4,10 +4,22 @@ import { useApp } from '../../state/store';
 import { useInteract } from '../../interact/state';
 import { STATE_DWELL, RAIL_MODES } from '../../transit';
 import { getEngine } from '../../engine/instance';
+import { Icon } from '../icons';
 import { MODE_LABEL, baseName, countdown, getInteract, getTransit, hhmm, kmh, serviceSec, shortStop, useTick, cleanHeadsign } from './common';
 
+/**
+ * Route bullet in the operator's own style: TTC rapid-transit lines are round
+ * numbered bullets, surface routes and GO / UP / VIA are rounded tiles.
+ */
 export function RouteBadge({ short, color, text, big }: { short: string; color: string; text: string; big?: boolean }) {
-  return <span className={`rbadge ${big ? 'big' : ''}`} style={{ background: color, color: text }}>{short}</span>;
+  const round = /^\d$/.test(short);
+  const wide = short.length > 3;
+  return <span className={`rbadge${big ? ' big' : ''}${round ? ' round' : ''}${wide ? ' wide' : ''}`} style={{ background: color, color: text }}>{short}</span>;
+}
+
+/** "On time" / "3 min late" -> status tone */
+export function statusTone(s: string) {
+  return /late|not in service/i.test(s) ? 'bad' : /early/i.test(s) ? 'warn' : '';
 }
 
 export function VehiclePanel({ trip }: { trip: number }) {
@@ -21,17 +33,22 @@ export function VehiclePanel({ trip }: { trip: number }) {
   const t = serviceSec();
   const operated = opTrip === trip && ia?.op;
   const vs = sys.vehicleAt(trip, t);
-  const dist = operated ? ia!.op!.s : vs?.dist ?? 0;
-  const speed = operated ? ia!.op!.v : vs?.speed ?? 0;
+  // trains driven by the rail sim: its position / speed / delay, not the timetable's
+  const ag = getTransit()?.agentInfo?.(trip) ?? null;
+  const dist = operated ? ia!.op!.s : ag && Number.isFinite(ag.dist) ? ag.dist : vs?.dist ?? 0;
+  const speed = operated ? ia!.op!.v : ag ? ag.speed : vs?.speed ?? 0;
   const len = info.stops[info.stops.length - 1]?.dist || 1;
   const real = info.stops.filter((s) => !s.virtual);
   const upcoming = real.filter((s) => s.dist >= dist - 5).slice(0, 7);
   const r = info.routeMeta;
   const dev = operated ? ia!.op!.deviation(t) : 0;
   const dwell = !operated && vs?.state === STATE_DWELL;
-  const status = !vs && !operated ? 'Not in service' : operated
-    ? Math.abs(dev) < 30 ? 'On time (you)' : dev > 0 ? `${Math.round(dev / 60)} min late (you)` : `${Math.round(-dev / 60)} min early (you)`
-    : dwell ? `At ${shortStop(sys.stopName(vs!.nextStop))}` : 'On schedule';
+  const late = (d: number) => (Math.abs(d) < 60 ? 'On time' : d > 0 ? `${Math.round(d / 60)} min late` : `${Math.round(-d / 60)} min early`);
+  const status = operated
+    ? `${late(dev)} (you)`
+    : ag
+      ? ag.deadhead ? 'Not in service' : ag.dwell ? `At ${shortStop(upcoming[0]?.name ?? '')} · ${late(ag.delay)}` : late(ag.delay)
+      : !vs ? 'Not in service' : dwell ? `At ${shortStop(sys.stopName(vs!.nextStop))}` : 'On schedule';
   const rail = (RAIL_MODES as readonly string[]).includes(info.mode) || info.mode === 'bus';
   const attached = mode !== 'free';
   return (
@@ -40,13 +57,13 @@ export function VehiclePanel({ trip }: { trip: number }) {
         <RouteBadge short={r.short} color={r.color} text={r.textColor} big />
         <div className="ip-title">
           <small>{MODE_LABEL[info.mode]} · {r.long}{info.name ? ` · #${info.name}` : ''}</small>
-          <b>→ {cleanHeadsign(info.headsign)}</b>
+          <b><span className="to">to</span> {cleanHeadsign(info.headsign)}</b>
         </div>
-        <button className="ip-x" onClick={() => { useApp.getState().select(null); useInteract.getState().set({ highlightRoute: null }); }} aria-label="Close">×</button>
+        <button className="ip-x" onClick={() => { useApp.getState().select(null); useInteract.getState().set({ highlightRoute: null }); }} aria-label="Close"><Icon.close /></button>
       </header>
       <div className="ip-metrics">
-        <div><em>{kmh(speed)}</em><small>km/h</small></div>
-        <div className={`ip-status ${operated ? 'you' : ''}`}><em>{status}</em><small>{hhmm(info.start)} – {hhmm(info.end)}</small></div>
+        <div className="ip-speed"><em>{kmh(speed)}</em><small>km/h</small></div>
+        <div className={`ip-status ${operated ? 'you' : ''} ${statusTone(status)}`}><em>{status}</em><small>{hhmm(info.start)} – {hhmm(info.end)}</small></div>
       </div>
       <div className="ip-progress" aria-hidden>
         <div className="ip-track" style={{ ['--c' as string]: r.color }}>
@@ -68,11 +85,11 @@ export function VehiclePanel({ trip }: { trip: number }) {
         {!upcoming.length && <li className="muted">Trip complete</li>}
       </ol>
       <div className="ip-actions">
-        <button className={`act ${mode === 'follow' ? 'on' : ''}`} onClick={() => ia?.follow(trip)} title="Chase camera">Follow</button>
-        <button className={`act ${mode === 'cab' ? 'on' : ''}`} onClick={() => ia?.cab(trip)} title="Driver's eye view">Cab view</button>
-        <button className={`act ${mode === 'ride' ? 'on' : ''}`} onClick={() => ia?.ride(trip)} title="Passenger view">Ride</button>
-        {rail && <button className={`act primary ${operated ? 'on' : ''}`} onClick={() => (operated ? ia?.exit() : ia?.operate(trip))} title="Detach from the schedule and drive it (T)">{operated ? 'Release' : 'Take control'}</button>}
-        {attached && <button className="act ghost" onClick={() => ia?.exit()}>Exit · Esc</button>}
+        <button className={`act ${mode === 'follow' ? 'on' : ''}`} onClick={() => ia?.follow(trip)} title="Chase camera"><Icon.follow />Follow</button>
+        <button className={`act ${mode === 'cab' ? 'on' : ''}`} onClick={() => ia?.cab(trip)} title="Driver's eye view"><Icon.cab />Cab</button>
+        <button className={`act ${mode === 'ride' ? 'on' : ''}`} onClick={() => ia?.ride(trip)} title="Passenger view"><Icon.seat />Ride</button>
+        {rail && <button className={`act primary ${operated ? 'on' : ''}`} onClick={() => (operated ? ia?.exit() : ia?.operate(trip))} title="Detach from the schedule and drive it (T)"><Icon.wheel />{operated ? 'Release' : 'Drive'}</button>}
+        {attached && <button className="act ghost" onClick={() => ia?.exit()}>Exit<kbd>Esc</kbd></button>}
       </div>
     </section>
   );
@@ -105,12 +122,12 @@ export function StationPanel({ stop }: { stop: number }) {
   return (
     <section className="ipanel spanel panel">
       <header className="ip-head">
-        <span className="stn-icon" aria-hidden><svg viewBox="0 0 16 16"><rect x="3" y="2" width="10" height="10" rx="2.5" /><path d="M5 14 L6.5 12 M11 14 L9.5 12" /><rect x="5" y="4.5" width="6" height="3" rx="0.8" className="w" /></svg></span>
+        <span className="stn-icon" aria-hidden><Icon.station /></span>
         <div className="ip-title">
           <small>Station · {group.length} platform{group.length > 1 ? 's' : ''}</small>
           <b>{name}</b>
         </div>
-        <button className="ip-x" onClick={() => useApp.getState().select(null)} aria-label="Close">×</button>
+        <button className="ip-x" onClick={() => useApp.getState().select(null)} aria-label="Close"><Icon.close /></button>
       </header>
       <div className="board">
         <div className="board-head"><span>Route</span><span>Destination</span><span>Departs</span></div>
@@ -129,8 +146,8 @@ export function StationPanel({ stop }: { stop: number }) {
         {!list.length && <div className="muted pad">No departures in the next hours</div>}
       </div>
       <div className="ip-actions">
-        <button className="act primary" onClick={walk}>Walk here</button>
-        <button className="act" onClick={() => getEngine()?.controls.flyTo({ e: p[0], n: p[1], dist: 450, pitch: 0.7 }, 1.6)}>Fly to</button>
+        <button className="act primary" onClick={walk}><Icon.walk />Walk here</button>
+        <button className="act" onClick={() => getEngine()?.controls.flyTo({ e: p[0], n: p[1], dist: 450, pitch: 0.7 }, 1.6)}><Icon.pin />Fly to</button>
       </div>
     </section>
   );

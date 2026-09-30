@@ -1,0 +1,332 @@
+// Procedural facades for the extruded tile buildings (no textures, no extra
+// geometry): window grids at real storey heights with frames, lintels and sky
+// reflections, brick coursing / precast joints / metal ribs up close, cornices
+// and copings, and at street level storefront bands (shop glazing, doors,
+// bulkheads, sign bands with lettering), office lobbies and loading doors.
+// Night: lit windows, lit shops and backlit signs. Driven by the `fac` /
+// `fcode` vertex attributes written by workers/buildings.ts (style table below
+// must match its ST constants).
+import * as THREE from 'three/webgpu';
+import {
+  attribute, float, vec2, vec3, texture, floor, fract, mod, smoothstep, mix, step, max, min, abs, sin, pow, clamp,
+  fwidth, uniform, vertexColor, normalLocal, normalWorld, positionWorld, cameraPosition, reflect, dot, select,
+} from 'three/tsl';
+import { clock } from '../../state/clock';
+import { U } from '../uniforms';
+import { baseTone } from './materials';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type N = any;
+
+const ROWS = 8;
+// per style: [floorH, bayW, winW, winH], [sill, groundH, reflect, litProb], [frame rgb, mullionMode], [glass rgb, ornament]
+// ornament: 0 none · 1 lintels + sills + brick coursing · 2 condo balcony guards · 3 metal ribs · 4 panel joints
+const STYLE: number[][][] = [
+  /* 0 brick    */[[3.5, 2.5, 0.42, 0.55], [0.2, 4.4, 0.22, 0.3], [0.9, 0.88, 0.82, 0], [0.09, 0.1, 0.11, 1]],
+  /* 1 stone    */[[4.2, 3.0, 0.46, 0.58], [0.18, 4.8, 0.25, 0.28], [0.22, 0.22, 0.2, 0], [0.09, 0.1, 0.11, 1]],
+  /* 2 glass    */[[3.8, 1.5, 0.95, 0.76], [0.12, 5.5, 0.85, 0.45], [0.28, 0.3, 0.33, 1], [0.13, 0.2, 0.25, 0]],
+  /* 3 condo    */[[3.0, 1.5, 0.96, 0.8], [0.14, 4.8, 0.7, 0.4], [0.82, 0.84, 0.84, 1], [0.15, 0.24, 0.25, 2]],
+  /* 4 precast  */[[2.8, 3.0, 0.5, 0.48], [0.32, 4.2, 0.3, 0.35], [0.5, 0.5, 0.5, 0], [0.1, 0.12, 0.14, 4]],
+  /* 5 ribbon   */[[3.7, 1.8, 0.97, 0.42], [0.36, 4.6, 0.6, 0.45], [0.18, 0.18, 0.18, 1], [0.1, 0.14, 0.18, 4]],
+  /* 6 stucco   */[[3.5, 3.6, 0.42, 0.42], [0.32, 4.3, 0.25, 0.3], [0.92, 0.92, 0.9, 0], [0.1, 0.11, 0.12, 0]],
+  /* 7 metal    */[[6.5, 7.0, 0.7, 0.14], [0.75, 4.5, 0.3, 0.15], [0.3, 0.3, 0.3, 0], [0.12, 0.14, 0.16, 3]],
+  /* 8 parking  */[[3.0, 7.5, 0.92, 0.48], [0.38, 3.0, 0.0, 0.85], [0.6, 0.6, 0.58, 0], [0.07, 0.07, 0.07, 4]],
+  /* 9 loft     */[[4.3, 3.2, 0.62, 0.6], [0.16, 4.6, 0.3, 0.35], [0.14, 0.14, 0.14, 0], [0.09, 0.1, 0.11, 1]],
+  /* 10 blank   */[[3.0, 3.0, 0.0, 0.0], [0.3, 4.0, 0.0, 0.0], [0.5, 0.5, 0.5, 0], [0.1, 0.1, 0.1, 0]],
+  /* 11 house   */[[2.9, 3.0, 0.4, 0.5], [0.3, 0.0, 0.25, 0.3], [0.92, 0.92, 0.9, 0], [0.1, 0.1, 0.11, 1]],
+  /* 12 modern  */[[4.0, 2.2, 0.78, 0.5], [0.25, 4.8, 0.45, 0.3], [0.25, 0.26, 0.27, 1], [0.12, 0.16, 0.19, 4]],
+  /* 13 roof    */[[3, 3, 0, 0], [0, 0, 0, 0], [0.5, 0.5, 0.5, 0], [0.1, 0.1, 0.1, 0]],
+  /* 14 canopy  */[[3, 3, 0, 0], [0, 0, 0, 0], [0.5, 0.5, 0.5, 0], [0.1, 0.1, 0.1, 0]],
+  /* 15 awning  */[[3, 3, 0, 0], [0, 0, 0, 0], [0.5, 0.5, 0.5, 0], [0.1, 0.1, 0.1, 0]],
+];
+// shop sign colours (sRGB) — Toronto main-street mix: red, green, navy, black, cream, yellow…
+const SIGNS = [0xc62828, 0x2e7d32, 0x1a237e, 0x141414, 0xefe6cf, 0xf2b705, 0xe65100, 0x00796b,
+  0x6a1b9a, 0x7b1f1f, 0x1565c0, 0xf4f4f0, 0x263238, 0xad1457, 0x33691e, 0x4e342e];
+// bulkheads / shop door frames
+const BULK = [0x2b2b2b, 0x3e2a1c, 0x14181c, 0x6d6a64, 0x1f3a2b, 0x5a1f1f, 0x2c3e50, 0x8c8070,
+  0x151515, 0x40362c, 0x222a33, 0x4a4a48, 0x303030, 0x6b4a2e, 0x1c2c24, 0x3a3a3a];
+
+function srgb(c: number): [number, number, number] {
+  const f = (v: number) => Math.pow(v / 255, 2.2);
+  return [f((c >> 16) & 255), f((c >> 8) & 255), f(c & 255)];
+}
+
+let _tbl: THREE.DataTexture | null = null;
+function styleTable(): THREE.DataTexture {
+  if (_tbl) return _tbl;
+  const d = new Float32Array(16 * ROWS * 4);
+  for (let s = 0; s < 16; s++) {
+    for (let r = 0; r < 4; r++) {
+      const v = STYLE[s][r].slice();
+      if (r >= 2) { for (let k = 0; k < 3; k++) v[k] = Math.pow(v[k], 2.2); }
+      d.set(v, (r * 16 + s) * 4);
+    }
+    d.set([...srgb(SIGNS[s]), 1], (4 * 16 + s) * 4);
+    d.set([...srgb(BULK[s]), 1], (5 * 16 + s) * 4);
+  }
+  const t = new THREE.DataTexture(d, 16, ROWS, THREE.RGBAFormat, THREE.FloatType);
+  t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter; t.generateMipmaps = false;
+  t.needsUpdate = true;
+  return (_tbl = t);
+}
+
+// lit share by hour: [hour, residential, office, shops]
+const SCHED: number[][] = [
+  [0, 0.12, 0.06, 0.15], [5, 0.05, 0.05, 0.12], [6.5, 0.22, 0.12, 0.2], [8, 0.2, 0.55, 0.5], [9, 0.08, 0.7, 0.9],
+  [16, 0.1, 0.7, 0.9], [17.5, 0.35, 0.6, 0.9], [19, 0.45, 0.35, 0.9], [21, 0.45, 0.2, 0.75], [22, 0.38, 0.1, 0.35],
+  [23.5, 0.2, 0.06, 0.18], [24, 0.12, 0.06, 0.15],
+];
+function occupancy(sec: number, out: THREE.Vector3) {
+  const hr = (sec / 3600) % 24;
+  for (let i = 0; i < SCHED.length - 1; i++) {
+    const a = SCHED[i], b = SCHED[i + 1];
+    if (hr >= a[0] && hr <= b[0]) {
+      const t = (hr - a[0]) / Math.max(1e-6, b[0] - a[0]);
+      return out.set(a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t);
+    }
+  }
+  return out.set(0.3, 0.3, 0.5);
+}
+/** (residential, office, shop) lit fractions for the sim time of day */
+export const OCC = uniform(new THREE.Vector3(0.4, 0.4, 0.8)).onFrameUpdate(() => occupancy(clock.parts().secOfDay, OCC.value as THREE.Vector3)) as N;
+
+const hash2 = (a: N, b: N): N => fract(sin(a.mul(12.9898).add(b.mul(78.233))).mul(43758.5453));
+/** anti-aliased box [a, b] on x with filter width w */
+const box = (x: N, a: N, b: N, w: N): N => smoothstep(a.sub(w), a.add(w), x).mul(float(1).sub(smoothstep(b.sub(w), b.add(w), x)));
+const lin = (r: number, g: number, b: number) => vec3(Math.pow(r, 2.2), Math.pow(g, 2.2), Math.pow(b, 2.2));
+
+export function facadeMaterial(): THREE.MeshLambertNodeMaterial {
+  const m = new THREE.MeshLambertNodeMaterial();
+  m.name = 'buildings';
+  const tbl = styleTable();
+  const vc = vertexColor();
+  const base: N = pow(vec3(vc.r, vc.g, vc.b), vec3(2.2));
+
+  const fac = attribute('fac', 'vec4');
+  const fcd = attribute('fcode', 'vec2');
+  const u: N = fac.x, hh: N = fac.y, L: N = fac.z, Ht: N = fac.w;
+  const code = floor(fcd.x.add(0.5));
+  const unitW: N = max(fcd.y, 0.5);
+  const style = mod(code, 16), front = mod(floor(code.div(16)), 4), seed = floor(code.div(64));
+  const sv = style.add(0.5).div(16);
+  const row = (r: number) => texture(tbl, vec2(sv, (r + 0.5) / ROWS));
+  const P0 = row(0), P1 = row(1), P2 = row(2), P3 = row(3);
+  const pal = (r: number, idx: N) => texture(tbl, vec2(floor(idx.mul(16)).add(0.5).div(16), (r + 0.5) / ROWS)).rgb;
+
+  const isWall: N = float(1).sub(step(0.35, abs(normalLocal.y)));
+  const isShop = step(0.5, front).mul(step(front, 1.5));
+  const isLobby = step(1.5, front).mul(step(front, 2.5));
+  const isDock = step(2.5, front);
+  const isRoof = step(12.5, style).mul(step(style, 13.5));
+  const isCanopy = step(13.5, style).mul(step(style, 14.5));
+  const isAwning = step(14.5, style);
+  const special = isRoof.add(isCanopy).add(isAwning);
+
+  // ---- view vectors for glass
+  const Vd = positionWorld.sub(cameraPosition).normalize();
+  const Nw = normalWorld;
+  const cosT = abs(dot(Vd, Nw));
+  const fres = pow(float(1).sub(cosT), 5);
+  const reflCol = (jit: N) => {
+    const R = reflect(Vd, Nw);
+    const ry = R.y.add(jit.sub(0.5).mul(0.14));
+    const sky = mix(vec3(U.skyHorizon as N), vec3(U.skyZenith as N), smoothstep(0.0, 0.7, ry));
+    // below the horizon: the street and the facades opposite (mid grey), above: sky
+    return mix(vec3(0.16, 0.165, 0.17), sky, smoothstep(-0.12, 0.08, ry));
+  };
+
+  // ---- upper-floor window grid
+  const gH = mix(float(0), P1.y, isShop.add(isLobby));
+  const hu = hh.sub(gH);
+  const fh = P0.x;
+  const fyv = hu.div(fh);
+  const fl = floor(fyv), fy = fract(fyv);
+  const nb = max(floor(L.div(P0.y).add(0.5)), 1);
+  const bw = L.div(nb);
+  const cu = u.div(bw);
+  const colI = floor(cu), fx = fract(cu);
+  const wX = max(fwidth(cu), 0.001), wY = max(fwidth(fyv), 0.001);
+  const winW = P0.z, winH = P0.w, sill = P1.x;
+  const x0 = float(0.5).sub(winW.mul(0.5)), x1 = float(0.5).add(winW.mul(0.5));
+  const y0 = sill, y1 = sill.add(winH);
+  const inX = box(fx, x0, x1, wX), inY = box(fy, y0, y1, wY);
+  const valid = step(0, hu).mul(step(fl.add(1).mul(fh).add(gH), Ht.sub(0.3))).mul(step(1.6, L)).mul(step(0.01, winW))
+    .mul(box(u, float(0.35), L.sub(0.35), max(fwidth(u), 0.001)));
+  const far = smoothstep(0.22, 0.55, max(wX, wY));
+  const winSharp = inX.mul(inY).mul(valid);
+  const win: N = mix(winSharp, winW.mul(winH).mul(valid), far).mul(isWall).mul(float(1).sub(special));
+
+  // per-window randoms
+  const wr = hash2(seed.mul(0.731).add(fl.mul(1.37)), colI.mul(0.917).add(L.mul(0.113)));
+  const wr2 = fract(wr.mul(17.31));
+  // frame: thin border inside the window opening, plus a centre mullion on wide punched windows
+  const fw = float(0.06).div(bw);
+  const frameM = float(1).sub(box(fx, x0.add(fw), x1.sub(fw), wX).mul(box(fy, y0.add(fw.mul(bw).div(fh)), y1.sub(fw.mul(bw).div(fh)), wY)))
+    .add(select((winW.mul(bw) as N).greaterThan(1.4).and((P2.w as N).lessThan(0.5)), box(fx, float(0.485), float(0.515), wX), float(0)))
+    .mul(float(1).sub(far));
+  // blinds (upper part of the pane lighter) on a share of windows
+  const blind = step(0.72, wr2).mul(step(y1.sub(winH.mul(wr.mul(0.6).add(0.15))), fy));
+  const glassD = mix(P3.rgb.mul(wr.mul(0.6).add(0.7)), lin(0.62, 0.57, 0.48), blind.mul(0.8));
+  const refl = P1.z.mul(fres.mul(0.75).add(0.25)).mul(float(1).sub(blind.mul(0.7)));
+  const winCol = mix(glassD, P2.rgb, clamp(frameM, 0, 1));
+
+  // ---- wall surface ornament
+  const orn = P3.w;
+  const isBrickO = step(0.5, orn).mul(step(orn, 1.5));
+  const isBalc = step(1.5, orn).mul(step(orn, 2.5));
+  const isRib = step(2.5, orn).mul(step(orn, 3.5));
+  const isJoint = step(3.5, orn);
+  // brick coursing up close
+  const by = hh.div(0.0667), brow = floor(by); // modular brick: 57 mm + 10 mm joint
+  const bx = u.div(0.203).add(brow.mul(0.5)); // 194 mm + joint
+  const bW = max(fwidth(by), fwidth(bx));
+  const nearK = float(1).sub(smoothstep(0.12, 0.35, bW));
+  const mortar = float(1).sub(box(fract(by), float(0.14), float(1), bW).mul(box(fract(bx), float(0.05), float(1), bW)));
+  const brickTone = hash2(floor(bx), brow.mul(0.37)).sub(0.5).mul(0.16);
+  let wallC: N = base.mul(float(1).add(isBrickO.mul(nearK).mul(brickTone.sub(mortar.mul(0.18)))));
+  // lintels and sills (stone) on brick styles
+  const lint = box(fx, x0.sub(0.05), x1.add(0.05), wX).mul(box(fy, y1, y1.add(float(0.22).div(fh)), wY).add(box(fy, y0.sub(float(0.09).div(fh)), y0, wY)))
+    .mul(valid).mul(isBrickO).mul(float(1).sub(far));
+  wallC = mix(wallC, lin(0.8, 0.77, 0.7), clamp(lint, 0, 1));
+  // precast / curtain-wall joints
+  const jointK = float(1).sub(box(fy, float(0.02), float(0.98), wY).mul(box(fx, float(0.015), float(0.985), wX))).mul(isJoint).mul(float(1).sub(far));
+  wallC = wallC.mul(float(1).sub(jointK.mul(0.22)));
+  // metal ribs
+  const ribW = fwidth(u.div(0.3));
+  wallC = wallC.mul(float(1).add(sin(u.div(0.3).mul(6.2832)).mul(0.07).mul(isRib).mul(float(1).sub(smoothstep(0.2, 0.45, ribW)))));
+  // mullion gaps inside the glazing band use the frame colour (curtain walls, ribbon windows)
+  const inBand = inY.mul(valid).mul(step(0.5, P2.w)).mul(float(1).sub(inX));
+  wallC = mix(wallC, P2.rgb, clamp(inBand, 0, 1).mul(float(1).sub(far.mul(0.5))));
+  // condo balcony guards: frosted band in the lower pane on alternating bays
+  const guard = isBalc.mul(box(fy, y0, y0.add(0.3), wY)).mul(step(0.5, fract(colI.mul(0.5).add(seed.mul(0.5)))));
+  // cornice shadow + coping at the wall top; darker plinth at the foot
+  const cornice = box(hh, Ht.sub(1.1), Ht.sub(0.5), max(fwidth(hh), 0.001)).mul(isBrickO).mul(step(6, Ht));
+  const coping = step(Ht.sub(0.45), hh).mul(step(4, Ht));
+  wallC = mix(wallC, wallC.mul(0.72), cornice);
+  wallC = mix(wallC, mix(wallC, lin(0.68, 0.67, 0.64), 0.55), coping);
+  wallC = mix(wallC, wallC.mul(0.72), step(hh, 0.45).mul(float(1).sub(isShop)).mul(float(1).sub(isLobby)));
+  // soft ground-level occlusion
+  wallC = wallC.mul(mix(float(0.86), float(1), smoothstep(-0.5, 7, hh)));
+
+  let col: N = mix(wallC, winCol, win);
+  col = mix(col, mix(col, lin(0.8, 0.85, 0.86), 0.45), guard.mul(win));
+
+  // ---- storefront band
+  const us = u.div(unitW), si = floor(us), um = fract(us).mul(unitW);
+  const wm = max(fwidth(um), 0.002), wh = max(fwidth(hh), 0.002);
+  const rs = hash2(seed.mul(0.371).add(si.mul(1.713)), L.mul(0.0917).add(3.1));
+  const rs2 = fract(rs.mul(31.7)), rs3 = fract(rs.mul(7.13));
+  const pier = float(1).sub(box(um, float(0.32), unitW.sub(0.32), wm));
+  const shopFar = smoothstep(0.08, 0.3, wm);
+  const signTop = min(P1.y.sub(0.35), float(4.0));
+  const glassZ = box(hh, float(0.5), float(2.9), wh);
+  const signZ = box(hh, float(3.15), signTop, wh);
+  const bulkZ = step(hh, 0.5);
+  const dA = select(rs.lessThan(0.33), float(0.5), select(rs.lessThan(0.66), unitW.sub(1.6), unitW.mul(0.5).sub(0.55)));
+  const doorZ = box(um, dA, dA.add(1.1), wm).mul(step(hh, 2.45));
+  const doorGlass = box(um, dA.add(0.14), dA.add(0.96), wm).mul(box(hh, float(0.25), float(2.3), wh));
+  const signC = pal(4, rs2);
+  const bulkC = pal(5, rs3);
+  // shop interior seen through the glass: lit back wall (warm or cool), shelving
+  // uprights + shelves in stores, table silhouettes in cafés, a few display items
+  const backC = mix(lin(0.42, 0.36, 0.28), lin(0.36, 0.38, 0.4), step(0.6, rs2));
+  const grad = smoothstep(0.4, 2.9, hh).mul(0.5).add(0.5);
+  const isStore = step(0.45, rs3);
+  const upr = box(fract(um.div(1.25)), float(0.0), float(0.07), wm.div(1.25));
+  const shelves = box(fract(hh.div(0.5)), float(0.0), float(0.12), wh.div(0.5)).mul(box(hh, float(0.6), float(2.2), wh));
+  const tables = box(fract(um.div(1.8).add(rs)), float(0.2), float(0.6), wm.div(1.8)).mul(box(hh, float(0.5), float(1.05), wh));
+  const items = step(0.72, hash2(floor(um.div(0.5)).add(si.mul(13.1)), floor(hh.div(0.4)))).mul(box(hh, float(0.55), float(1.5), wh));
+  const itemC = mix(pal(4, fract(rs.mul(3.7).add(floor(um.div(0.5)).mul(0.13)))), backC, 0.35);
+  const detailK = float(1).sub(shopFar);
+  let interior: N = backC.mul(grad);
+  interior = mix(interior, interior.mul(0.35), clamp(upr.add(shelves), 0, 1).mul(isStore).mul(detailK));
+  interior = mix(interior, interior.mul(0.3), tables.mul(float(1).sub(isStore)).mul(detailK));
+  interior = mix(interior, itemC.mul(grad), items.mul(detailK).mul(0.8));
+  const shopGlass = interior.mul(0.45);
+  // lettering: blocky glyphs across the middle of the sign band
+  const gx = um.div(0.3);
+  const glyph = step(0.3, hash2(floor(gx).add(si.mul(7.7)), seed.add(1))).mul(box(fract(gx), float(0.14), float(0.86), wm.div(0.3)))
+    .mul(box(hh, float(3.3), signTop.sub(0.2), wh)).mul(box(um, unitW.mul(0.18), unitW.mul(0.82), wm));
+  const signLum = dot(signC, vec3(0.3, 0.59, 0.11));
+  const letterC = select(signLum.greaterThan(0.25), lin(0.08, 0.08, 0.08), select(rs3.lessThan(0.5), lin(0.97, 0.95, 0.9), lin(0.98, 0.8, 0.25)));
+  const signFull = mix(signC, letterC, glyph.mul(float(1).sub(shopFar)));
+  let shopC: N = wallC; // piers + cornice default to the wall
+  shopC = mix(shopC, bulkC, bulkZ.mul(float(1).sub(pier)));
+  shopC = mix(shopC, shopGlass, glassZ.mul(float(1).sub(pier)));
+  shopC = mix(shopC, bulkC.mul(0.6), box(hh, float(2.9), float(3.12), wh).mul(float(1).sub(pier)));
+  shopC = mix(shopC, signFull, signZ.mul(float(1).sub(pier.mul(0.6))));
+  shopC = mix(shopC, mix(bulkC.mul(0.5), lin(0.12, 0.13, 0.13), doorGlass), doorZ);
+  const shopZone = isShop.mul(step(hh, P1.y)).mul(isWall);
+  col = mix(col, shopC, shopZone);
+  const shopGlassMask = glassZ.mul(float(1).sub(pier)).mul(float(1).sub(doorZ)).add(doorGlass.mul(doorZ)).mul(shopZone);
+
+  // ---- office / civic lobby: full-height glazing with mullions
+  const lobbyH = P1.y;
+  const lu = fract(u.div(unitW));
+  const lw = max(fwidth(u.div(unitW)), 0.002);
+  const mull = float(1).sub(box(lu, float(0.04), float(0.96), lw)).add(box(hh, float(2.95), float(3.1), wh)).add(step(hh, 0.12));
+  const lobbyC = mix(lin(0.36, 0.33, 0.27), lin(0.12, 0.12, 0.13), clamp(mull, 0, 1));
+  const lobbyZone = isLobby.mul(step(hh, lobbyH.sub(0.4))).mul(isWall).mul(box(u, float(0.6), L.sub(0.6), max(fwidth(u), 0.001)));
+  col = mix(col, lobbyC, lobbyZone);
+  col = mix(col, wallC.mul(0.8), isLobby.mul(isWall).mul(box(hh, lobbyH.sub(0.4), lobbyH, wh)));
+
+  // ---- loading doors (industrial)
+  const dockDoor = box(um, unitW.mul(0.5).sub(1.6), unitW.mul(0.5).add(1.6), wm).mul(step(hh, 3.7)).mul(step(rs, 0.65));
+  const ribs = sin(hh.div(0.16).mul(6.2832)).mul(0.08).mul(float(1).sub(smoothstep(0.3, 0.6, fwidth(hh.div(0.16)))));
+  const dockC = lin(0.55, 0.56, 0.56).mul(float(1).add(ribs));
+  const dockFrame = box(um, unitW.mul(0.5).sub(1.8), unitW.mul(0.5).add(1.8), wm).mul(step(hh, 3.9)).mul(step(rs, 0.65));
+  const dockZone = isDock.mul(isWall);
+  col = mix(col, lin(0.25, 0.25, 0.24), dockFrame.mul(dockZone));
+  col = mix(col, dockC, dockDoor.mul(dockZone));
+
+  // ---- roof: gravel / membrane mottling
+  const rp = vec2(positionWorld.x, positionWorld.z);
+  const rn = hash2(floor(rp.x.div(1.7)), floor(rp.y.div(1.7))).sub(0.5).mul(0.1)
+    .add(hash2(floor(rp.x.div(9.3)), floor(rp.y.div(9.3))).sub(0.5).mul(0.12));
+  col = mix(col, base.mul(float(1).add(rn)), isRoof.mul(step(0.35, abs(normalLocal.y))));
+
+  // ---- awnings (striped or solid fabric) and plaza canopies (sign fascia)
+  const aw = fract(u.div(0.36));
+  const stripes = step(0.5, aw).mul(step(0.45, rs2));
+  const awC = mix(base, lin(0.93, 0.91, 0.86), stripes.mul(float(1).sub(smoothstep(0.2, 0.5, fwidth(u.div(0.36))))));
+  col = mix(col, awC, isAwning);
+  const fascia = isCanopy.mul(float(1).sub(step(0.35, abs(normalLocal.y))));
+  const cSign = box(um, float(0.7), unitW.sub(0.7), wm).mul(box(hh, float(3.45), float(4.05), wh)).mul(fascia).mul(step(0.12, rs));
+  const cGlyph = step(0.3, hash2(floor(gx).add(si.mul(7.7)), seed.add(2))).mul(box(fract(gx), float(0.14), float(0.86), wm.div(0.3)))
+    .mul(box(hh, float(3.55), float(3.95), wh)).mul(box(um, unitW.mul(0.25), unitW.mul(0.75), wm));
+  col = mix(col, base, isCanopy);
+  col = mix(col, mix(signC, letterC, cGlyph.mul(float(1).sub(shopFar))), cSign);
+
+  m.colorNode = baseTone(col);
+
+  // ---- emissive: glass reflections by day, lights at night
+  const night = U.night;
+  const dayRefl = float(1).sub(night.mul(0.75));
+  let em: N = reflCol(wr).mul(refl).mul(win).mul(dayRefl);
+  em = em.add(reflCol(rs).mul(fres.mul(0.5).add(0.12)).mul(shopGlassMask).mul(dayRefl));
+  em = em.add(reflCol(float(0.5)).mul(fres.mul(0.5).add(0.15)).mul(lobbyZone).mul(float(1).sub(clamp(mull, 0, 1))).mul(dayRefl));
+  // lit windows: offices light whole floors, homes scattered rooms
+  const floorR = hash2(seed.mul(1.91).add(fl.mul(0.61)), float(7.7));
+  const lr = mix(hash2(seed.mul(1.7).add(fl.mul(0.37)), colI.mul(0.71).add(L.mul(0.13))), floorR, P2.w.mul(0.65));
+  // occupancy by time of day: offices light whole floors in working hours, homes scattered rooms in the evening
+  const isOff = step(1.5, style).mul(step(style, 2.5)).add(step(4.5, style).mul(step(style, 5.5))).add(step(11.5, style).mul(step(style, 12.5)));
+  const isPark = step(7.5, style).mul(step(style, 8.5));
+  const prob = mix(mix(OCC.x, OCC.y, isOff), float(0.85), isPark);
+  // far LOD: sub-pixel windows average to the expected lit fraction (no sparkle)
+  const lit = mix(step(float(1).sub(prob), lr), prob, far);
+  const warm = mix(vec3(1.0, 0.7, 0.4), vec3(0.8, 0.85, 0.92), step(0.9, fract(lr.mul(7.3))).add(isOff.mul(step(0.35, fract(lr.mul(3.1))))).min(1));
+  const warmF = mix(warm, mix(vec3(1.0, 0.74, 0.46), vec3(0.88, 0.85, 0.78), isOff), far);
+  const glow = mix(fy.sub(y0).div(max(winH, 0.01)).mul(0.5).add(0.6), float(0.85), far);
+  const bright = mix(wr2.mul(0.35).add(0.3).mul(float(1).sub(blind.mul(0.5))), float(0.4), far);
+  em = em.add(warmF.mul(lit).mul(win).mul(night).mul(glow).mul(bright));
+  // shops: most lit in the evening; signs backlit
+  const shopLit = step(float(1).sub(OCC.z), rs3);
+  em = em.add(interior.mul(1.6).mul(shopGlassMask).mul(shopLit).mul(night).mul(rs2.mul(0.4).add(0.45)));
+  em = em.add(signFull.mul(signZ).mul(shopZone).mul(step(rs2, OCC.z.mul(0.75))).mul(night).mul(0.8));
+  em = em.add(signC.mul(cSign).mul(night).mul(0.8));
+  em = em.add(lin(0.95, 0.9, 0.78).mul(lobbyZone).mul(float(1).sub(clamp(mull, 0, 1))).mul(night.mul(OCC.y.mul(0.4).add(0.3)).add(0.04)));
+  // canopy soffit pot lights
+  em = em.add(lin(1, 0.85, 0.6).mul(isCanopy).mul(step(normalLocal.y, -0.5)).mul(night).mul(0.5));
+  (m as unknown as { emissiveNode: N }).emissiveNode = em.mul(float(1).sub(U.analytics.mul(0.7)));
+  return m;
+}

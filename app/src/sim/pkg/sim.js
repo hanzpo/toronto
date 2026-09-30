@@ -81,6 +81,79 @@ export class Sim {
     /**
      * @returns {number}
      */
+    bus_count() {
+        const ret = wasm.sim_bus_count(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * buses that stopped being agents since the last call: [trip, delay]*
+     * @returns {Float32Array}
+     */
+    bus_gone() {
+        const ret = wasm.sim_bus_gone(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {number}
+     */
+    bus_path_len() {
+        const ret = wasm.sim_bus_path_len(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    bus_path_ptr() {
+        const ret = wasm.sim_bus_path_ptr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * pattern shape (world E/N pairs) + stop centre distances / flags
+     * @param {number} id
+     * @param {Float64Array} xy
+     * @param {Float32Array} stop_d
+     * @param {Uint8Array} stop_flag
+     */
+    bus_pattern(id, xy, stop_d, stop_flag) {
+        const ptr0 = passArrayF64ToWasm0(xy, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF32ToWasm0(stop_d, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArray8ToWasm0(stop_flag, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.sim_bus_pattern(this.__wbg_ptr, id, ptr0, len0, ptr1, len1, ptr2, len2);
+    }
+    /**
+     * @returns {number}
+     */
+    bus_ptr() {
+        const ret = wasm.sim_bus_ptr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * place bus trip `trip` with its front at `front` along pattern `pat`
+     * @param {number} trip
+     * @param {number} pat
+     * @param {number} len
+     * @param {number} front
+     * @param {number} v
+     * @param {Float64Array} arr
+     * @param {Float64Array} dep
+     * @returns {number}
+     */
+    bus_spawn(trip, pat, len, front, v, arr, dep) {
+        const ptr0 = passArrayF64ToWasm0(arr, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF64ToWasm0(dep, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.sim_bus_spawn(this.__wbg_ptr, trip, pat, len, front, v, ptr0, len0, ptr1, len1);
+        return ret;
+    }
+    /**
+     * @returns {number}
+     */
     car_count() {
         const ret = wasm.sim_car_count(this.__wbg_ptr);
         return ret >>> 0;

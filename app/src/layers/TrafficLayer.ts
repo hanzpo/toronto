@@ -21,7 +21,7 @@ import { U } from '../render/uniforms';
 import { clock } from '../state/clock';
 import { useApp } from '../state/store';
 import {
-  CAR_FLAG, CAR_STRIDE, H, HEADER_BYTES, HF, HF_COUNT, MAX_CARS, MAX_PEDS, OB_FLAG, OB_STRIDE, PED_STRIDE, RAIL_OFFSET, RAIL_PATH_OFFSET, RAIL_RADIUS, RAIL_STRIDE, SAB_BYTES, SIG_OFFSET, SIG_STRIDE,
+  CAR_FLAG, CAR_STRIDE, H, HEADER_BYTES, HF, HF_COUNT, MAX_CARS, MAX_PEDS, OB_FLAG, OB_STRIDE, PED_STRIDE, RAIL_OFFSET, RAIL_PATH_OFFSET, RAIL_RADIUS, RAIL_STRIDE, BUS_OFFSET, BUS_PATH_OFFSET, BUS_STRIDE, SAB_BYTES, SIG_OFFSET, SIG_STRIDE,
   SLOT_BYTES, SLOT_HEADER, type FromWorker, type TickMsg, type ToWorker,
 } from '../sim/protocol';
 import { CAR_LENGTH, carLowGeometries, carPalette, carVariantsForKind, pedestrianGeometries, pedestrianLowGeometry, shirtPalette, type CarVariant } from './traffic/models';
@@ -385,6 +385,34 @@ export class TrafficLayer implements Layer {
     };
   }
 
+  /** car radius of the last tick (m, 0 = sim suspended) */
+  simRadius = 0;
+  private busQueue: { spawn: NonNullable<TickMsg['busSpawn']>; patterns: NonNullable<TickMsg['busPatterns']> } = { spawn: [], patterns: [] };
+
+  /** queue bus trips to become agents (patterns once per id) */
+  requestBuses(spawn: NonNullable<TickMsg['busSpawn']>, patterns: NonNullable<TickMsg['busPatterns']>) {
+    this.busQueue.spawn.push(...spawn);
+    this.busQueue.patterns.push(...patterns);
+  }
+
+  /** Latest bus agent records + lane paths (views into the shared buffer), or null. */
+  busSnapshot() {
+    if (!this.hdr) return null;
+    const seq = Atomics.load(this.hdr, H.SEQ);
+    if (seq === 0) return null;
+    const slot = Atomics.load(this.hdr, H.SLOT);
+    const base = HEADER_BYTES + slot * SLOT_BYTES;
+    const si = new Int32Array(this.sab, base, 12);
+    const sf = new Float64Array(this.sab, base, 8);
+    const count = si[11], pts = sf[6];
+    return {
+      count, oe: sf[1], on: sf[2], simMs: sf[3],
+      f: new Float32Array(this.sab, base + BUS_OFFSET, count * BUS_STRIDE),
+      u: new Uint32Array(this.sab, base + BUS_OFFSET, count * BUS_STRIDE),
+      path: new Float32Array(this.sab, base + BUS_PATH_OFFSET, pts * 3),
+    };
+  }
+
   /** [trains, overlaps (total), overruns (total), turnbacks, pull-outs, pull-ins, parked] */
   railStats(): number[] {
     if (!this.hf) return [0, 0, 0, 0, 0, 0, 0];
@@ -736,6 +764,8 @@ export class TrafficLayer implements Layer {
     const obst = radius > 0 ? this.transitObstacles() : undefined;
     if (this.railProfile) { m.railProfile = this.railProfile; m.railRadius = this.railEnabled ? RAIL_RADIUS : 0; }
     if (this.railCmd) m.railCmd = this.railCmd;
+    this.simRadius = radius;
+    if (this.busQueue.spawn.length) { m.busSpawn = this.busQueue.spawn; m.busPatterns = this.busQueue.patterns; this.busQueue = { spawn: [], patterns: [] }; }
     {
       const cam = this.engine.camera;
       cam.getWorldDirection(this.camDir);

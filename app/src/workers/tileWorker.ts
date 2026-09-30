@@ -2,7 +2,11 @@
 import { decodeTbn } from '../data/tbn';
 
 import { buildBuildings, buildRail, buildRoads, buildTerrain, concatMeshes, extractHouses, TerrainSampler, type MeshBuf, type TileMeshes } from './meshing';
+import { buildProps } from './props';
 import { buildStreet } from './street';
+import { buildGround, cutData } from './ground';
+import { buildCanopy } from './vegetation';
+import { extractFootprints } from './collide';
 
 export type WorkerIn =
   | { type: 'config'; suppress: number[]; build: number }
@@ -103,25 +107,34 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     const buf = await gunzipBytes(raw);
     if (ac.signal.aborted) { post({ type: 'cancelled', id }); return; }
     const t1 = performance.now();
-    const { arrays: a } = decodeTbn(buf);
+    const { arrays: a, header } = decodeTbn<{ names?: string[] }>(buf);
     const G = (a.terrain_h ? Math.round(Math.sqrt(a.terrain_h.length)) : grid) || grid;
     const terr = buildTerrain(a.terrain_h as Int16Array, G, size, level);
     const sampler = new TerrainSampler(terr.heights, G, size);
-    const bld = buildBuildings(a, suppress, level);
+    const vground = level === 0 ? buildGround(a, sampler) : null;
+    const cuts = level === 0 ? cutData(a, size) : null;
+    const bld = buildBuildings(a, suppress, level, msg.tx * size, msg.ty * size, sampler);
     const ground = a.ground ? (a.ground as Uint8Array).slice() : new Uint8Array(256 * 256);
     const roads = buildRoads(a, sampler, level, ground);
     const rail = buildRail(a, sampler, level);
-    const houses = level === 0 ? extractHouses(a, suppress) : null;
+    const houses = level === 0 ? extractHouses(a, suppress, msg.tx * size, msg.ty * size) : null;
     const street = level === 0 ? buildStreet(a, roads.streets, roads.junctions, sampler, ground, msg.tx, msg.ty) : null;
+    const props = level === 0 ? buildProps(a, header.names ?? [], roads.streets, roads.junctions, sampler, ground, houses, msg.tx, msg.ty) : null;
+    const canopy = level === 1 ? buildCanopy(a, ground, sampler, msg.tx, msg.ty, size) : null;
     const street3d = concatMeshes(roads.mesh, rail.mesh);
+    const collide = level === 0 ? extractFootprints(a, suppress) : null;
     const result: TileMeshes = {
-      terrain: terr.mesh, heights: terr.heights, grid: G, ground, minH: terr.minH, maxH: Math.max(terr.maxH, 0),
-      buildings: bld.mesh, roads: street3d, railStart: roads.mesh ? roads.mesh.index.length : 0, houses, street,
+      terrain: terr.mesh, vground, cuts, heights: terr.heights, grid: G, ground, minH: terr.minH, maxH: Math.max(terr.maxH, 0),
+      buildings: bld.mesh, collide, roads: street3d, railStart: roads.mesh ? roads.mesh.index.length : 0, houses, street, canopy, props,
       counts: { buildings: bld.count, houses: houses?.count ?? 0, roads: roads.count, rails: rail.count },
     };
     const tr: Transferable[] = [terr.heights.buffer, ground.buffer];
-    transfers(terr.mesh, tr); transfers(bld.mesh, tr); transfers(street3d, tr);
-    if (street) tr.push(street.trees.buffer, street.lamps.buffer, street.signals.buffer, street.signalIds.buffer);
+    if (collide) tr.push(collide.off.buffer, collide.xy.buffer, collide.bottom.buffer, collide.top.buffer);
+    transfers(terr.mesh, tr); transfers(vground, tr);
+    if (cuts) tr.push(cuts.off.buffer, cuts.xy.buffer, cuts.type.buffer, cuts.toff.buffer, cuts.txyz.buffer, cuts.tkind.buffer, cuts.box.buffer); transfers(bld.mesh, tr); transfers(street3d, tr);
+    if (canopy) tr.push(canopy.buffer);
+    if (props) { tr.push(props.items.buffer, props.segs.buffer); transfers(props.ground, tr); }
+    if (street) tr.push(street.veg.buffer, street.vegCells.buffer, street.lamps.buffer, street.signals.buffer, street.signalIds.buffer);
     if (houses) tr.push(houses.xy.buffer, houses.base.buffer, houses.angle.buffer, houses.len.buffer, houses.wid.buffer, houses.height.buffer, houses.type.buffer, houses.variant.buffer);
     const src = sources.get(url) ?? 'local';
     sources.delete(url);

@@ -7,6 +7,7 @@ import type { Engine } from '../engine/Engine';
 import type { FrameContext, Layer } from '../engine/types';
 import { MarkerOverlay } from '../render/overlay/MarkerOverlay';
 import { LineOverlay } from '../render/overlay/LineOverlay';
+import { OUTLINE_HOVER, OUTLINE_SELECTED, setOutlinePixelScale } from '../render/overlay/OutlineSet';
 import { clock } from '../state/clock';
 import { useApp } from '../state/store';
 import type { TransitLayer } from '../layers/TransitLayer';
@@ -55,7 +56,10 @@ export class InteractLayer implements Layer {
   private transit!: TransitLayer;
   private dom!: HTMLElement;
   private tip!: HTMLDivElement;
-  private pin!: MarkerOverlay;
+  /** floating label pill above the selected vehicle (screen space, never over the vehicle) */
+  private selTag!: HTMLDivElement;
+  private selTagKey = '';
+  private selTagShown = '';
   private stopMarks!: MarkerOverlay;
   private routeHi!: LineOverlay;
   private routeHiUnder!: LineOverlay;
@@ -109,7 +113,6 @@ export class InteractLayer implements Layer {
     this.dom = engine.renderer.domElement;
     engine.scene.add(this.tunnel.group);
 
-    this.pin = new MarkerOverlay(engine, { name: 'sel-pin', capacity: 1, shape: 'diamond', size: [5, 7, 5], minPixels: 13, depthMode: 'onTop', lift: 14 });
     const discGeo = new THREE.CylinderGeometry(0.5, 0.5, 1, 16).translate(0, 0.5, 0);
     this.stopMarks = new MarkerOverlay(engine, { name: 'stops', capacity: 4000, shape: discGeo, size: [3, 0.4, 3], minPixels: 5, lift: 0.3 });
     this.routeHiUnder = new LineOverlay(engine, { name: 'route-hi-under', width: 11, depthMode: 'onTop', lift: 6, order: 128 });
@@ -119,6 +122,10 @@ export class InteractLayer implements Layer {
     this.tip.className = 'pick-tip';
     this.tip.style.display = 'none';
     this.dom.parentElement?.appendChild(this.tip);
+    this.selTag = document.createElement('div');
+    this.selTag.className = 'sel-tag';
+    this.selTag.style.display = 'none';
+    this.dom.parentElement?.appendChild(this.selTag);
 
     this.dom.addEventListener('pointerdown', this.onDown);
     window.addEventListener('pointermove', this.onMove);
@@ -650,45 +657,38 @@ export class InteractLayer implements Layer {
       this.renderTip();
     }
 
-    // selection ring follows the selected vehicle
+    // selection: crisp outline on the selected consist's own geometry (TransitLayer
+    // draws it via OutlineSet) + a label pill above it; stops get a thin ground ring
+    setOutlinePixelScale(ctx.pixelScale);
     const sel = useApp.getState().selected;
     const t = this.transit.lastT || this.now();
-    let ringOn = false;
+    const hl = this.transit.highlight;
+    hl.clear();
     let selRing: Parameters<InteractLayer['showRing']>[2] = null;
+    let tagAt: { x: number; y: number; z: number; hd: number; L: number } | null = null;
     if (sel?.kind === 'vehicle' && (this.mode === 'free' || this.mode === 'follow')) {
       const trip = +sel.id;
-      let x = 0, y = 0, z = 0, hd = 0, L = 30, found = false;
-      if (this.op && this.op.info.trip === trip) {
-        x = this.pose.e; y = this.pose.n; z = this.pose.z; hd = this.pose.heading; L = this.op.dyn.length; found = true;
-      } else {
+      hl.set(trip, OUTLINE_SELECTED);
+      if (this.op && this.op.info.trip === trip) tagAt = { x: this.pose.e, y: this.pose.n, z: this.pose.z, hd: this.pose.heading, L: this.op.dyn.length };
+      else {
         const dv = this.transit.drawnVehicle(trip);
-        if (dv) {
-          x = dv.x; y = dv.y; z = dv.z; hd = dv.heading; L = dv.length; found = true;
-        }
-      }
-      if (found) {
-        ringOn = true;
-        selRing = { L: L * 1.25, W: Math.max(L * 0.4, 12), x, y, z, hd, color: 0x4fd1ff };
-        this.pin.setMarker(0, x, y, z + 6, hd + ctx.time, 0x4fd1ff);
+        if (dv) tagAt = { x: dv.x, y: dv.y, z: dv.z, hd: dv.heading, L: dv.length };
       }
     } else if (sel?.kind === 'stop' && this.stopsCache) {
       const p = sys.stopPosition(+sel.id);
-      ringOn = true;
-      selRing = { L: 40, W: 40, x: p[0], y: p[1], z: Math.max(p[2], this.engine.heightAt(p[0], p[1])), hd: 0, color: 0x4fd1ff };
-      this.pin.setMarker(0, p[0], p[1], Math.max(p[2], this.engine.heightAt(p[0], p[1])) + 6, ctx.time, 0x4fd1ff);
+      selRing = { L: 34, W: 34, x: p[0], y: p[1], z: Math.max(p[2], this.engine.heightAt(p[0], p[1])), hd: 0, color: 0x4c9bff };
     }
     this.showRing('sel', ctx, selRing);
-    this.pin.setCount(ringOn ? 1 : 0); this.pin.commit(); this.pin.update(ctx);
+    this.updateSelTag(ctx, sel?.kind === 'vehicle' ? +sel.id : -1, tagAt);
 
-    // hover ring
+    // hover: subtler white outline (vehicles) / ring (stops)
     let hvRing: Parameters<InteractLayer['showRing']>[2] = null;
     const h = this.hover;
     if (h?.kind === 'vehicle' && h.trip !== undefined && !(sel?.kind === 'vehicle' && +sel.id === h.trip)) {
-      const dv = this.transit.drawnVehicle(h.trip);
-      if (dv) hvRing = { L: dv.length * 1.2, W: Math.max(dv.length * 0.38, 10), x: dv.x, y: dv.y, z: dv.z, hd: dv.heading, color: 0xffffff };
-    } else if (h?.kind === 'stop' && h.stop !== undefined) {
+      hl.set(h.trip, OUTLINE_HOVER);
+    } else if (h?.kind === 'stop' && h.stop !== undefined && !(sel?.kind === 'stop' && +sel.id === h.stop)) {
       const p = sys.stopPosition(h.stop);
-      hvRing = { L: 30, W: 30, x: p[0], y: p[1], z: Math.max(p[2], this.engine.heightAt(p[0], p[1])), hd: 0, color: 0xffffff };
+      hvRing = { L: 28, W: 28, x: p[0], y: p[1], z: Math.max(p[2], this.engine.heightAt(p[0], p[1])), hd: 0, color: 0xffffff };
     }
     this.showRing('hover', ctx, hvRing);
 
@@ -702,7 +702,6 @@ export class InteractLayer implements Layer {
     document.body.classList.toggle('interact-ground', this.mode === 'walk' || this.mode === 'drive');
     this.routeHi.setVisible(!inside);
     this.routeHiUnder.setVisible(!inside);
-    this.pin.setVisible(!inside);
     this.transit.hideLines = inside;
     // hide the vehicle we sit in (its body would block the camera)
     if (this.trip !== null && !this.op) {
@@ -720,15 +719,60 @@ export class InteractLayer implements Layer {
     }
   }
 
+  /** Position (and on change, fill) the selected vehicle's label pill. */
+  private updateSelTag(ctx: FrameContext, trip: number, at: { x: number; y: number; z: number; hd: number; L: number } | null) {
+    const tag = this.selTag;
+    const cp = ctx.cameraPos;
+    const inside = document.body.classList.contains('interact-inside');
+    if (trip < 0 || !at || inside) {
+      if (this.selTagShown !== 'none') { tag.style.display = 'none'; this.selTagShown = 'none'; }
+      return;
+    }
+    const key = String(trip);
+    if (key !== this.selTagKey) {
+      this.selTagKey = key;
+      const info = this.system.tripInfo(trip);
+      const r = info?.routeMeta;
+      const round = r && /^\d$/.test(r.short) ? ' round' : '';
+      tag.innerHTML = r
+        ? `<span class="pt-badge${round}" style="background:${r.color};color:${r.textColor}">${esc(r.short)}</span><span class="st-text">${esc(towards(info!.headsign))}</span>`
+        : `<span class="st-text">Trip ${trip}</span>`;
+    }
+    // anchor: above the highest on-screen point of the vehicle (centre and both
+    // ends at roof height, plus the min-pixel marker size from afar), so the pill
+    // never covers the vehicle itself
+    const d = Math.hypot(at.x - cp.x, at.y + cp.z, at.z - cp.y);
+    const lift = 4.5 + (10 * d) / Math.max(1, ctx.pixelScale);
+    const ch = Math.cos(at.hd) * at.L * 0.5, sh = Math.sin(at.hd) * at.L * 0.5;
+    let x = 0, y = Infinity, ok = false;
+    for (let k = -1; k <= 1; k++) {
+      _tagV.set(at.x + ch * k, at.z + lift, -(at.y + sh * k)).project(ctx.camera);
+      if (_tagV.z < -1 || _tagV.z > 1) continue;
+      const sy = (-_tagV.y * 0.5 + 0.5) * ctx.viewport.height;
+      if (k === 0) { x = (_tagV.x * 0.5 + 0.5) * ctx.viewport.width; ok = true; }
+      y = Math.min(y, sy);
+    }
+    if (!ok || x < -40 || x > ctx.viewport.width + 40 || y < -40 || y > ctx.viewport.height + 40) {
+      if (this.selTagShown !== 'none') { tag.style.display = 'none'; this.selTagShown = 'none'; }
+      return;
+    }
+    const tf = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px) translate(-50%, -100%)`;
+    if (tf !== this.selTagShown) {
+      tag.style.display = 'flex';
+      tag.style.transform = tf;
+      this.selTagShown = tf;
+    }
+  }
+
   private ringCache = new Map<string, MarkerOverlay>();
   /** MarkerOverlay sizes are shader constants: keep one overlay per (kind, size). */
   private ringOf(kind: 'sel' | 'hover', L: number, W: number): MarkerOverlay {
     const key = `${kind}:${Math.round(L)}x${Math.round(W)}`;
     let m = this.ringCache.get(key);
     if (!m) {
-      const g = new THREE.RingGeometry(0.44, 0.5, 48).rotateX(-Math.PI / 2);
+      const g = new THREE.RingGeometry(0.46, 0.5, 64).rotateX(-Math.PI / 2);
       // depth-tested ring on the ground around the drawn vehicle (never over it)
-      m = new MarkerOverlay(this.engine, { name: `ring-${key}`, capacity: 1, shape: g, size: [L, 1, W], minPixels: kind === 'sel' ? 30 : 24, depthMode: 'auto', lift: 0.25 });
+      m = new MarkerOverlay(this.engine, { name: `ring-${key}`, capacity: 1, shape: g, size: [L, 1, W], minPixels: kind === 'sel' ? 26 : 22, depthMode: 'auto', lift: 0.25 });
       this.ringCache.set(key, m);
     }
     return m;
@@ -740,7 +784,7 @@ export class InteractLayer implements Layer {
       if (!k.startsWith(kind + ':')) continue;
       if (m === want) {
         // min-pixel size only from altitude: at street level the ring hugs the vehicle
-        m.setMinPixels((kind === 'sel' ? 30 : 24) * Math.min(1, Math.max(0, (ctx.altitude - 150) / 1050)));
+        m.setMinPixels((kind === 'sel' ? 26 : 22) * Math.min(1, Math.max(0, (ctx.altitude - 150) / 1050)));
         m.setMarker(0, on!.x, on!.y, Math.max(on!.z, this.engine.heightAt(on!.x, on!.y)), on!.hd, on!.color);
         m.setCount(1);
       } else m.setCount(0);
@@ -1202,11 +1246,13 @@ export class InteractLayer implements Layer {
     window.removeEventListener('keyup', this.onKeyUp, true);
     window.removeEventListener('blur', this.onBlur);
     for (const m of this.ringCache.values()) m.dispose();
-    this.pin.dispose(); this.stopMarks.dispose();
+    this.stopMarks.dispose();
+    this.transit.highlight.clear();
     this.routeHi.dispose(); this.routeHiUnder.dispose();
     this.tunnel.dispose();
     this.walker?.dispose();
     this.tip.remove();
+    this.selTag.remove();
   }
 }
 
@@ -1238,4 +1284,5 @@ function esc(s: string) {
 
 export { EB };
 
+const _tagV = new THREE.Vector3();
 const _railPose: Pose = { e: 0, n: 0, z: 0, heading: 0, pitch: 0 };

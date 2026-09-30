@@ -114,22 +114,7 @@ export function buildOldCityHall(ctx: BuildCtx) {
   return P.build('old_city_hall')
 }
 
-// ---------------------------------------------------------------------------
-// Union Station: Beaux-Arts hall with the Front Street colonnade.
-
-export function buildUnionStation(ctx: BuildCtx) {
-  const P = new Parts()
-  addOsmParts(P, ctx, (p) => {
-    if (p.kind === 'column') return { wall: 'white' }
-    if (p.kind === 'roof') return null
-    return { wall: 'limestone', roof: 'roofDark', pitched: 'copper' }
-  })
-  if (!ctx.entry?.osmParts?.length) {
-    tower(P, rect(230, 45), 0, 17, 'limestone')
-    tower(P, rect(80, 30), 17, 26.5, 'limestone')
-  }
-  return P.build('union_station')
-}
+// Union Station: see ./union.ts (whole complex, handcrafted).
 
 // ---------------------------------------------------------------------------
 // Scotiabank Arena: bowl behind the 1941 Postal Delivery Building facade.
