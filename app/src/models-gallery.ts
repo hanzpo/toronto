@@ -10,6 +10,8 @@
 //   flags=<n>                           lamp flags for road vehicles (1 brake, 4 left, 8 right, 16 head)
 //   lod=low                             use lowGeometry() for transit cars
 //   labels=0                            hide labels
+//   view=air                            aircraft (types=A320,B738… or all; airline=ACA or auto)
+//     gear, flaps, spoiler (0..1), anim=1 cycles gear/flaps, lod=low far LOD; focus=<ICAO type>
 import * as THREE from 'three/webgpu'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { float, normalWorld, uniform } from 'three/tsl'
@@ -18,6 +20,8 @@ import { VEHICLE_MODELS, EXTRA_MODELS, triangleCount } from './models/vehicles'
 import { vehicleMaterial, vehicleShade } from './models/material'
 import { CAR_VARIANTS, carPalette, pedestrianGeometries, shirtPalette } from './layers/traffic/models'
 import { U } from './render/uniforms'
+import { AircraftRenderer } from './air/AircraftRenderer'
+import { AIRCRAFT, TYPE_CODES } from './models/aircraft'
 
 const q = new URLSearchParams(location.search)
 const num = (k: string, d: number) => (q.has(k) ? parseFloat(q.get(k)!) : d)
@@ -131,7 +135,37 @@ async function main() {
   ]
 
   const cars = allCars()
-  if (focus) {
+  const air = view === 'air' || (focus !== null && focus in AIRCRAFT)
+  const airStatics: ReturnType<AircraftRenderer['addStatic']>[] = []
+  const airR = air ? new AircraftRenderer() : null
+  const AUTO: Record<string, string> = {
+    DH8D: 'POE', AT76: 'NOS', CRJ9: 'JZA', E75L: 'UAL', E295: 'POE', BCS3: 'ACA', A319: 'ACA', A320: 'ACA', A20N: 'FLE', A321: 'ROU', A21N: 'TSC',
+    B737: 'WJA', B738: 'SWG', B38M: 'WJA', B39M: 'UAL', B752: 'UPS', B763: 'CJT', B788: 'ACA', B789: 'WJA', A333: 'TSC', A339: 'DAL', A359: 'DLH', B77W: 'ACA',
+  }
+  if (air && airR) {
+    scene.add(airR.root)
+    const list = focus && focus in AIRCRAFT ? [focus] : (q.get('types') ?? 'all') === 'all' ? TYPE_CODES : q.get('types')!.split(',')
+    const st = { gear: num('gear', 1), far: 0, flaps: num('flaps', 0), prop: 0.3, spoiler: num('spoiler', 0), lit: true }
+    let z = 0
+    const perRow = num('cols', 6)
+    let xCur = 0, rowMaxSpan = 0
+    list.forEach((code, i) => {
+      const spec = AIRCRAFT[code]
+      if (!spec) return
+      if (i > 0 && i % perRow === 0) { z += rowMaxSpan + 8; xCur = 0; rowMaxSpan = 0 }
+      const al = q.get('airline') && q.get('airline') !== 'auto' ? q.get('airline')! : AUTO[code] ?? 'ACA'
+      const m = new THREE.Matrix4().makeTranslation(xCur, 0, z + spec.span / 2)
+      const h = airR.addStatic(code, al, m, st, lod)
+      airStatics.push(h)
+      const g = lod ? h.model.low : h.model.geometry
+      rows.push(`${code} ${spec.name} [${al}] L ${spec.length} span ${spec.span} H ${spec.height} · ${triangleCount(g)} tris (low ${triangleCount(h.model.low)})`)
+      label(code, new THREE.Vector3(xCur, spec.height + 2, z + spec.span / 2))
+      bounds.expandByPoint(new THREE.Vector3(xCur - spec.length * 0.5, 0, z)).expandByPoint(new THREE.Vector3(xCur + spec.length * 0.5, spec.height, z + spec.span))
+      xCur -= spec.length + 10
+      rowMaxSpan = Math.max(rowMaxSpan, spec.span)
+    })
+    ;(window as unknown as { __air: unknown }).__air = { airR, airStatics }
+  } else if (focus) {
     const car = cars.find((c) => c.key === focus)
     const cons = consistList.find(([k]) => k === focus)
     const road = CAR_VARIANTS.find((v) => v.key === focus)
@@ -219,6 +253,11 @@ async function main() {
   const t0 = performance.now()
   renderer.setAnimationLoop(() => {
     U.time.value = (performance.now() - t0) / 1000
+    if (airR && (q.get('anim') === '1' || q.has('prop'))) {
+      const tt = U.time.value
+      const gear = q.get('anim') === '1' ? Math.min(1, Math.max(0, 0.5 + 0.8 * Math.sin(tt * 0.6))) : num('gear', 1)
+      for (const h of airStatics) airR.restate(h, { gear, far: 0, flaps: q.get('anim') === '1' ? gear : num('flaps', 0), prop: (tt * 14) % (Math.PI * 2), spoiler: num('spoiler', 0), lit: true })
+    }
     controls.update()
     renderer.render(scene, camera)
     for (const l of labels) {

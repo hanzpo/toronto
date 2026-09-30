@@ -87,13 +87,49 @@ departures ≥ 70 s, mixed arr/dep ≥ 110 s) by delaying later movements.
 
 ## Rendering
 
-Parametric low-poly models (`models/aircraft.ts`, real dimensions): DH8D, CRJ9,
-E75L, E295, BCS3, A319/A320/A20N/A321/A21N, B737/B738/B38M/B39M, B752F, B763F,
-B788/B789, A333/A339, A359, B77W. Liveries (`air/liveries.ts`) recolour five
-parts (fuselage, fin, belly, accent/logo, engines). One `InstancedMesh` per type,
-one shared lit material; gear retracts; additive sprite lights (red/green/white
-nav, strobes, beacon, landing/taxi lights). Far aircraft keep ≥ 15 px and turn into
-dark (day) / glowing (analytics) icons; parked aircraft are drawn to scale only.
+Models: `app/src/models/aircraft.ts` (specs, sourced dimensions — see
+`app/src/models/AIRCRAFT_REFERENCE.md`), `aircraftBuilder.ts` (parametric low-poly
+geometry), `aircraftNoses.ts` (per-family nose profiles + cockpit panes). Types: DH8D, AT76
+(ATR 72-600, comparison only), CRJ9, E75L, E295, BCS3, A319/A320/A20N/A321/A21N,
+B737/B738/B38M/B39M, B752F, B763F, B788/B789, A333/A339, A359, B77W. Model frame: +x
+forward, origin = main-gear ground contact. Detailed LOD ≈ 2.8–4.4 k triangles, far LOD
+≤ 360 (no gear / flaps / cockpit).
+
+- **Fuselage**: loft with per-type nose profile (crown / keel / half-width at 10 stations),
+  upswept tail cone to the APU exhaust; wing-body fairing; cockpit panes as small
+  surface-following grids; cabin windows, door outlines and cargo doors are procedural
+  in the fragment shader from a per-type decal row (`aircraftDecalTexture`, u = station /
+  length) with distance fade.
+- **Wings**: airfoil lofts per span panel (root / TE kink / slat start / aileron / tip),
+  split chordwise into slat, box and flap pieces; tip devices (sharklet, blended, split
+  MAX tip, curved A350/A330neo, small canted, raked). **Engines**: fan nacelles with lip,
+  fan face, spinner, bypass nozzle (chevrons on 787 / MAX), core + plug; flattened 737NG
+  nacelles; CRJ aft pylons; turboprop deep nacelles + 6-blade props. **Tail**: fin with
+  dorsal fillet, T-tail (Q400 bullet, CRJ) or conventional; ATR sponsons.
+- **Animation** (vertex shader, per-vertex `anim` = pivot xyz + kind): gear legs fold into
+  their wells (nose forward, mains inward; Q400 aft into the nacelles; ATR into sponsons)
+  and collapse when stowed; bay doors (sequence doors open only in transit, nose / nacelle
+  doors), flaps (+32°) and slats (−22°) from speed + phase, ground spoilers on the landing
+  roll, propeller rotation. Instancing is done in the shader (Mesh + InstancedBufferGeometry,
+  position/scale + quaternion per instance): three's NodeMaterial applies the InstancedMesh
+  matrix *before* `positionNode`, which breaks model-space pivots.
+- **Gear state** (`AircraftRenderer.gearOf`): the track's binary gear flag (down below
+  ~800 m AGL on arrival) is smoothed over a 9 s (sim) cycle per aircraft; departures retract
+  ~3 s after entering the climb phase; scrubbing snaps.
+- **Liveries** (`air/liveries.ts`): six colours + belly split, cheatline, rear-fuselage wrap
+  (WestJet / Rouge / Transat / Sunwing …) painted in the shader; tail logos drawn once with
+  Canvas2D into a 1024² atlas (Air Canada rondelle, Porter wordmark pattern, WestJet leaf,
+  United globe, BA flag …); lit cabin windows + logo glow at night.
+- Per-instance data: one interleaved buffer of 9 vec4 (colours + gear / far / flaps / prop /
+  spoiler / art / livery params / transform); geometry uses 5 vertex buffers (6 total ≤ 8;
+  14 of 16 attributes). One draw per type per LOD, shared material; far aircraft keep ≥ 15 px
+  and turn into dark (day) / glowing (analytics) icons; parked aircraft are drawn to scale.
+- Sprite lights: red/green nav + white tail, red beacons (top/bottom, alternating), white
+  wing-tip double strobes + tail strobe, landing lights (wing roots / nacelles), nose-gear
+  taxi light only while the gear is down.
+- Gallery: `/models.html?view=air` (all types) or `?focus=<type>`; `gear=`, `flaps=`,
+  `spoiler=` 0..1, `anim=1` cycles gear + flaps, `prop` spins props, `lod=low`,
+  `airline=<ICAO>|auto`, `types=A320,B738`.
 
 ## Regenerate
 
