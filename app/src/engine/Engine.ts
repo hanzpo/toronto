@@ -104,6 +104,20 @@ export class Engine {
     this.container.appendChild(renderer.domElement);
 
     this.atmosphere = new Atmosphere(this.scene);
+    // Render the sun's shadow map once at full size before any tile material
+    // binds it. Otherwise materials built while shadows are faded out (e.g.
+    // starting zoomed out) bind a placeholder shadow texture that the first
+    // real shadow pass resizes and destroys, and every later GPU submit fails.
+    {
+      const probe = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshStandardNodeMaterial());
+      probe.castShadow = probe.receiveShadow = true;
+      this.scene.add(probe);
+      this.atmosphere.sun.shadow.autoUpdate = true;
+      renderer.render(this.scene, this.camera);
+      this.scene.remove(probe);
+      probe.geometry.dispose();
+      (probe.material as THREE.Material).dispose();
+    }
     this.tiles = new TileManager(this.dataRoot);
     this.tiles.lodScale = config.lodScale;
     await this.tiles.init();
