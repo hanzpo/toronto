@@ -86,35 +86,46 @@ function lobeCentres(n: number, shell: number): number[][] {
   return out;
 }
 
-/** LOBED family, high detail: 14 lobes (detail-0 icosahedra) + 6-sided trunk + 4 limbs ≈ 316 tris */
+/** the crown's lobes (crown-unit centre, radius): shared by both lobed LODs so they match */
+function crownLobes(): [number[], number][] {
+  const cs = lobeCentres(12, 0.56);
+  cs.push([0, 0.3, 0], [0.05, -0.15, -0.05]);
+  return cs.map((c, i) => [c, i >= 12 ? 0.52 : c[1] < -0.2 ? 0.44 : 0.5]);
+}
+
+/** unit octahedron triangles, rotated (lobes of the mid LOD: no aligned diamonds), scaled to an icosahedron's volume */
+function octa(rot: number): number[][] {
+  const g = new THREE.OctahedronGeometry(1.2, 0);
+  g.rotateX(rot * 2.1).rotateY(rot * 3.7).rotateZ(rot * 1.3);
+  const p = g.getAttribute('position');
+  const out: number[][] = [];
+  for (let i = 0; i < p.count; i++) out.push([p.getX(i), p.getY(i), p.getZ(i)]);
+  g.dispose();
+  return out;
+}
+
+/** LOBED family, high detail: 14 lobes (detail-0 icosahedra) + 6-sided trunk + 4 limbs ≈ 336 tris */
 export function lobedHigh(): THREE.BufferGeometry {
   const t = new T();
   trunk(t, 6);
   const ic = ico(0);
-  const tris: number[][] = [];
-  for (let i = 0; i < ic.length; i++) tris.push(ic[i]);
-  const cs = lobeCentres(12, 0.56);
-  cs.push([0, 0.3, 0], [0.05, -0.15, -0.05]);
-  cs.forEach((c, i) => {
-    const r = i >= 12 ? 0.52 : c[1] < -0.2 ? 0.44 : 0.5;
-    lobe(t, c, r, tris, (i * 0.618) % 1);
-  });
-  for (const k of [1, 4, 7, 10]) limb(t, cs[k]);
+  const lobes = crownLobes();
+  lobes.forEach(([c, r], i) => lobe(t, c, r, ic, (i * 0.618) % 1));
+  for (const k of [1, 4, 7, 10]) limb(t, lobes[k][0]);
   const g = t.build();
   g.userData.tris = t.tris;
   return g;
 }
 
-/** LOBED family, mid detail: one crown hull (detail-1 icosahedron, the shader morphs it) + 3-sided trunk ≈ 86 tris */
+/**
+ * LOBED family, mid detail: the high LOD decimated — the same 14 lobes (same
+ * centres, radii, per-lobe hashes, so the same jitter, colour and shading) as
+ * octahedra, 3-sided trunk, no limbs ≈ 118 tris
+ */
 export function lobedMid(): THREE.BufferGeometry {
   const t = new T();
   trunk(t, 3);
-  const ic = ico(1);
-  lobe(t, [0, 0, 0], 1, ic, 0.5);
-  // hull vertices: AO from height only (no lobe interior)
-  const va = t.va, vb = t.vb;
-  for (let i = 0; i < vb.length / 4; i++) if (vb[i * 4] === 2) vb[i * 4 + 1] = 0.58 + 0.42 * Math.max(0, Math.min(1, (t.pos[i * 3 + 1] + 1) / 2));
-  void va;
+  crownLobes().forEach(([c, r], i) => lobe(t, c, r, octa(i * 0.618 + 0.3), (i * 0.618) % 1));
   const g = t.build();
   g.userData.tris = t.tris;
   return g;
@@ -136,7 +147,7 @@ function tiered(tiers: number, pts: number, trunkSides: number): THREE.BufferGeo
     const f = k / Math.max(1, tiers - 1);
     for (let i = 0; i < n; i++) {
       const a0 = ((i + (k % 2) * 0.5) / n) * Math.PI * 2, a1 = ((i + 1 + (k % 2) * 0.5) / n) * Math.PI * 2;
-      const r0 = i % 2 === 0 ? 1 : 0.72, r1 = (i + 1) % 2 === 0 ? 1 : 0.72;
+      const r0 = i % 2 === 0 ? 1 : 0.84, r1 = (i + 1) % 2 === 0 ? 1 : 0.84;
       const d0 = [Math.cos(a0), 0, -Math.sin(a0)], d1 = [Math.cos(a1), 0, -Math.sin(a1)];
       const aoTop = 0.72 + 0.28 * f, aoRing = 0.6 + 0.25 * f, aoIn = 0.38 + 0.2 * f;
       // upper cone: ring → apex
@@ -158,8 +169,8 @@ function tiered(tiers: number, pts: number, trunkSides: number): THREE.BufferGeo
 
 /** ≈ 12 + 7 whorls × 2 × 14 ≈ 208 tris */
 export const tieredHigh = () => tiered(7, 7, 6);
-/** ≈ 6 + 4 whorls × 2 × 8 = 70 tris */
-export const tieredMid = () => tiered(4, 4, 3);
+/** the high LOD decimated: the same 7 whorls with 4-point stars ≈ 6 + 7 × 2 × 8 = 118 tris */
+export const tieredMid = () => tiered(7, 4, 3);
 
 /** camera-facing impostor quad: position.xy = (u ∈ [−1, 1], v ∈ [0, 1]) */
 export function impostorQuad(): THREE.BufferGeometry {
