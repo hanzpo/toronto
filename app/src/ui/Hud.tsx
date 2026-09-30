@@ -112,7 +112,7 @@ const BASE: { k: BaseLayerKey; label: string }[] = [
 const ANALYTICS: { k: AnalyticsKey; label: string; color: string; sub?: string }[] = [
   { k: 'subway', label: 'Subway', color: 'var(--l1)', sub: 'Lines 1 · 2 · 4' },
   { k: 'streetcar', label: 'Streetcar', color: 'var(--ttc)' },
-  { k: 'lrt', label: 'LRT', color: 'var(--l5)', sub: 'Lines 5 · 6' },
+  { k: 'lrt', label: 'LRT', color: 'var(--l5)', sub: 'Lines 5 · 6 · ION' },
   { k: 'go', label: 'GO Transit', color: 'var(--go)' },
   { k: 'upx', label: 'UP Express', color: 'var(--upx)' },
   { k: 'via', label: 'VIA Rail', color: 'var(--via)' },

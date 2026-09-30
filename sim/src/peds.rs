@@ -52,6 +52,8 @@ pub struct Peds {
     active: Vec<u32>,
     cum: Vec<f32>,
     pub target: f32,
+    /// camera (peds never vanish / appear in plain view at steady state)
+    pub camera: crate::view::Camera,
     active_version: u32,
     active_at: f64,
     active_focus: (f64, f64),
@@ -84,6 +86,7 @@ impl Peds {
             active: Vec::new(),
             cum: Vec::new(),
             target: 0.0,
+            camera: None,
             active_version: u32::MAX,
             active_at: -1e9,
             active_focus: (1e12, 1e12),
@@ -490,12 +493,14 @@ impl Peds {
         if walkers >= target || self.active.is_empty() {
             if walkers > target + target / 8 + 10 {
                 // thin out after demand drops
-                let mut extra = (walkers - target) / 30 + 1;
+                let mut extra = (walkers - target) / 60 + 1;
+                let cam = self.camera;
                 for p in self.list.iter_mut() {
                     if extra == 0 {
                         break;
                     }
-                    if p.state == WALK && rng.f32() < 0.1 {
+                    // (they "went inside": only where nobody sees it)
+                    if p.state == WALK && rng.f32() < 0.1 && !crate::view::in_view(cam, p.pos[0], p.pos[1], 800.0) {
                         p.dead = true;
                         extra -= 1;
                     }

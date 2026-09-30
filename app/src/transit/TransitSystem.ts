@@ -132,6 +132,8 @@ interface FeedRt {
   stopPatK?: Uint32Array; // position of the stop within the pattern
   patTripOff?: Uint32Array;
   patTripVal?: Uint32Array;
+  /** previous trip of the block per trip (lazy) */
+  tripPrev?: Int32Array;
   /** per pattern: shape bounding box minX, minY, maxX, maxY (lazy, for evaluate culling) */
   patBox?: Float32Array;
 }
@@ -454,6 +456,45 @@ export class TransitSystem {
       if (fr.f.agency === agency && fr.f.kind === kind) return local >= 0 && local < fr.f.patMode.length ? fr.patBase + local : -1;
     }
     return -1;
+  }
+
+  /** Next trip of the same vehicle block (global), or -1. */
+  tripNext(trip: number): number {
+    const fr = this.feedOfTrip(trip);
+    const n = fr?.f.tripNext?.[trip - fr.tripBase] ?? -1;
+    return fr && n >= 0 ? fr.tripBase + n : -1;
+  }
+
+  /** Previous trip of the same vehicle block (global), or -1 (first trip of its block). */
+  tripPrev(trip: number): number {
+    const fr = this.feedOfTrip(trip);
+    if (!fr || !fr.f.tripNext) return -1;
+    if (!fr.tripPrev) {
+      const nx = fr.f.tripNext;
+      const pv = new Int32Array(nx.length).fill(-1);
+      for (let i = 0; i < nx.length; i++) if (nx[i] >= 0) pv[nx[i]] = i;
+      fr.tripPrev = pv;
+    }
+    const p = fr.tripPrev[trip - fr.tripBase];
+    return p >= 0 ? fr.tripBase + p : -1;
+  }
+
+  /** Trips (global) of `kind` feeds starting in [t0, t1) (service-day s). */
+  tripsStarting(kind: 'rail' | 'bus', t0: number, t1: number, out: number[] = []): number[] {
+    out.length = 0;
+    for (const fr of this.feeds) {
+      if (fr.f.kind !== kind) continue;
+      const st = fr.f.tripStart;
+      let lo = 0, hi = st.length;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (st[m] < t0) lo = m + 1; else hi = m; }
+      for (let i = lo; i < st.length && st[i] < t1; i++) out.push(fr.tripBase + i);
+    }
+    return out;
+  }
+
+  /** Does the pattern's shape already follow the curb lane (bus shapes matched to roads)? */
+  patternInLane(pattern: number): boolean {
+    return this.findFeed(pattern, 'patBase')?.f.laneShapes ?? false;
   }
 
   /** (agency, kind, local index) of a global trip, or null. */

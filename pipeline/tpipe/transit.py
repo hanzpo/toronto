@@ -805,6 +805,11 @@ def main(argv: list[str]) -> None:
     keys = [a for a in argv if not a.startswith("-")] or list(SOURCES)
     if "--download" in argv:
         download(keys)
+        from . import transit_extra
+
+        for k in keys:
+            if SOURCES.get(k, {}).get("extra"):
+                transit_extra.merge(k, download=True)
     keys = [k for k in keys if (GTFS / f"{k}.zip").exists()]
     OUTDIR.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
@@ -865,7 +870,7 @@ def main(argv: list[str]) -> None:
     )
     idx_path.write_text(json.dumps(index, separators=(",", ":")))
     if bus_router is not None:
-        bus_router.write_gaps()
+        bus_router.write_gaps(keys)
         print(f"bus road gaps (missing roads): {len(bus_router.gaps)} -> {bus_roads_gaps_path()}")
     print(f"done in {time.time()-t0:.0f}s")
 

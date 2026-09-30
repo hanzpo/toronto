@@ -387,12 +387,15 @@ export class TrafficLayer implements Layer {
 
   /** car radius of the last tick (m, 0 = sim suspended) */
   simRadius = 0;
-  private busQueue: { spawn: NonNullable<TickMsg['busSpawn']>; patterns: NonNullable<TickMsg['busPatterns']> } = { spawn: [], patterns: [] };
+  private busQueue: { spawn: NonNullable<TickMsg['busSpawn']>; patterns: NonNullable<TickMsg['busPatterns']>; retrip: NonNullable<TickMsg['busRetrip']>; pullout: NonNullable<TickMsg['busPullout']>; pullin: NonNullable<TickMsg['busPullin']> } = { spawn: [], patterns: [], retrip: [], pullout: [], pullin: [] };
 
-  /** queue bus trips to become agents (patterns once per id) */
-  requestBuses(spawn: NonNullable<TickMsg['busSpawn']>, patterns: NonNullable<TickMsg['busPatterns']>) {
+  /** queue bus trips to become agents (patterns once per id) / to continue as their block's next trip */
+  requestBuses(spawn: NonNullable<TickMsg['busSpawn']>, patterns: NonNullable<TickMsg['busPatterns']>, retrip: NonNullable<TickMsg['busRetrip']> = [], pullout: NonNullable<TickMsg['busPullout']> = [], pullin: NonNullable<TickMsg['busPullin']> = []) {
     this.busQueue.spawn.push(...spawn);
     this.busQueue.patterns.push(...patterns);
+    this.busQueue.retrip.push(...retrip);
+    this.busQueue.pullout.push(...pullout);
+    this.busQueue.pullin.push(...pullin);
   }
 
   /** Latest bus agent records + lane paths (views into the shared buffer), or null. */
@@ -764,8 +767,17 @@ export class TrafficLayer implements Layer {
     const obst = radius > 0 ? this.transitObstacles() : undefined;
     if (this.railProfile) { m.railProfile = this.railProfile; m.railRadius = this.railEnabled ? RAIL_RADIUS : 0; }
     if (this.railCmd) m.railCmd = this.railCmd;
+    const qa = (window as unknown as { __qa?: Record<string, unknown> }).__qa;
+    if (qa && this.hf) {
+      qa.carsTarget = Math.round(this.hf[HF.TARGET_CARS]); qa.carsActive = this.hf[HF.CARS];
+      qa.pedsTarget = Math.round(this.hf[HF.TARGET_PEDS]); qa.pedsActive = this.hf[HF.PEDS];
+      qa.carsStoppedInBox = this.hf[HF.BOX_STOPPED];
+    }
     this.simRadius = radius;
-    if (this.busQueue.spawn.length) { m.busSpawn = this.busQueue.spawn; m.busPatterns = this.busQueue.patterns; this.busQueue = { spawn: [], patterns: [] }; }
+    if (this.busQueue.spawn.length || this.busQueue.retrip.length || this.busQueue.patterns.length || this.busQueue.pullout.length || this.busQueue.pullin.length) {
+      m.busSpawn = this.busQueue.spawn; m.busPatterns = this.busQueue.patterns; m.busRetrip = this.busQueue.retrip; m.busPullout = this.busQueue.pullout; m.busPullin = this.busQueue.pullin;
+      this.busQueue = { spawn: [], patterns: [], retrip: [], pullout: [], pullin: [] };
+    }
     {
       const cam = this.engine.camera;
       cam.getWorldDirection(this.camDir);

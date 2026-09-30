@@ -89,6 +89,8 @@ pub struct Car {
     pub posed: bool,
     /// bus agent (index into World::buses) or NONE
     pub bus: u32,
+    /// link chosen after the next one when the next is inside a split junction (NONE)
+    pub next2: u32,
 }
 
 pub struct Player {
@@ -277,6 +279,8 @@ pub struct World {
     pub out_bus_path: Vec<f32>,
     /// buses that stopped being agents since the last output: [trip, delay]
     pub bus_gone: Vec<f32>,
+    /// camera (sims avoid spawning / removing agents in plain view)
+    pub camera: crate::view::Camera,
 }
 
 /// phase timer (no-op on wasm, where `Instant` is unavailable)
@@ -394,6 +398,7 @@ impl World {
             out_buses: Vec::new(),
             out_bus_path: Vec::new(),
             bus_gone: Vec::new(),
+            camera: None,
         }
     }
 
@@ -826,6 +831,45 @@ impl World {
         (x, y, z, self.structural(c.link))
     }
 
+    /// a short link whose both ends belong to the same junction conflict zone
+    #[inline]
+    fn internal_link(&self, link: u32) -> bool {
+        let l = &self.g.links[link as usize];
+        l.len < 30.0 && self.g.nodes[l.from as usize].control != Control::Free && self.g.nodes[l.to as usize].control != Control::Free && self.zone_of(l.from) == self.zone_of(l.to)
+    }
+
+    /// cars stopped (v < 0.5) inside a junction box / on a crosswalk, or on the inside of a
+    /// split junction, that are not clearing it (QA: must stay ~0)
+    pub fn stopped_in_box(&self) -> u32 {
+        // (waiting inside a split junction to complete a turn, e.g. in a median, is clearing)
+        let d = self.stopped_in_box_detail();
+        d[0] + d[1]
+    }
+
+    /// [front past the stop line, rear still in the exit box, on a split-junction inside link]
+    pub fn stopped_in_box_detail(&self) -> [u32; 3] {
+        let mut n = [0u32; 3];
+        for c in &self.cars {
+            if c.flags & (F_DEAD | F_PLAYER) != 0 || c.v >= 0.5 || c.link == NONE {
+                continue;
+            }
+            let l = &self.g.links[c.link as usize];
+            // (a car that entered legally and waits inside, e.g. to turn left, is clearing)
+            let front_in = c.flags & F_COMMIT == 0 && self.g.nodes[l.to as usize].control != Control::Free && c.s > l.len - self.sb_in(c.link) + 0.8;
+            let rear_in = self.prev_ok(c) && self.g.nodes[l.from as usize].control != Control::Free && c.s - c.len < self.sb_out(c.link) - 0.8;
+            if self.internal_link(c.link) {
+                if c.flags & F_COMMIT == 0 {
+                    n[2] += 1;
+                }
+            } else if front_in {
+                n[0] += 1;
+            } else if rear_in {
+                n[1] += 1;
+            }
+        }
+        n
+    }
+
     /// is `link` a major approach at its end node
     fn is_major(&self, link: u32) -> bool {
         let l = &self.g.links[link as usize];
@@ -1128,8 +1172,32 @@ impl World {
         let need = (b + len + 1.0).min(nl.len - 0.5);
         if let Some(t) = self.lane_tail(next, tl) {
             let tc = &self.cars[t];
-            if tc.s - tc.len < need && tc.v < 3.0 {
+            // (a slowing queue counts as stopped: the car would end up stuck in the box)
+            if tc.s - tc.len < need + 2.0 && (tc.v < 3.0 || tc.a < -1.0) {
                 return false;
+            }
+        }
+        // the exit is the inside of a split junction: it must be clear of queued cars on any
+        // lane (a car stopping in there would sit rotated across the junction)
+        if self.internal_link(next) {
+            for ln in 0..nl.lanes {
+                if self.lane_tail(next, ln).is_some() {
+                    return false;
+                }
+            }
+            // ... and there must be room where it comes out
+            let n2 = c.next2;
+            if n2 != NONE && self.g.links[n2 as usize].alive {
+                let l2 = &self.g.links[n2 as usize];
+                let need2 = (self.sb_out(n2) + len + 3.0).min(l2.len - 0.5);
+                for ln in 0..l2.lanes {
+                    if let Some(t) = self.lane_tail(n2, ln) {
+                        let tc = &self.cars[t];
+                        if tc.s - tc.len < need2 && (tc.v < 3.0 || tc.a < -1.0) {
+                            return false;
+                        }
+                    }
+                }
             }
         }
         if self.obst_block(next, tl, -1e3, need) {
@@ -1435,7 +1503,11 @@ impl World {
             return None;
         }
         let major = self.is_major(link);
+        // inside a split junction (a short link between two nodes of one conflict zone, e.g.
+        // across the median of a divided road) the entry signal governed: no second stop here
+        let internal = self.internal_link(link);
         match control {
+            Control::Signal if internal => {}
             Control::Signal => match node.plan.light_for(self.tod, bearing) {
                 Light::Red => return Some(d),
                 Light::Amber => {
@@ -1692,7 +1764,9 @@ impl World {
         let guided = self.cars[i].bus != NONE && self.buses[self.cars[i].bus as usize].as_ref().map_or(false, |b| b.state != BusState::OutOfService);
         if !guided && (node.x - dest[0]).hypot(node.y - dest[1]) < 180.0 {
             // arrived: vanish only out of sight, otherwise head somewhere else
-            if (node.x - self.focus.0).hypot(node.y - self.focus.1) > self.radius * 0.6 {
+            let surplus = self.cars.len() as f32 > self.target_cars * 1.05;
+            let unseen = !crate::view::in_view(self.camera, node.x, node.y, 2500.0) && self.camera.is_some();
+            if (node.x - self.focus.0).hypot(node.y - self.focus.1) > self.radius * 0.6 || (surplus && unseen) {
                 return false;
             }
             let ang = self.rng.f32() * 2.0 * PI;
@@ -1735,6 +1809,35 @@ impl World {
             return;
         }
         let (link, dest) = (self.cars[i].link, self.cars[i].dest);
+        // a choice made when entering a split junction (see below)
+        let pre = self.cars[i].next2;
+        if pre != NONE {
+            self.cars[i].next2 = NONE;
+            let pl = &self.g.links[pre as usize];
+            if pl.alive && pl.from == self.g.links[link as usize].to {
+                let t = classify_turn(self.g.links[link as usize].bearing_end, pl.bearing_start);
+                let c = &mut self.cars[i];
+                c.next = pre;
+                c.turn = t;
+                c.ngen = pl.gen;
+                return;
+            }
+        }
+        let (nx, t) = self.pick_next(link, dest);
+        // entering a split junction: choose the way out now too, so the car only goes in
+        // when it can come out (see can_enter)
+        if nx != NONE && self.internal_link(nx) {
+            let (n2, _) = self.pick_next(nx, dest);
+            self.cars[i].next2 = n2;
+        }
+        let c = &mut self.cars[i];
+        c.next = nx;
+        c.turn = t;
+        c.ngen = if nx != NONE { self.g.links[nx as usize].gen } else { 0 };
+    }
+
+    /// routing: weighted random choice of the link after `link` (soft pull towards `dest`)
+    fn pick_next(&mut self, link: u32, dest: [f64; 2]) -> (u32, Turn) {
         let l = &self.g.links[link as usize];
         let node = &self.g.nodes[l.to as usize];
         let b_in = l.bearing_end;
@@ -1776,7 +1879,7 @@ impl World {
         }
         let pick = self.rng.pick(&w[..k]);
         // only a U-turn possible (dead end): allow it
-        let (nx, t) = match pick {
+        match pick {
             Some(j) => (cand[j], turns[j]),
             None => {
                 let u = node.outs.iter().copied().find(|&o| self.g.links[o as usize].alive);
@@ -1785,11 +1888,7 @@ impl World {
                     None => (NONE, Turn::Straight),
                 }
             }
-        };
-        let c = &mut self.cars[i];
-        c.next = nx;
-        c.turn = t;
-        c.ngen = if nx != NONE { self.g.links[nx as usize].gen } else { 0 };
+        }
     }
 
     fn cull(&mut self) {
@@ -1816,19 +1915,26 @@ impl World {
         let n_ai = self.cars.len();
         let target = self.target_cars as usize;
         if n_ai >= target {
-            // demand dropped (time jump / fast mode): thin out, out of sight
+            // demand dropped (evening / night, time jump, fast mode): retire the surplus out of
+            // sight, a few per step so the population follows the demand curve smoothly
             let excess = n_ai - target;
-            if excess > target / 10 + 5 {
-                let k = (excess / 20).max(1);
-                for _ in 0..k * 3 {
+            if excess > target / 20 + 3 {
+                let k = (excess / 120).max(1);
+                let mut done = 0;
+                for _ in 0..k * 6 {
+                    if done >= k {
+                        break;
+                    }
                     let j = self.rng.below(self.cars.len() as u32) as usize;
                     let c = &self.cars[j];
-                    if c.flags & F_PLAYER != 0 {
+                    if c.flags & F_PLAYER != 0 || c.bus != NONE {
                         continue;
                     }
+                    let unseen = !c.posed || !crate::view::in_view(self.camera, c.pose.x, c.pose.y, 2500.0);
                     let far = !c.posed || (c.pose.x - self.focus.0).hypot(c.pose.y - self.focus.1) > self.radius * 0.5;
-                    if far || self.fast {
+                    if (far && unseen) || (unseen && self.camera.is_some()) || self.fast {
                         self.cars[j].flags |= F_DEAD;
+                        done += 1;
                     }
                 }
             }
@@ -1866,7 +1972,7 @@ impl World {
             if !filling {
                 let p = self.g.link_pose(link, s, 0.0);
                 let d = (p.x - self.focus.0).hypot(p.y - self.focus.1);
-                if d < self.radius * 0.45 && self.rng.f32() < 0.9 {
+                if crate::view::in_view(self.camera, p.x, p.y, 2500.0) || (self.camera.is_none() && d < self.radius * 0.45 && self.rng.f32() < 0.9) {
                     continue;
                 }
             }
@@ -1947,6 +2053,7 @@ impl World {
             pose: Pose::default(),
             posed: false,
             bus: NONE,
+            next2: NONE,
         });
         self.bp.push([BoxPath::NONE; 2]);
         let i = self.cars.len() - 1;
@@ -2061,6 +2168,207 @@ impl World {
             delay: 0.0,
             len,
             car_id: id,
+            route: Vec::new(),
+            ri: 0,
+        });
+        let c = &mut self.cars[i];
+        c.bus = slot;
+        c.vf = 1.0;
+        c.color = 0;
+        c.next = NONE;
+        self.choose_next(i);
+        0
+    }
+
+    /// Bus of trip `old` (out of service after its last stop) continues as trip `new` of the
+    /// same vehicle block: back on its pattern from here. False if it is not there / too far.
+    pub fn bus_retrip(&mut self, old: u32, new: u32, pat: u32, arr: &[f64], dep: &[f64]) -> bool {
+        let Some(slot) = self.buses.iter().position(|b| b.as_ref().map_or(false, |b| b.trip == old && b.state == BusState::OutOfService)) else { return false };
+        let Some(ci) = self.cars.iter().position(|c| c.bus == slot as u32 && c.flags & F_DEAD == 0) else { return false };
+        let Some(p) = self.bus_pats.get(&pat) else { return false };
+        let (x, y, _, _) = self.car_point(ci, 0.0, 0.0);
+        let (sd, d) = p.project(x, y, 0.0, 400.0);
+        if d > 60.0 {
+            return false;
+        }
+        let bu = self.buses[slot].as_mut().unwrap();
+        bu.trip = new;
+        bu.pat = pat;
+        bu.sd = sd;
+        bu.stop = 0;
+        bu.arr = arr.to_vec();
+        bu.dep = dep.to_vec();
+        bu.state = BusState::Run;
+        let c = &mut self.cars[ci];
+        c.flags &= !F_COMMIT;
+        c.next = NONE;
+        self.choose_next(ci);
+        true
+    }
+
+    /// fastest route of links from `l0` to `l1` (loaded graph, no U-turns), if any
+    fn road_route(&self, l0: u32, l1: u32) -> Option<Vec<u32>> {
+        let mut dist: std::collections::HashMap<u32, f32> = std::collections::HashMap::new();
+        let mut prev: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut heap = std::collections::BinaryHeap::new();
+        dist.insert(l0, 0.0);
+        heap.push((std::cmp::Reverse(0u32), l0));
+        let mut found = false;
+        while let Some((std::cmp::Reverse(c10), l)) = heap.pop() {
+            let c = c10 as f32 / 10.0;
+            if c > dist.get(&l).copied().unwrap_or(f32::INFINITY) + 0.05 || c > 1500.0 {
+                continue;
+            }
+            if l == l1 {
+                found = true;
+                break;
+            }
+            let lk = &self.g.links[l as usize];
+            let node = &self.g.nodes[lk.to as usize];
+            for &o in &node.outs {
+                let ol = &self.g.links[o as usize];
+                if !ol.alive || ol.edge == lk.edge {
+                    continue;
+                }
+                let c2 = c + ol.len / ol.speed.max(3.0) + 2.0;
+                if c2 < dist.get(&o).copied().unwrap_or(f32::INFINITY) {
+                    dist.insert(o, c2);
+                    prev.insert(o, l);
+                    heap.push((std::cmp::Reverse((c2 * 10.0) as u32), o));
+                }
+            }
+        }
+        if !found {
+            return None;
+        }
+        let mut route = vec![l1];
+        let mut k = l1;
+        while k != l0 {
+            k = prev[&k];
+            route.push(k);
+        }
+        route.reverse();
+        Some(route)
+    }
+
+    /// Pull-in: the out-of-service bus of trip `trip` (its block is over) drives to the garage
+    /// at (gx, gy) and leaves the road there.
+    pub fn bus_pullin(&mut self, trip: u32, gx: f64, gy: f64) -> bool {
+        let Some(slot) = self.buses.iter().position(|b| b.as_ref().map_or(false, |b| b.trip == trip && b.state == BusState::OutOfService)) else { return false };
+        let Some(ci) = self.cars.iter().position(|c| c.bus == slot as u32 && c.flags & F_DEAD == 0) else { return false };
+        let mut near = std::mem::take(&mut self.tmp);
+        self.g.edges_near(gx, gy, 150.0, &mut near);
+        let mut best: Option<(f32, u32)> = None;
+        for &eid in near.iter() {
+            let e = &self.g.edges[eid as usize];
+            if !e.alive || e.class > 6 {
+                continue;
+            }
+            let (_, lat, _, _) = self.g.project_on_edge(eid, gx, gy);
+            for &l in &e.links {
+                if l != NONE && best.map_or(true, |b| lat.abs() < b.0) {
+                    best = Some((lat.abs(), l));
+                }
+            }
+        }
+        self.tmp = near;
+        let Some((_, l1)) = best else { return false };
+        let l0 = self.cars[ci].link;
+        let Some(route) = self.road_route(l0, l1) else { return false };
+        let bu = self.buses[slot].as_mut().unwrap();
+        bu.state = BusState::Deadhead;
+        bu.route = route;
+        bu.ri = usize::MAX; // to the garage (not a trip start)
+        let c = &mut self.cars[ci];
+        c.flags &= !F_COMMIT;
+        c.next = NONE;
+        self.choose_next(ci);
+        true
+    }
+
+    /// Pull-out: bus trip `trip` leaves the garage at (gx, gy) and drives (not in service)
+    /// along the shortest road route to the link of its first stop, where it starts its
+    /// trip. 0 = placed, else a failure reason (1 pattern, 2 no road at the garage, 3 no
+    /// road at the first stop, 4 no route, 5 no room).
+    #[allow(clippy::too_many_arguments)]
+    pub fn bus_pullout(&mut self, trip: u32, pat: u32, len: f32, arr: &[f64], dep: &[f64], gx: f64, gy: f64) -> u8 {
+        if self.buses.iter().flatten().any(|b| b.trip == trip) {
+            return 0;
+        }
+        let Some(p) = self.bus_pats.get(&pat) else { return 1 };
+        let front0 = (p.stop_d.first().copied().unwrap_or(0.0) + len * 0.5).min(p.length());
+        let (q, t) = p.at(front0);
+        // target link: under the first stop, travelling with the pattern
+        let mut near = std::mem::take(&mut self.tmp);
+        let pick = |w: &World, x: f64, y: f64, hb: Option<f32>, near: &mut Vec<u32>| -> Option<(u32, f32)> {
+            w.g.edges_near(x, y, 60.0, near);
+            let mut best: Option<(f32, u32, f32)> = None;
+            for &eid in near.iter() {
+                let e = &w.g.edges[eid as usize];
+                if !e.alive || e.class > 6 {
+                    continue;
+                }
+                let (se, lat, _, he) = w.g.project_on_edge(eid, x, y);
+                for (k, dh0) in [(0usize, 0.0f32), (1, PI)] {
+                    let link = e.links[k];
+                    if link == NONE {
+                        continue;
+                    }
+                    let dh = hb.map_or(0.0, |h| wrap_pi(h - he - dh0).abs());
+                    if dh > 0.7 {
+                        continue;
+                    }
+                    let s = if k == 0 { se } else { e.len - se };
+                    let score = lat.abs() + dh * 5.0;
+                    if best.map_or(true, |b| score < b.0) {
+                        best = Some((score, link, s));
+                    }
+                }
+            }
+            best.map(|b| (b.1, b.2))
+        };
+        let hb = (t[1] as f32).atan2(t[0] as f32);
+        let target = pick(self, q[0], q[1], Some(hb), &mut near);
+        let start = pick(self, gx, gy, None, &mut near);
+        self.tmp = near;
+        let Some((l0, s0)) = start else { return 2 };
+        let Some((l1, _)) = target else { return 3 };
+        let Some(route) = self.road_route(l0, l1) else { return 4 };
+        let ll = self.g.links[l0 as usize].len;
+        let s = s0.clamp(len + 1.0, (ll - 1.0).max(len + 1.0));
+        if s > ll - 0.5 {
+            return 5;
+        }
+        let (ld, fl) = self.neighbours(l0, 0, s, usize::MAX);
+        for x in [ld, fl].into_iter().flatten() {
+            let c = &self.cars[x];
+            if c.s > s - len - 3.0 && c.s - c.len < s + 3.0 {
+                return 5;
+            }
+        }
+        let i = self.spawn_car_kind(l0, 0, s, 0.0, idm::TRUCK, len);
+        let slot = match self.bus_free.pop() {
+            Some(k) => k,
+            None => {
+                self.buses.push(None);
+                (self.buses.len() - 1) as u32
+            }
+        };
+        let id = self.cars[i].id;
+        self.buses[slot as usize] = Some(BusAgent {
+            trip,
+            pat,
+            sd: 0.0,
+            stop: 0,
+            arr: arr.to_vec(),
+            dep: dep.to_vec(),
+            state: BusState::Deadhead,
+            until: 0.0,
+            delay: 0.0,
+            len,
+            car_id: id,
+            route,
+            ri: 0,
         });
         let c = &mut self.cars[i];
         c.bus = slot;
@@ -2085,6 +2393,32 @@ impl World {
         if bu.state == BusState::OutOfService {
             return false;
         }
+        if bu.state == BusState::Deadhead {
+            // next link of the pull-out route; at its end the bus joins its pattern
+            let link = self.cars[i].link;
+            let k = bu.route.iter().position(|&l| l == link);
+            if let Some(k) = k {
+                if k + 1 < bu.route.len() {
+                    let o = bu.route[k + 1];
+                    let l = &self.g.links[link as usize];
+                    let t = classify_turn(l.bearing_end, self.g.links[o as usize].bearing_start);
+                    let c = &mut self.cars[i];
+                    c.next = o;
+                    c.turn = t;
+                    c.ngen = self.g.links[o as usize].gen;
+                    return true;
+                }
+            }
+            // on the last route link: from here on the pattern guides (pull-out), or the bus
+            // turns into its garage (pull-in)
+            let bu = self.buses[b].as_mut().unwrap();
+            if bu.ri == usize::MAX {
+                self.cars[i].flags |= F_DEAD;
+                return true;
+            }
+            bu.state = BusState::Run;
+        }
+        let Some(bu) = self.buses[b].as_ref() else { return false };
         let Some(p) = self.bus_pats.get(&bu.pat) else { return false };
         let link = self.cars[i].link;
         let l = &self.g.links[link as usize];
@@ -2147,6 +2481,9 @@ impl World {
         let (x, y, _) = self.g.link_xyz(self.cars[i].link, self.cars[i].s.max(0.0), 0.0);
         let Some(bu) = self.buses[b as usize].as_mut() else { return };
         let Some(p) = self.bus_pats.get(&bu.pat) else { return };
+        if bu.state == BusState::Deadhead {
+            return;
+        }
         let (sd, d) = p.project(x, y, bu.sd - 40.0, bu.sd + 60.0);
         if d < 25.0 {
             bu.sd = sd;
@@ -2183,7 +2520,7 @@ impl World {
                     None
                 }
             }
-            BusState::OutOfService => None,
+            BusState::OutOfService | BusState::Deadhead => None,
         }
     }
 
@@ -2229,7 +2566,7 @@ impl World {
                         bu.state = BusState::Run;
                     }
                 }
-                BusState::OutOfService => {}
+                BusState::OutOfService | BusState::Deadhead => {}
             }
         }
     }
@@ -2247,7 +2584,7 @@ impl World {
             let mut f = 0u32;
             match bu.state {
                 BusState::Dwell => f |= BF_DWELL | BF_DOORS,
-                BusState::OutOfService => f |= BF_NIS,
+                BusState::OutOfService | BusState::Deadhead => f |= BF_NIS,
                 _ => {}
             }
             if c.a < -0.8 || c.v < 0.3 {
@@ -2443,6 +2780,7 @@ impl World {
             pose,
             posed: true,
             bus: NONE,
+            next2: NONE,
         });
         self.bp.push([BoxPath::NONE; 2]);
         self.player = Some(Player { x: pose.x, y: pose.y, z: pose.z, h: pose.h, p: pose.p, v: 0.0, steer: 0.0, on_road: true, edge: eid, id, placed: true, structure, bump: 0.0 });

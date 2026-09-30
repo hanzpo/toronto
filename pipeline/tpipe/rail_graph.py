@@ -83,6 +83,7 @@ A_LAT = {0: 1.1, 1: 1.0, 2: 0.9, 3: 0.9}
 TWIN_MIN = 2.5
 TWIN_MAX = {0: 7.5, 1: 16.0, 2: 16.0, 3: 7.5}  # m: subway / LRT twin-bore tunnels are far apart
 
+LRT_SHARED_OPERATORS = {"Grand River Transit"}  # railway=rail track shared with an LRT (ION on the CN Waterloo Spur)
 CACHE_OSM = geo.WORK / "rail_osm.pkl"
 CACHE_GRAPH = geo.WORK / "rail_graph.pkl"
 OUT = geo.OUT / "rail"
@@ -108,6 +109,7 @@ DEPOTS = [
     ("keele", "Keele Yard (TTC)", 1, ["ttc"], 43.6590, -79.4605),
     ("mountdennis", "Mount Dennis MSF (Line 5)", 2, ["ttc"], 43.6890, -79.4880),
     ("finchwest", "Finch West MSF (Line 6)", 2, ["ttc"], 43.7620, -79.5360),
+    ("ionomsf", "ION Operations, Maintenance & Storage Facility (GRT)", 2, ["grt"], 43.4990, -80.5480),
     ("roncesvalles", "Roncesvalles Carhouse (TTC)", 3, ["ttc"], 43.6394, -79.4474),
     ("russell", "Russell Carhouse (TTC)", 3, ["ttc"], 43.6655, -79.3240),
     ("leslie", "Leslie Barns (TTC)", 3, ["ttc"], 43.6600, -79.3310),
@@ -208,7 +210,8 @@ class RailGraph:
                 pdir = -1
             pdir = FIXES["oneway"].get(wid, pdir)
             W.append(dict(id=wid, kind=kind, svc=svc, layer=lay, flags=(F_BRIDGE if bri else 0) | (F_TUNNEL if tun else 0) | (F_ELECTRIC if el else 0),
-                          pdir=pdir, speed=_speed(t), usage=t.get("usage"), name=t.get("name", ""), pts=pts))
+                          pdir=pdir, speed=_speed(t), usage=t.get("usage"), name=t.get("name", ""), pts=pts,
+                          lrt=kind == 0 and el and t.get("operator") in LRT_SHARED_OPERATORS))
         self.ways = W
         # node positions
         ids, lon, lat = [], [], []
@@ -458,6 +461,9 @@ class RailGraph:
         self.e_nodes = [c[0] for c in chains]  # OSM node ids along the edge
         self.e_wis = [c[1] for c in chains]  # way index per segment
         self.e_kind = np.array([W[c[1][0]]["kind"] for c in chains], dtype=np.int8)
+        for e, c in enumerate(chains):
+            if self.e_kind[e] == 0 and any(W[wi].get("lrt") for wi in c[1]):
+                self.e_kind[e] = KINDS["light_rail"]
         self.e_svc = np.array([W[c[1][0]]["svc"] for c in chains], dtype=np.int8)
         self.e_repair = np.array([any((a, b) in self.repair_segs for a, b in zip(c[0][:-1], c[0][1:])) for c in chains])
         self.W_used = {wi for c in chains for wi in c[1]}

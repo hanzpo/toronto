@@ -18,6 +18,7 @@
 //     f64[26..30) RAIL      [trains, overlaps (total, must stay 0), authority overruns (total), turnbacks]
 //     f64[30..44) RAILP     player train: see Sim.rail_player_state (sim/src/rail.rs)
 //     f64[44..47) RAILX     [pull-outs, pull-ins (totals), parked trains]
+//     f64[55..58) CARS, PEDS active agents · BOX_STOPPED cars stopped inside a junction box / on a crosswalk
 //     f64[54]     RAIL_MS   exponential average of the rail step time per tick (ms)
 //     f64[48..54) BUSX      bus spawn results (totals): [placed, unknown pattern, no road, road too far, at link end, no room]
 //   then 3 snapshot slots of SLOT_BYTES each:
@@ -76,7 +77,7 @@ export const SLOT_BYTES = BUS_PATH_OFFSET + MAX_BUS_PTS * 3 * 4;
 export const SAB_BYTES = HEADER_BYTES + SLOTS * SLOT_BYTES;
 
 export const H = { SEQ: 0, SLOT: 1, BUSY: 2, TILES: 3, PENDING: 4, SUBSTEPS: 5, FAST: 6, ACK: 7 } as const;
-export const HF = { STEP_MS: 8, STEP_AVG: 9, TARGET_CARS: 10, TARGET_PEDS: 11, PLAYER: 12, RAIL: 26, RAILP: 30, RAILX: 44, BUSX: 48, RAIL_MS: 54 } as const;
+export const HF = { STEP_MS: 8, STEP_AVG: 9, TARGET_CARS: 10, TARGET_PEDS: 11, PLAYER: 12, RAIL: 26, RAILP: 30, RAILX: 44, BUSX: 48, RAIL_MS: 54, CARS: 55, PEDS: 56, BOX_STOPPED: 57 } as const;
 export const HF_COUNT = 64;
 /** RAILP fields */
 export const RAILP = { ACTIVE: 0, FEED: 1, TRIP: 2, CENTRE: 3, V: 4, A: 5, AHEAD: 6, ASPECT: 7, PENALTY: 8, LIMIT: 9, NEXT_LIMIT: 10, NEXT_LIMIT_DIST: 11, PATTERN: 12, WARN: 13 } as const;
@@ -114,6 +115,12 @@ export interface TickMsg {
   busPatterns?: { id: number; xy: Float64Array; stopD: Float32Array; stopFlag: Uint8Array }[];
   /** bus trips to place as agents at their scheduled positions */
   busSpawn?: { trip: number; pat: number; len: number; front: number; v: number; arr: Float64Array; dep: Float64Array }[];
+  /** first trips of bus blocks leaving a garage (gx, gy) */
+  busPullout?: { trip: number; pat: number; len: number; arr: Float64Array; dep: Float64Array; gx: number; gy: number }[];
+  /** out-of-service buses whose block is over drive to a garage (gx, gy) */
+  busPullin?: { trip: number; gx: number; gy: number }[];
+  /** buses whose trip ended continue as the next trip of their block */
+  busRetrip?: { old: number; trip: number; pat: number; arr: Float64Array; dep: Float64Array }[];
   /** player train command (-1 brake .. 1 power) */
   railCmd?: { cmd: number; emergency: boolean };
 }

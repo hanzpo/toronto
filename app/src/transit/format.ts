@@ -71,6 +71,7 @@ interface FeedHeader {
   stopParents: string[];
   tripNames?: string[];
   maxDuration: number;
+  laneShapes?: boolean;
 }
 
 /** One decoded file. Index arrays may be Uint16Array or Uint32Array. */
@@ -110,6 +111,10 @@ export interface TransitFeed {
   tripPattern: TypedArray;
   tripTp: TypedArray;
   maxEnd: number;
+  /** next trip (local index) of the same vehicle block, -1 none (null: not in the file) */
+  tripNext: Int32Array | null;
+  /** bus shapes follow the road graph in the curb lane (no render-time lane offset) */
+  laneShapes: boolean;
 }
 
 export function decodeFeed(buf: ArrayBuffer): TransitFeed {
@@ -176,6 +181,8 @@ export function decodeFeed(buf: ArrayBuffer): TransitFeed {
     tripEnd,
     tripPattern: a.trip_pattern,
     tripTp,
+    tripNext: (a.trip_next as Int32Array | undefined) ?? null,
+    laneShapes: !!header.laneShapes,
     maxEnd,
   };
 }

@@ -31,7 +31,7 @@ interface RailSource {
   railFeedsProfile: string;
   simRadius?: number;
   busSnapshot?(): BusSnap | null;
-  requestBuses?(spawn: { trip: number; pat: number; len: number; front: number; v: number; arr: Float64Array; dep: Float64Array }[], patterns: { id: number; xy: Float64Array; stopD: Float32Array; stopFlag: Uint8Array }[]): void;
+  requestBuses?(spawn: { trip: number; pat: number; len: number; front: number; v: number; arr: Float64Array; dep: Float64Array }[], patterns: { id: number; xy: Float64Array; stopD: Float32Array; stopFlag: Uint8Array }[], retrip?: { old: number; trip: number; pat: number; arr: Float64Array; dep: Float64Array }[], pullout?: { trip: number; pat: number; len: number; arr: Float64Array; dep: Float64Array; gx: number; gy: number }[], pullin?: { trip: number; gx: number; gy: number }[]): void;
   railSnapshot(): { count: number; oe: number; on: number; simMs: number; feeds: string[]; f: Float32Array; u: Uint32Array; path: Float32Array } | null;
 }
 
@@ -133,6 +133,7 @@ export class TransitLayer implements Layer {
   private busSent = new Set<number>();
   private busAsked = new Map<number, number>();
   private busAskAt = 0;
+  private upcoming: number[] = [];
   /** records of trains parked in depots */
   private parked: number[] = [];
   private railSnap: ReturnType<RailSource['railSnapshot']> = null;
@@ -310,7 +311,7 @@ export class TransitLayer implements Layer {
         const p = shape.point(front, _p);
         if (Math.abs(p[2] - H(p[0], p[1])) > 4) continue; // tunnel / elevated: not in traffic
         const dir = shape.direction(front, _d);
-        const lat = LANE_OFFSET[v.mode[i]];
+        const lat = this.laneOf(v.pattern[i], v.mode[i]);
         this.pushGround(p[0] + dir[1] * lat, p[1] - dir[0] * lat, Math.atan2(dir[1], dir[0]), lay, v.speed[i], v.trip[i], i);
       }
       // --- draw
@@ -347,8 +348,8 @@ export class TransitLayer implements Layer {
             const prev = this.prevSpeed.get(trip) ?? sp;
             next.set(trip, sp);
             const braking = sp < 0.2 || v.state[i] === STATE_DWELL || sp < prev - 0.01;
-            this.drawConsist(shape, lay, this.rdist[i] + lay.length / 2, 1, this.routeTint[v.route[i]] ?? _white, dc > LOW_DETAIL, braking ? FLAG_BRAKE : 0, LANE_OFFSET[v.mode[i]], trip);
-            if (!this.notePose(trip, shape, this.rdist[i], lay.length, 1, LANE_OFFSET[v.mode[i]])) dupes++;
+            this.drawConsist(shape, lay, this.rdist[i] + lay.length / 2, 1, this.routeTint[v.route[i]] ?? _white, dc > LOW_DETAIL, braking ? FLAG_BRAKE : 0, this.laneOf(v.pattern[i], v.mode[i]), trip);
+            if (!this.notePose(trip, shape, this.rdist[i], lay.length, 1, this.laneOf(v.pattern[i], v.mode[i]))) dupes++;
             this.schedLast.set(trip, { pattern: v.pattern[i], dist: this.rdist[i], mode, route: v.route[i] });
             this.noteSeen('t' + trip, v.x[i], v.y[i], camE, camN);
             this.stats.near++;
@@ -662,6 +663,47 @@ export class TransitLayer implements Layer {
     const fE = ctx.focus.x, fN = -ctx.focus.z;
     const spawn: Parameters<NonNullable<RailSource['requestBuses']>>[0] = [];
     const pats: Parameters<NonNullable<RailSource['requestBuses']>>[1] = [];
+    // buses that finished their trip continue as the next trip of their vehicle block
+    const retrip: NonNullable<Parameters<NonNullable<RailSource['requestBuses']>>[2]> = [];
+    const pullin: NonNullable<Parameters<NonNullable<RailSource['requestBuses']>>[4]> = [];
+    const bs = this.busSnap;
+    if (bs) {
+      for (const [trip, k] of this.busAgents) {
+        if (!(bs.u[k * BUS_STRIDE + 3] & BUS_FLAG.NIS)) continue;
+        const nx = this.system.tripNext(trip);
+        if (nx < 0) {
+          // block over: back to the garage
+          if (this.busAsked.has(-trip - 1e6)) continue;
+          this.busAsked.set(-trip - 1e6, this.lastT);
+          const agency = this.system.tripLocal(trip)?.agency;
+          const q = bs.path.subarray((bs.f[k * BUS_STRIDE + 6] + bs.f[k * BUS_STRIDE + 7] - 1) * 3);
+          const be = q[0] + bs.oe, bn = q[1] + bs.on;
+          let g: (typeof GARAGES)[number] | null = null, gd = 12000;
+          for (const x of GARAGES) {
+            const d = Math.hypot(x[2] - be, x[3] - bn);
+            if (x[0] === agency && d < gd) { gd = d; g = x; }
+          }
+          if (g && Math.hypot(g[2] - fE, g[3] - fN) < R) pullin.push({ trip, gx: g[2], gy: g[3] });
+          continue;
+        }
+        if (this.busAgents.has(nx)) continue;
+        const asked = this.busAsked.get(-nx - 1);
+        if (asked !== undefined && Math.abs(this.lastT - asked) < 10) continue;
+        this.busAsked.set(-nx - 1, this.lastT);
+        const info = this.system.tripInfo(nx);
+        if (!info || info.start - this.lastT > 2400) continue;
+        const pat = info.pattern;
+        const shape = this.system.patternShape(pat);
+        if (!shape) continue;
+        if (!this.busSent.has(pat)) {
+          this.busSent.add(pat);
+          const xy = new Float64Array(shape.count * 2);
+          for (let q = 0; q < shape.count; q++) { xy[q * 2] = shape.xyz[q * 3]; xy[q * 2 + 1] = shape.xyz[q * 3 + 1]; }
+          pats.push({ id: pat, xy, stopD: Float32Array.from(info.stops.map((x) => x.dist)), stopFlag: Uint8Array.from(info.stops.map((x) => (x.virtual ? 1 : 0))) });
+        }
+        retrip.push({ old: trip, trip: nx, pat, arr: Float64Array.from(info.stops.map((x) => x.arr)), dep: Float64Array.from(info.stops.map((x) => x.dep)) });
+      }
+    }
     for (let i = 0; i < v.count && spawn.length < 40; i++) {
       if (v.mode[i] !== MODE_ID.bus) continue;
       const trip = v.trip[i];
@@ -686,7 +728,38 @@ export class TransitLayer implements Layer {
       });
     }
     if (this.busAsked.size > 5000) this.busAsked.clear();
-    if (spawn.length) src.requestBuses(spawn, pats);
+    // first trips of vehicle blocks near the focus leave their garage in time for the departure
+    const pullout: NonNullable<Parameters<NonNullable<RailSource['requestBuses']>>[3]> = [];
+    for (const trip of this.system.tripsStarting('bus', this.lastT, this.lastT + 900, this.upcoming)) {
+      if (pullout.length >= 10) break;
+      if (this.busAgents.has(trip) || this.busAsked.has(trip)) continue;
+      if (this.system.tripPrev(trip) >= 0) continue;
+      const info = this.system.tripInfo(trip);
+      if (!info || !info.stops.length) continue;
+      const sp = this.system.stopPosition(info.stops[0].stop);
+      if (Math.hypot(sp[0] - fE, sp[1] - fN) > R) continue;
+      let g: (typeof GARAGES)[number] | null = null, gd = 9000;
+      for (const x of GARAGES) {
+        if (x[0] !== info.agency) continue;
+        const d = Math.hypot(x[2] - sp[0], x[3] - sp[1]);
+        if (d < gd && Math.hypot(x[2] - fE, x[3] - fN) < R) { gd = d; g = x; }
+      }
+      if (!g) continue;
+      const eta = (gd * 1.35) / 9 + 60;
+      if (info.start - this.lastT > eta) continue; // not yet
+      this.busAsked.set(trip, this.lastT);
+      const shape = this.system.patternShape(info.pattern);
+      if (!shape) continue;
+      if (!this.busSent.has(info.pattern)) {
+        this.busSent.add(info.pattern);
+        const xy = new Float64Array(shape.count * 2);
+        for (let q = 0; q < shape.count; q++) { xy[q * 2] = shape.xyz[q * 3]; xy[q * 2 + 1] = shape.xyz[q * 3 + 1]; }
+        pats.push({ id: info.pattern, xy, stopD: Float32Array.from(info.stops.map((x) => x.dist)), stopFlag: Uint8Array.from(info.stops.map((x) => (x.virtual ? 1 : 0))) });
+      }
+      const lay = layoutFor('bus', info.routeMeta);
+      pullout.push({ trip, pat: info.pattern, len: lay.length, arr: Float64Array.from(info.stops.map((x) => x.arr)), dep: Float64Array.from(info.stops.map((x) => x.dep)), gx: g[2], gy: g[3] });
+    }
+    if (spawn.length || retrip.length || pullout.length || pullin.length) src.requestBuses(spawn, pats, retrip, pullout, pullin);
   }
 
   /** Is this trip driven by the rail sim right now? */
@@ -711,6 +784,11 @@ export class TransitLayer implements Layer {
       this.pools.add(lay.cars[c], low, pose.e - this.ax, pose.z, -pose.n - this.az, pose.heading, pose.pitch, tint, flags, hl);
       if (trip >= 0) this.pushPick(trip, pose.e, pose.n, pose.z + lay.cars[c].size[1] * 0.6, pose.heading, lay.cars[c].size[0]);
     }
+  }
+
+  /** render-time lateral offset of a pattern (bus shapes not yet matched to road lanes) */
+  private laneOf(pattern: number, mode: number): number {
+    return mode === MODE_ID.bus && this.system.patternInLane(pattern) ? 0 : LANE_OFFSET[mode];
   }
 
   /** inside the camera's horizontal view cone (a little wider than the frustum) */
@@ -840,4 +918,16 @@ function pathShape(path: Float32Array, p0: number, n: number, oe: number, on: nu
   return new PatternShape(-1, xyz, dist);
 }
 const _white = new THREE.Color(0xffffff);
+
+/** bus garages [agency, name, E, N] (approximate site entrances; buses pull out / in here) */
+const GARAGES: [string, string, number, number][] = [
+  ['ttc', 'Arrow Road', -11902, 11877], ['ttc', 'Birchmount', 9205, 5817], ['ttc', 'Malvern', 11929, 15155],
+  ['ttc', 'McNicoll', 7740, 17648], ['ttc', 'Mount Dennis', -8771, 4317], ['ttc', 'Queensway', -11365, -3568],
+  ['ttc', 'Wilson', -5946, 8536], ['miway', 'Central Parkway', -20897, -6100], ['miway', 'Malton', -20376, 5897],
+  ['yrt', 'Richmond Hill', 16, 21755], ['yrt', 'Newmarket', -6154, 45202], ['yrt', 'Vaughan', -11249, 16876],
+  ['brampton', 'Clark', -27789, 6480], ['brampton', 'Sandalwood', -31159, 9717], ['drt', 'Westney (Ajax)', 28879, 22706],
+  ['drt', 'Raleigh (Oshawa)', 40504, 28101], ['hsr', 'Mountain', -41194, -50782], ['grt', 'Northfield', -92829, -16270],
+  ['grt', 'Strasburg', -88020, -25891], ['burlington', 'Harvester', -32161, -31388], ['oakville', 'South Service', -26461, -24746],
+  ['go', 'Steeprock (bus)', -8035, 13649], ['go', 'Newmarket (bus)', -4792, 45090],
+];
 const _v3 = new THREE.Vector3();

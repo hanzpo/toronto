@@ -12,6 +12,7 @@ pub mod peds;
 pub mod rail;
 pub mod rng;
 pub mod signal;
+pub mod view;
 pub mod world;
 
 use wasm_bindgen::prelude::*;
@@ -135,6 +136,11 @@ impl Sim {
 
     /// advance the rail agents by `dt` s ending at time-of-day `tod` (independent of the
     /// road sim so trains keep up at high clock rates)
+    /// cars stopped in junction boxes: [front past the stop line, rear in the exit box, inside a split junction]
+    pub fn box_detail(&self) -> Vec<u32> {
+        self.w.stopped_in_box_detail().to_vec()
+    }
+
     pub fn rail_step(&mut self, dt: f32, tod: f64) {
         self.tram_road(tod);
         self.rail.step(dt, tod);
@@ -168,6 +174,19 @@ impl Sim {
     #[allow(clippy::too_many_arguments)]
     pub fn bus_spawn(&mut self, trip: u32, pat: u32, len: f32, front: f32, v: f32, arr: &[f64], dep: &[f64]) -> u8 {
         self.w.bus_spawn(trip, pat, len, front, v, arr, dep)
+    }
+    /// bus trip `trip` pulls out of the garage at (gx, gy) (see World::bus_pullout)
+    #[allow(clippy::too_many_arguments)]
+    pub fn bus_pullout(&mut self, trip: u32, pat: u32, len: f32, arr: &[f64], dep: &[f64], gx: f64, gy: f64) -> u8 {
+        self.w.bus_pullout(trip, pat, len, arr, dep, gx, gy)
+    }
+    /// the out-of-service bus of trip `trip` drives to the garage at (gx, gy)
+    pub fn bus_pullin(&mut self, trip: u32, gx: f64, gy: f64) -> bool {
+        self.w.bus_pullin(trip, gx, gy)
+    }
+    /// the bus of trip `old` continues as `new` (same vehicle block)
+    pub fn bus_retrip(&mut self, old: u32, new: u32, pat: u32, arr: &[f64], dep: &[f64]) -> bool {
+        self.w.bus_retrip(old, new, pat, arr, dep)
     }
     pub fn bus_count(&self) -> u32 {
         (self.w.out_buses.len() / bus::BUS_STRIDE) as u32
@@ -235,7 +254,7 @@ impl Sim {
         self.w.peds.set_stops(xyz);
     }
 
-    /// [target cars, target peds, cars, peds, live links, tiles]
+    /// [target cars, target peds, cars, peds, live links, tiles, cars stopped in a junction box]
     pub fn stats(&self) -> Vec<f32> {
         vec![
             self.w.target_cars,
@@ -244,6 +263,7 @@ impl Sim {
             self.w.peds.list.len() as f32,
             self.w.g.live_links as f32,
             self.w.g.tiles.len() as f32,
+            self.w.stopped_in_box() as f32,
         ]
     }
 
@@ -392,6 +412,8 @@ impl Sim {
     pub fn rail_set_camera(&mut self, x: f64, y: f64, fx: f64, fy: f64) {
         let l = fx.hypot(fy);
         self.rail.camera = if l > 1e-6 { Some((x, y, fx / l, fy / l)) } else { Some((x, y, 1.0, 0.0)) };
+        self.w.camera = self.rail.camera;
+        self.w.peds.camera = self.rail.camera;
     }
 
     pub fn rail_reset(&mut self) {

@@ -79,6 +79,18 @@ export class Sim {
         wasm.sim_add_tile(this.__wbg_ptr, tx, ty, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9, ptr10, len10, ptr11, len11, ptr12, len12, ptr13, len13, ptr14, len14);
     }
     /**
+     * advance the rail agents by `dt` s ending at time-of-day `tod` (independent of the
+     * road sim so trains keep up at high clock rates)
+     * cars stopped in junction boxes: [front past the stop line, rear in the exit box, inside a split junction]
+     * @returns {Uint32Array}
+     */
+    box_detail() {
+        const ret = wasm.sim_box_detail(this.__wbg_ptr);
+        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
      * @returns {number}
      */
     bus_count() {
@@ -131,6 +143,53 @@ export class Sim {
     bus_ptr() {
         const ret = wasm.sim_bus_ptr(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * the out-of-service bus of trip `trip` drives to the garage at (gx, gy)
+     * @param {number} trip
+     * @param {number} gx
+     * @param {number} gy
+     * @returns {boolean}
+     */
+    bus_pullin(trip, gx, gy) {
+        const ret = wasm.sim_bus_pullin(this.__wbg_ptr, trip, gx, gy);
+        return ret !== 0;
+    }
+    /**
+     * bus trip `trip` pulls out of the garage at (gx, gy) (see World::bus_pullout)
+     * @param {number} trip
+     * @param {number} pat
+     * @param {number} len
+     * @param {Float64Array} arr
+     * @param {Float64Array} dep
+     * @param {number} gx
+     * @param {number} gy
+     * @returns {number}
+     */
+    bus_pullout(trip, pat, len, arr, dep, gx, gy) {
+        const ptr0 = passArrayF64ToWasm0(arr, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF64ToWasm0(dep, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.sim_bus_pullout(this.__wbg_ptr, trip, pat, len, ptr0, len0, ptr1, len1, gx, gy);
+        return ret;
+    }
+    /**
+     * the bus of trip `old` continues as `new` (same vehicle block)
+     * @param {number} old
+     * @param {number} _new
+     * @param {number} pat
+     * @param {Float64Array} arr
+     * @param {Float64Array} dep
+     * @returns {boolean}
+     */
+    bus_retrip(old, _new, pat, arr, dep) {
+        const ptr0 = passArrayF64ToWasm0(arr, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF64ToWasm0(dep, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.sim_bus_retrip(this.__wbg_ptr, old, _new, pat, ptr0, len0, ptr1, len1);
+        return ret !== 0;
     }
     /**
      * place bus trip `trip` with its front at `front` along pattern `pat`
@@ -490,8 +549,6 @@ export class Sim {
         return v1;
     }
     /**
-     * advance the rail agents by `dt` s ending at time-of-day `tod` (independent of the
-     * road sim so trains keep up at high clock rates)
      * @param {number} dt
      * @param {number} tod
      */
@@ -613,7 +670,7 @@ export class Sim {
         return ret !== 0;
     }
     /**
-     * [target cars, target peds, cars, peds, live links, tiles]
+     * [target cars, target peds, cars, peds, live links, tiles, cars stopped in a junction box]
      * @returns {Float32Array}
      */
     stats() {
@@ -692,6 +749,11 @@ function getArrayF64FromWasm0(ptr, len) {
 function getArrayI32FromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return getInt32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
+function getArrayU32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
 }
 
 function getArrayU8FromWasm0(ptr, len) {

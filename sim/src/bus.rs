@@ -88,6 +88,8 @@ pub enum BusState {
     Dwell,
     /// after the last stop / lost the pattern: drives off as ordinary traffic
     OutOfService,
+    /// pulling out of a garage along `route` to the first stop of its trip
+    Deadhead,
 }
 
 pub struct BusAgent {
@@ -104,6 +106,9 @@ pub struct BusAgent {
     pub delay: f32,
     pub len: f32,
     pub car_id: u32,
+    /// deadhead route (links) and position in it
+    pub route: Vec<u32>,
+    pub ri: usize,
 }
 
 /// minimum dwell at a stop (s)

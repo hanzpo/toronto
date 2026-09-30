@@ -63,6 +63,8 @@ def consist_len(mode: str, route_short: str = "") -> float:
         return 92.6
     if mode == "lrt" and route_short.strip() == "6":
         return 47.6
+    if mode == "lrt" and route_short.strip().upper() in ("301", "ION"):
+        return 30.8  # GRT ION: single Flexity Freedom
     if mode == "commuter_rail" and route_short.strip().upper() in ("RH", "ST"):
         return 282.3
     return CONSIST_LEN[mode]

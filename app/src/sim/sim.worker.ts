@@ -264,6 +264,9 @@ function tick(m: TickMsg) {
       if (m.railCmd) sim.rail_player_input(m.railCmd.cmd, m.railCmd.emergency);
       if (m.camera) sim.rail_set_camera(m.camera[0], m.camera[1], m.camera[2], m.camera[3]);
       if (m.busPatterns) for (const p of m.busPatterns) sim.bus_pattern(p.id, p.xy, p.stopD, p.stopFlag);
+      if (m.busRetrip) for (const b of m.busRetrip) sim.bus_retrip(b.old, b.trip, b.pat, b.arr, b.dep);
+      if (m.busPullin) for (const b of m.busPullin) sim.bus_pullin(b.trip, b.gx, b.gy);
+      if (m.busPullout) for (const b of m.busPullout) sim.bus_pullout(b.trip, b.pat, b.len, b.arr, b.dep, b.gx, b.gy);
       if (m.busSpawn) for (const b of m.busSpawn) { const r = sim.bus_spawn(b.trip, b.pat, b.len, b.front, b.v, b.arr, b.dep); hf[HF.BUSX + Math.min(r, 5)]++; }
       const pl = m.player;
       sim.set_obstacles(m.obst ?? new Float64Array(0));
@@ -317,6 +320,9 @@ function tick(m: TickMsg) {
       const st = sim.stats();
       hf[HF.TARGET_CARS] = st[0];
       hf[HF.TARGET_PEDS] = st[1];
+      hf[HF.CARS] = st[2];
+      hf[HF.PEDS] = st[3];
+      hf[HF.BOX_STOPPED] = st[6] ?? 0;
       playerInfo();
       publish(m);
       const gv = sim.graph_version();
