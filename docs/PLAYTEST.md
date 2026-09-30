@@ -133,6 +133,20 @@ CIBC Square flicker → fixed in 3eda5f1.
 - [ ] Large black spike polygon near the camera at King W (?cam=-1180,-620,60,40,12,
   13:00), probably a shadow caster or rooftop artifact. → investigate
 
+### Ground/water agent (done, waiting for the consolidated merge)
+- Vector ground, typed shores, water levels, 41 curated portals and open
+  cuts, bridge embankments. Its code shares tileWorker/TileManager with the
+  rooftops and stations work, so it lands with the roads merge and the tile
+  rebuild (osm_tiles → rail graph → ground osmium filter → tpipe.ground).
+- [x] L0 tiles were stored uncompressed (tile level passed as the gzip level):
+  7× bigger than needed. fe53fda, takes effect with the rebuild.
+- [ ] Street view at King & Spadina is 4.9–5.2 M tris and 350–400 draws
+  (budget ~3.5 M). Not the ground (+0.10 M); profile per layer after the merge.
+  → perf
+- [ ] Road tunnel portals (Gardiner/Lakeshore underpasses, Bay St tunnel …);
+  crisp edges between natural ground classes; roads not cut into hillsides.
+  → ground (later)
+
 ### QA clipping run (04cd1eb, 196k findings across 38 categories)
 Queued until an agent slot frees up (overnight cap is 5):
 - [ ] Landmarks: Pearson T1 model over 670 m² of carriageway (-18388, 2591),
