@@ -133,6 +133,23 @@ CIBC Square flicker → fixed in 3eda5f1.
 - [ ] Large black spike polygon near the camera at King W (?cam=-1180,-620,60,40,12,
   13:00), probably a shadow caster or rooftop artifact. → investigate
 
+### QA clipping run (04cd1eb, 196k findings across 38 categories)
+Queued until an agent slot frees up (overnight cap is 5):
+- [ ] Landmarks: Pearson T1 model over 670 m² of carriageway (-18388, 2591),
+  Old City Hall over 107 m² of road (113, -50), ROM Crystal overlapping the ROM
+  historic wings (-946, 1645), Skylon overlapping an unsuppressed building
+  (24714, -63067). → landmarks
+- [ ] Vegetation: tree_in_building 1,186 (22 m tree in building 662538570 at
+  3033, 13833). → vegetation
+- [ ] Buildings: floating_object 56 (buried buildings 8.9 m under ground at
+  -2772, -2753); lot_over_building 65; prop_in_building 201 (signal pole in
+  building at -5412, 4709). → buildings/props
+- [ ] Transit: a TTC bus path runs through Yorkdale mall (-1239, 5722).
+  → transit
+Sent to stations: platform_track_clearance 386, building_over_track (Allen Rd
+stations, Union shed), trains through Allen Rd station buildings, trees on
+platforms.
+
 ## Resolved
 - [x] Tree LOD popping and stippled crowns: matched high/mid/far models,
   per-tree CPU LOD with hysteresis and 0.4 s alpha-to-coverage cross-fade,
