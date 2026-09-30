@@ -3,6 +3,7 @@
 # work/, outputs in ../app/public/data/. Re-run any step independently.
 set -euo pipefail
 cd "$(dirname "$0")"
+uv run python -m tpipe.lint_npz  # lazy-npz-in-loop memory trap guard
 mkdir -p raw/gtfs raw/dem work
 
 BBOX=-81.0,42.75,-78.2,44.75
