@@ -248,7 +248,7 @@ function build() {
     condoWhite: facade({ cols: 8, rows: 8, bay: 1.5, floor: 3.1, frame: '#eef0f0', glass: '#4f7388', glass2: '#5b8196', mullion: 0.05, spandrel: 0.3, lit: 0.45 }, 0.3, 0.1, 1.1, 28),
     shellConcrete: facade({ cols: 16, rows: 8, bay: 1.2, floor: 3.6, frame: '#e4e0d6', glass: '#565c62', mullion: 0.72, spandrel: 0.04, lit: 0.3 }, 0.85, 0, 0.9, 29),
     // --- pass 2 (Eaton Centre, UofT, markets, culture)
-    vaultGlass: plain('#a9c3cf', 0.12, 0.45),
+    vaultGlass: { material: new THREE.MeshStandardMaterial({ color: '#a9c3cf', roughness: 0.12, metalness: 0.45, emissive: '#ffe2b0', emissiveIntensity: 0 }), day: 0, night: 0.55 },
     wood: plain('#b27a48', 0.7),
     titanium: plain('#8fb2cc', 0.4, 0.25),
     zinc: plain('#8c9396', 0.5, 0.5),
