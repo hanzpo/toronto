@@ -7,7 +7,7 @@
 // the size in metres one texture repeat covers; Parts.build() divides the
 // metre-UVs by it.
 import * as THREE from 'three/webgpu'
-import { floor, fract, mod, sin, smoothstep, texture, time, uv, vec2, float, color, mix, uniform, dot } from 'three/tsl'
+import { floor, fract, mod, sin, smoothstep, step, texture, time, uv, vec2, float, color, mix, uniform } from 'three/tsl'
 import { OCC } from '../render/tiles/facadeMaterial'
 
 export interface MatSpec {
@@ -61,8 +61,10 @@ function facadeTextures(o: FacadeOpts, seed = 1) {
   e.width = W
   e.height = H
   const ge = e.getContext('2d')!
-  // occupancy mask (256²): R/G/B = window lit at working-hours / evening / late-night occupancy
-  // (nested sets from one rank per window), blended by OCC_W so towers empty out after hours
+  // occupancy mask (256²): R = the window's rank in [0, 1) (0 = first to light). The shader
+  // re-randomises it per texture repeat (the texture tiles across the whole facade, so a rank
+  // baked per texture row would light the same row across every repeat: full-width bands) and
+  // lights the window while its rank < the office occupancy (OCC_F).
   const MK = PX / 2
   const mk = document.createElement('canvas')
   mk.width = MK
@@ -70,7 +72,6 @@ function facadeTextures(o: FacadeOpts, seed = 1) {
   const gm = mk.getContext('2d')!
   gm.fillStyle = '#000'
   gm.fillRect(0, 0, MK, MK)
-  const litScale = Math.min(1.6, (o.lit ?? 0.3) / 0.3)
   ge.fillStyle = '#000'
   ge.fillRect(0, 0, W, H)
   g.fillStyle = o.frame
@@ -93,9 +94,9 @@ function facadeTextures(o: FacadeOpts, seed = 1) {
       ge.fillStyle = o.warm ?? (r() < 0.8 ? '#ffd9a0' : '#e8f0ff')
       ge.fillRect(x, y, w, h)
       ge.globalAlpha = 1
-      const rank = (0.6 * rowRank + 0.4 * r()) / litScale
-      const on = (t: number) => (rank < t ? 255 : 0)
-      gm.fillStyle = `rgb(${on(0.75)},${on(0.2)},${on(0.05)})`
+      const rank = Math.min(0.999, 0.35 * rowRank + 0.65 * r())
+      const v = Math.round(rank * 255)
+      gm.fillStyle = `rgb(${v},${v},${v})`
       gm.fillRect(x / 2, y / 2, w / 2, h / 2)
     }
   }
@@ -119,35 +120,42 @@ function facadeTextures(o: FacadeOpts, seed = 1) {
   const emap = new THREE.CanvasTexture(e)
   emap.colorSpace = THREE.SRGBColorSpace
   const mask = new THREE.CanvasTexture(mk)
-  for (const t of [map, emap, mask]) {
+  for (const t of [map, emap]) {
     t.wrapS = t.wrapT = THREE.RepeatWrapping
     t.anisotropy = 8
     t.generateMipmaps = true
     t.minFilter = THREE.LinearMipmapLinearFilter
   }
-  return { map, emap, mask, module: [o.cols * o.bay, o.rows * o.floor] as [number, number] }
+  mask.wrapS = mask.wrapT = THREE.RepeatWrapping
+  mask.magFilter = THREE.NearestFilter
+  mask.minFilter = THREE.NearestMipmapNearestFilter // ranks must not be blended into new ranks
+  mask.generateMipmaps = true
+  return { map, emap, mask, rows: o.rows, cols: o.cols, module: [o.cols * o.bay, o.rows * o.floor] as [number, number] }
 }
 
 function plain(color: string, rough = 0.85, metal = 0, extra: Partial<THREE.MeshStandardMaterialParameters> = {}): MatSpec {
   return { material: new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: metal, ...extra }) }
 }
 
-/** blend weights of the occupancy mask channels (working hours / evening / late night), set by setNight */
-const OCC_W = uniform(new THREE.Vector3(0, 0, 0))
-function occWeights(f: number): [number, number, number] {
-  // lit fraction f as a blend of the nested sets (≈ 75 %, 20 %, 5 % of windows)
-  if (f <= 0.05) return [0, 0, f / 0.05]
-  if (f <= 0.2) { const t = (f - 0.05) / 0.15; return [0, t, 1 - t] }
-  const t = Math.min(1, (f - 0.2) / 0.55)
-  return [t, 1 - t, 0]
-}
+/** share of office windows lit (render/tiles/facadeMaterial OCC.y), set by setNight */
+const OCC_F = uniform(0.4)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const h2 = (a: any, b: any): any => fract(sin(a.mul(12.9898).add(b.mul(78.233))).mul(43758.5453))
 
 function facade(o: FacadeOpts, rough = 0.5, metal = 0.1, night = 1.2, seed = 1): MatSpec {
   night *= 0.5
   const t = facadeTextures(o, seed)
   const m = new THREE.MeshStandardNodeMaterial({ color: '#ffffff', map: t.map, roughness: rough, metalness: metal })
   const k = uniform(0)
-  m.emissiveNode = texture(t.emap).rgb.mul(dot(texture(t.mask).rgb, OCC_W)).mul(k)
+  // per window: its texture rank, shifted by a hash of (texture repeat across, floor) so repeats
+  // differ and a floor is never lit across the whole facade; the rank stays uniform, so the lit
+  // share equals the occupancy. Floors are uv.y·rows: horizontal on every facet.
+  // wide texture bays (RBP: 6 m of continuous gold glass) are lit office by office, ~1.5 m each
+  // (only continuous glass: a punched window with real mullions is one room, never half lit)
+  const nsub = (o.mullion ?? 0.12) < 0.06 ? Math.max(1, Math.round(o.bay / 1.5)) : 1
+  const U = uv(), fl = floor(U.y.mul(t.rows)), tx = floor(U.x.mul(t.cols * nsub))
+  const rank = fract(texture(t.mask, U).r.add(h2(tx.add(seed * 0.37), fl.mul(0.713).add(seed))))
+  m.emissiveNode = texture(t.emap).rgb.mul(step(rank, OCC_F.mul(Math.min(1.6, (o.lit ?? 0.3) / 0.3)))).mul(k)
   return { material: m as unknown as THREE.MeshStandardMaterial, module: t.module, night, office: true, k }
 }
 
@@ -449,7 +457,7 @@ export function setNight(t: number) {
   }
   // office towers: windows switch off with office occupancy (≈ 0.75 working hours, 0.15 at 21:30,
   // 0.04 at 03:00; render/tiles/facadeMaterial OCC.y), so the skyline empties out after hours
-  ;(OCC_W.value as THREE.Vector3).set(...occWeights((OCC.value as THREE.Vector3).y))
+  OCC_F.value = (OCC.value as THREE.Vector3).y
 }
 
 /** Recolour the CN Tower LED lighting (e.g. for events). */
