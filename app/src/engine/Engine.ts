@@ -9,6 +9,8 @@ import { clock } from '../state/clock';
 import { simSpeed, useApp } from '../state/store';
 import { Atmosphere } from '../render/atmosphere';
 import { TileManager } from '../render/tiles/TileManager';
+import { QualityGovernor, ViewCull } from './view';
+import { Rum } from './rum';
 
 const ANCHOR_GRID = 1024;
 const ANCHOR_REBASE = 3000;
@@ -43,6 +45,9 @@ export class Engine {
   atmosphere!: Atmosphere;
   tiles!: TileManager;
   anchor = new FloatingAnchor();
+  readonly view = new ViewCull();
+  readonly quality = new QualityGovernor();
+  private rum: Rum | null = null;
   layers: Layer[] = [];
   backend = '';
   readonly ctx: FrameContext;
@@ -57,7 +62,14 @@ export class Engine {
   private picker = new THREE.Raycaster();
   private ndc = new THREE.Vector2();
   /** frame timing breakdown; frames over 40 ms are kept in `long` (debugging hitches) */
-  readonly perf = { parts: [] as [string, number][], long: [] as { at: number; ms: number; parts: string }[] };
+  readonly perf = {
+    parts: [] as [string, number][],
+    long: [] as { at: number; ms: number; parts: string }[],
+    /** running sums since the last reset (benchmarks): per-part ms, frames, draw calls, triangles */
+    acc: {} as Record<string, number>,
+    frames: 0, cpuMs: 0, cpuMax: 0, draws: 0, drawsMax: 0, tris: 0, trisMax: 0,
+    reset() { this.acc = {}; this.frames = 0; this.cpuMs = 0; this.cpuMax = 0; this.draws = 0; this.drawsMax = 0; this.tris = 0; this.trisMax = 0; this.long.length = 0; },
+  };
   lastDrawCalls = 0;
   lastTriangles = 0;
 
@@ -73,7 +85,7 @@ export class Engine {
       frame: 0, time: 0, dt: 0, simMs: clock.simMs, simDt: 0, camera: this.camera,
       cameraPos: this.camera.position, focus: new THREE.Vector3(), altitude: 1000,
       viewport: { width: 1, height: 1, dpr: 1 }, pixelScale: 1, sunDir: this.sun, daylight: 1,
-      anchor: this.anchor, analyticsMode: false,
+      anchor: this.anchor, analyticsMode: false, view: this.view,
     };
   }
 
@@ -94,7 +106,8 @@ export class Engine {
     renderer.shadowMap.type = THREE.PCFShadowMap;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.0;
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    this.quality.setMode(useApp.getState().quality);
+    renderer.setPixelRatio(this.quality.dpr);
     renderer.info.autoReset = true;
     this.renderer = renderer;
     renderer.domElement.style.display = 'block';
@@ -119,8 +132,9 @@ export class Engine {
       (probe.material as THREE.Material).dispose();
     }
     this.tiles = new TileManager(this.dataRoot);
-    this.tiles.lodScale = config.lodScale;
+    this.tiles.lodScale = config.lodScale * (0.55 + 0.45 * this.quality.scale);
     await this.tiles.init();
+    performance.mark('engine-init');
     this.tiles.warm = (obj) => {
       const holder = new THREE.Group();
       holder.add(obj);
@@ -147,6 +161,7 @@ export class Engine {
     this.resizeObs = new ResizeObserver(() => this.resize());
     this.resizeObs.observe(this.container);
     this.last = performance.now();
+    this.rum = new Rum(this);
     renderer.setAnimationLoop(() => this.tick());
   }
 
@@ -154,7 +169,9 @@ export class Engine {
 
   async addLayer(layer: Layer) {
     this.layers.push(layer);
+    const t0 = performance.now();
     await layer.init(this);
+    performance.measure(`layer:${layer.id}`, { start: t0, end: performance.now() });
   }
 
   removeLayer(id: string) {
@@ -163,6 +180,23 @@ export class Engine {
       this.layers[i].dispose();
       this.layers.splice(i, 1);
     }
+  }
+
+  /**
+   * Compile pipelines of instanced pools that are still empty (LOD / ring
+   * pools that fill later) off the critical path, so the first frame that
+   * uses them doesn't stall on a synchronous pipeline build.
+   */
+  prewarm(root: THREE.Object3D = this.scene) {
+    const touched: [THREE.InstancedMesh, number, boolean][] = [];
+    root.traverse((o) => {
+      const m = o as THREE.InstancedMesh;
+      if (m.isInstancedMesh && m.count === 0) { touched.push([m, m.count, m.visible]); m.count = 1; m.visible = true; }
+    });
+    // compileAsync collects render objects synchronously, so counts can be restored right away
+    const p = this.renderer.compileAsync(root, this.camera, this.scene).catch(() => {});
+    for (const [m, c, v] of touched) { if (m.count === 1) m.count = c; m.visible = v; }
+    return p;
   }
 
   // ------------------------------------------------------------------------ queries
@@ -216,6 +250,16 @@ export class Engine {
 
   // ------------------------------------------------------------------------ loop
 
+  /** resolution + tile detail follow the governor's level */
+  private applyQuality() {
+    const dpr = this.quality.dpr;
+    if (Math.abs(this.renderer.getPixelRatio() - dpr) > 0.01) {
+      this.renderer.setPixelRatio(dpr);
+      this.resize();
+    }
+    this.tiles.lodScale = config.lodScale * (0.55 + 0.45 * this.quality.scale);
+  }
+
   private resize() {
     const w = Math.max(1, this.container.clientWidth), h = Math.max(1, this.container.clientHeight);
     this.renderer.setSize(w, h, false);
@@ -256,15 +300,23 @@ export class Engine {
       this.camera.updateProjectionMatrix();
     }
 
+    // quality governor: preset changes from the UI, then frame-time driven steps
+    if (st.quality !== this.quality.mode) { this.quality.setMode(st.quality); this.applyQuality(); }
+    if (this.quality.sample(dt * 1000, this.tiles.busy)) this.applyQuality();
+    this.camera.updateMatrixWorld();
+    this.view.update(this.camera, this.quality.scale);
+
     if (this.anchor.update(this.camera.position)) this.tiles.rebase(this.anchor.origin.x, -this.anchor.origin.z);
 
     sunDirection(ctx.simMs, this.sun);
     this.atmosphere.shadowsEnabled = st.shadows;
     this.atmosphere.update(ctx, this.sun);
+    if (this.frame === 1) performance.mark('first-frame');
     const perf = this.perf;
     let t = performance.now();
     perf.parts.length = 0;
-    const mark = (name: string) => { const n = performance.now(); perf.parts.push([name, n - t]); t = n; };
+    const acc = perf.acc;
+    const mark = (name: string) => { const n = performance.now(); perf.parts.push([name, n - t]); acc[name] = (acc[name] ?? 0) + n - t; t = n; };
     mark('pre');
     this.tiles.update(ctx);
     mark('tiles');
@@ -280,6 +332,10 @@ export class Engine {
     const info = this.renderer.info.render;
     this.lastDrawCalls = info.drawCalls;
     this.lastTriangles = info.triangles;
+    this.rum?.frame(dt * 1000, total);
+    perf.frames++; perf.cpuMs += total; perf.cpuMax = Math.max(perf.cpuMax, total);
+    perf.draws += info.drawCalls; perf.drawsMax = Math.max(perf.drawsMax, info.drawCalls);
+    perf.tris += info.triangles; perf.trisMax = Math.max(perf.trisMax, info.triangles);
 
     const sa = this.statAcc;
     sa.t += dt; sa.frames++; sa.cpu += performance.now() - cpu0;
@@ -300,6 +356,7 @@ export class Engine {
         cameraN: -this.camera.position.z,
         heading: cur.heading,
         metersPerPixel: Math.max(0.01, cur.dist / ctx.pixelScale),
+        quality: this.quality.name,
       });
       sa.t = 0; sa.frames = 0; sa.cpu = 0;
     }

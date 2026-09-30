@@ -53,7 +53,18 @@ function publicWithoutData(): Plugin {
 
 export default defineConfig({
   plugins: [rawGz(), react(), publicWithoutData()],
-  build: { copyPublicDir: false },
+  build: {
+    copyPublicDir: false,
+    // three's WebGPU renderer (three.tsl / three.core) is one ESM module each
+    // (~690 + 245 kB, cached immutably); app layers are split per import().
+    chunkSizeWarningLimit: 800,
+    rolldownOptions: {
+      output: {
+        // React in its own long-lived chunk: app deploys don't invalidate it
+        codeSplitting: { groups: [{ name: 'react', test: /node_modules[\\/](\.pnpm[\\/])?(react|react-dom|scheduler)[@\\/]/ }] },
+      },
+    },
+  },
   server: { headers: isolation, port: 5173 },
   preview: { headers: isolation },
   worker: { format: 'es' },

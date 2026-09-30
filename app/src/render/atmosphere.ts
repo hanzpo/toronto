@@ -21,6 +21,9 @@ export class Atmosphere {
   hemi = new THREE.HemisphereLight(0xdfe9f5, 0x8a8472, 1.1);
   water: THREE.Mesh;
   shadowsEnabled = true;
+  private shadowAge = 0;
+  private shadowAt = new THREE.Vector3(Infinity, 0, 0);
+  private shadowSun = new THREE.Vector3();
   private tmpC = new THREE.Color();
   private tmpC2 = new THREE.Color();
 
@@ -31,6 +34,8 @@ export class Atmosphere {
     this.sun.shadow.normalBias = 0.6;
     const sc = this.sun.shadow.camera as THREE.OrthographicCamera;
     sc.near = 1; sc.far = 6000;
+    // layer 1 = shadow-only proxies (near-ring casters of pools drawn without shadows)
+    sc.layers.enable(1);
     scene.add(this.sun, this.sun.target, this.hemi);
 
     // sky: gradient on view elevation + sun glow
@@ -116,7 +121,22 @@ export class Atmosphere {
       ? (1 - THREE.MathUtils.smoothstep(ctx.altitude, 1800, 2800)) * THREE.MathUtils.smoothstep(elev, 0.02, 0.08)
       : 0;
     this.sun.shadow.intensity = fade;
-    this.sun.shadow.autoUpdate = fade > 0.001;
+    // Shadow map refresh rate: every frame at street level (moving cars /
+    // people cast shadows), every 2nd / 3rd frame from higher up where those
+    // shadows are a few pixels. Moving the shadow frustum (pan) or the sun
+    // always refreshes. The startup prerender (Engine.init) is unaffected.
+    const on = fade > 0.001;
+    const every = ctx.altitude < 120 ? 1 : ctx.altitude < 600 ? 2 : 3;
+    this.sun.shadow.autoUpdate = false;
+    if (on) this.shadowAge++;
+    const focusMoved = Math.abs(ctx.focus.x - this.shadowAt.x) > 0.01 || Math.abs(ctx.focus.z - this.shadowAt.z) > 0.01 || Math.abs(ctx.focus.y - this.shadowAt.y) > 0.01;
+    const sunMoved = sunDir.distanceToSquared(this.shadowSun) > 1e-8;
+    if (on && (this.shadowAge >= every || focusMoved || sunMoved)) {
+      this.sun.shadow.needsUpdate = true;
+      this.shadowAge = 0;
+      this.shadowAt.copy(ctx.focus);
+      this.shadowSun.copy(sunDir);
+    }
     // frustum radius in discrete steps: continuous resizing makes shadows shimmer
     const want = THREE.MathUtils.clamp(ctx.altitude * 1.2 + 150, 200, 1800);
     const r = Math.min(1800, 200 * Math.pow(1.25, Math.ceil(Math.log(want / 200) / Math.log(1.25))));

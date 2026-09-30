@@ -11,5 +11,8 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": true
   },
-  "r2_buckets": [{ "binding": "DATA", "bucket_name": "toronto-data" }]
+  "r2_buckets": [{ "binding": "DATA", "bucket_name": "toronto-data" }],
+  // Real-user metrics (POST /rum → worker/src/index.ts). The dataset is created
+  // on first write; query it with the Analytics Engine SQL API.
+  "analytics_engine_datasets": [{ "binding": "RUM", "dataset": "toronto_rum" }]
 }

@@ -25,6 +25,10 @@ const FALL = uniform(0);
 const RADIUS = 1500; // furniture is loaded for L0 tiles this close (m)
 const NEAR_TREES = 260; // detailed tree meshes inside this distance
 const LAMP_MAX = 900;
+/** lamps / signal hardware cast shadows through shadow-only proxies within this range */
+const NEAR_SHADOW = 320;
+/** object layer rendered only by the sun's shadow camera (see Atmosphere) */
+export const SHADOW_ONLY_LAYER = 1;
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type N = any;
@@ -79,9 +83,13 @@ class Pool {
   owners: (Owner | null)[] = [];
   entries: Int32Array;
   dirty = false;
-  geo: THREE.BufferGeometry; mat: THREE.Material; parent: THREE.Object3D; name: string; shadow: boolean;
-  constructor(geo: THREE.BufferGeometry, mat: THREE.Material, cap: number, parent: THREE.Object3D, name: string, shadow: boolean) {
-    this.geo = geo; this.mat = mat; this.parent = parent; this.name = name; this.shadow = shadow;
+  /** slot range written since the last flush (uploads only that range) */
+  lo = Infinity;
+  hi = -1;
+  mark(s: number) { if (s < this.lo) this.lo = s; if (s > this.hi) this.hi = s; this.dirty = true; }
+  geo: THREE.BufferGeometry; mat: THREE.Material; parent: THREE.Object3D; name: string; shadow: boolean; shadowOnly: boolean;
+  constructor(geo: THREE.BufferGeometry, mat: THREE.Material, cap: number, parent: THREE.Object3D, name: string, shadow: boolean, shadowOnly = false) {
+    this.geo = geo; this.mat = mat; this.parent = parent; this.name = name; this.shadow = shadow; this.shadowOnly = shadowOnly;
     this.cap = cap;
     this.entries = new Int32Array(cap);
     this.ipos = new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4);
@@ -90,15 +98,14 @@ class Pool {
   private make(cap: number) {
     const g = this.geo.clone();
     this.ipos = new THREE.InstancedBufferAttribute(this.ipos.array.length >= cap * 4 ? this.ipos.array : grow(this.ipos.array as Float32Array, cap * 4), 4);
-    this.ipos.setUsage(THREE.DynamicDrawUsage);
     g.setAttribute('ipos', this.ipos);
     const m = new THREE.InstancedMesh(g, this.mat, cap);
-    m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     m.count = 0;
     m.frustumCulled = false;
     m.castShadow = this.shadow;
-    m.receiveShadow = true;
+    m.receiveShadow = !this.shadowOnly;
     m.name = this.name;
+    if (this.shadowOnly) m.layers.set(SHADOW_ONLY_LAYER);
     this.parent.add(m);
     return m;
   }
@@ -134,6 +141,7 @@ class Pool {
       if (s !== last) {
         mA.copyWithin(s * 16, last * 16, last * 16 + 16);
         pA.copyWithin(s * 4, last * 4, last * 4 + 4);
+        this.mark(s);
         const o = this.owners[last]!, e = this.entries[last];
         o.slots[e] = s; this.owners[s] = o; this.entries[s] = e;
       }
@@ -146,9 +154,13 @@ class Pool {
   clear() { this.count = 0; this.mesh.count = 0; this.owners.length = 0; this.dirty = true; }
   flush() {
     if (!this.dirty) return;
-    this.mesh.instanceMatrix.needsUpdate = true;
-    this.ipos.needsUpdate = true;
     this.dirty = false;
+    if (this.hi < this.lo) return;
+    const lo = this.lo, n = Math.min(this.hi, this.cap - 1) - lo + 1;
+    const im = this.mesh.instanceMatrix;
+    im.clearUpdateRanges(); im.addUpdateRange(lo * 16, n * 16); im.needsUpdate = true;
+    this.ipos.clearUpdateRanges(); this.ipos.addUpdateRange(lo * 4, n * 4); this.ipos.needsUpdate = true;
+    this.lo = Infinity; this.hi = -1;
   }
   dispose() { this.parent.remove(this.mesh); this.mesh.geometry.dispose(); this.mesh.dispose(); }
 }
@@ -201,6 +213,8 @@ export class StreetLayer implements Layer {
   private pools: Record<string, Pool> = {};
   private nearTrees!: Pool;
   private nearConifers!: Pool;
+  /** shadow-only copies of the lamps / signal hardware near the camera (ring 0) */
+  private shadowProxies: Record<'lamps' | 'poles' | 'masts' | 'heads', Pool> | null = null;
   private nearAt = new THREE.Vector3(Infinity, 0, 0);
   private nearDirty = true;
   /** per signal instance: [tileKey, junction id, phase, angle] for the controller */
@@ -220,15 +234,26 @@ export class StreetLayer implements Layer {
     this.pools = {
       trees: P(broadleaf(1), farTree, 8192, 'treesFar', false),
       conifers: P(conifer(1), farTree, 2048, 'conifersFar', false),
-      lamps: P(streetLight(), lampMat, 2048, 'streetLights', true),
+      lamps: P(streetLight(), lampMat, 2048, 'streetLights', false),
       glows: P(glowDisc(), glowMaterial(), 2048, 'lampGlow', false),
-      poles: P(signalPole(), sigMat, 512, 'signalPoles', true),
-      masts: P(mastArm(), poleMat, 512, 'signalMasts', true),
-      heads: P(mastHead(), sigMat, 512, 'signalMastHeads', true),
+      poles: P(signalPole(), sigMat, 512, 'signalPoles', false),
+      masts: P(mastArm(), poleMat, 512, 'signalMasts', false),
+      heads: P(mastHead(), sigMat, 512, 'signalMastHeads', false),
+    };
+    const S = (geo: THREE.BufferGeometry, mat: THREE.Material, name: string) => new Pool(geo, mat, 128, this.group, name, true, true);
+    this.shadowProxies = {
+      lamps: S(streetLight(), lampMat, 'streetLightsShadow'),
+      poles: S(signalPole(), sigMat, 'signalPolesShadow'),
+      masts: S(mastArm(), poleMat, 'signalMastsShadow'),
+      heads: S(mastHead(), sigMat, 'signalMastHeadsShadow'),
     };
     this.nearTrees = new Pool(broadleaf(0), nearTree, 2048, this.group, 'treesNear', true);
     this.nearConifers = new Pool(conifer(0), nearTree, 512, this.group, 'conifersNear', true);
     Object.assign(window as object, { __street: this });
+  }
+
+  private allPools(): Pool[] {
+    return [...Object.values(this.pools), this.nearTrees, this.nearConifers, ...Object.values(this.shadowProxies ?? {})];
   }
 
   // ------------------------------------------------------------------ signal API
@@ -263,7 +288,7 @@ export class StreetLayer implements Layer {
     if (this.anchorVer !== ctx.anchor.version) {
       this.anchorVer = ctx.anchor.version;
       const o = ctx.anchor.origin;
-      for (const p of [...Object.values(this.pools), this.nearTrees, this.nearConifers]) p.mesh.position.set(o.x, 0, o.z);
+      for (const p of this.allPools()) p.mesh.position.set(o.x, 0, o.z);
       for (const t of this.tiles.values()) this.write(t);
       this.nearDirty = true;
     }
@@ -286,7 +311,7 @@ export class StreetLayer implements Layer {
     if (this.nearDirty || Math.hypot(cam.x - this.nearAt.x, cam.z - this.nearAt.z) > 25 || Math.abs(cam.y - this.nearAt.y) > 40) this.rebuildNear(cam);
     FALL.value = this.fall(ctx.simMs);
     this.signals(ctx);
-    for (const p of [...Object.values(this.pools), this.nearTrees, this.nearConifers]) p.flush();
+    for (const p of this.allPools()) p.flush();
   }
 
   private add(key: string, e0: number, n0: number, data: StreetBuf) {
@@ -322,7 +347,7 @@ export class StreetLayer implements Layer {
     _m.toArray(p.mesh.instanceMatrix.array as Float32Array, slot * 16);
     const ip = p.ipos.array as Float32Array;
     ip[slot * 4] = x; ip[slot * 4 + 1] = y; ip[slot * 4 + 2] = z; ip[slot * 4 + 3] = w;
-    p.dirty = true;
+    p.mark(slot);
   }
 
   /** fraction of trees in autumn colour for the sim date (late Sep → Nov) */
@@ -372,7 +397,7 @@ export class StreetLayer implements Layer {
     this.nearAt.copy(cam);
     this.nearDirty = false;
     const o = this.engine.anchor.origin;
-    const pools = [this.nearTrees, this.nearConifers];
+    const pools = [this.nearTrees, this.nearConifers, ...Object.values(this.shadowProxies ?? {})];
     for (const p of pools) p.clear();
     const R = NEAR_TREES + 60;
     const E = cam.x, Nn = -cam.z;
@@ -392,6 +417,36 @@ export class StreetLayer implements Layer {
         if (Math.abs(e - E) > R || Math.abs(n - Nn) > R || Math.hypot(e - E, n - Nn, d[i * 6 + 2] - cam.y) > R) continue;
         const s = d[i * 6 + 3], seed = d[i * 6 + 5], conif = d[i * 6 + 4] === 1;
         add(conif ? this.nearConifers : this.nearTrees, e - o.x, d[i * 6 + 2], -n - o.z, seed * 6.28, s, s * (conif ? 0.9 + seed * 0.3 : 0.85 + seed * 0.35), seed);
+      }
+    }
+    // shadow proxies for lamps and signal hardware in ring 0 (the far pools cast none)
+    const sp = this.shadowProxies;
+    if (!sp) return;
+    const RS = NEAR_SHADOW;
+    const put = (p: Pool, x: number, y: number, z: number, a: number, sx: number, sy: number, sz: number) => {
+      p.ensure(p.count + 1);
+      const k = p.count++;
+      p.owners[k] = dummy;
+      p.mesh.count = p.count;
+      this.put(p, k, x, y, z, a, sx, sy, sz, 0);
+    };
+    for (const rec of this.tiles.values()) {
+      if (E < rec.e0 - RS || E > rec.e0 + 1024 + RS || Nn < rec.n0 - RS || Nn > rec.n0 + 1024 + RS) continue;
+      const ox = rec.e0 - o.x, on = rec.n0 + o.z;
+      const la = rec.data.lamps;
+      for (let i = 0; i < la.length / 5; i++) {
+        const x = la[i * 5], y = la[i * 5 + 1];
+        if (Math.hypot(rec.e0 + x - E, rec.n0 + y - Nn) > RS) continue;
+        put(sp.lamps, ox + x, la[i * 5 + 2], -(on + y), la[i * 5 + 3], 1, la[i * 5 + 4] / 8.5, 1);
+      }
+      const sg = rec.data.signals;
+      for (let i = 0; i < sg.length / 7; i++) {
+        const x = sg[i * 7], y = sg[i * 7 + 1], z = sg[i * 7 + 2], a = sg[i * 7 + 3], L = sg[i * 7 + 6];
+        if (Math.hypot(rec.e0 + x - E, rec.n0 + y - Nn) > RS) continue;
+        const X = ox + x, Z = -(on + y);
+        put(sp.poles, X, z, Z, a, 1, 1, 1);
+        put(sp.masts, X, z, Z, a, 1, 1, L);
+        put(sp.heads, X + Math.sin(a) * L, z, Z + Math.cos(a) * L, a, 1, 1, 1);
       }
     }
   }
@@ -422,12 +477,13 @@ export class StreetLayer implements Layer {
         A[po.slots[i] * 4 + 3] = st; B[he.slots[i] * 4 + 3] = st;
       }
     }
-    poles.ipos.needsUpdate = true;
-    heads.ipos.needsUpdate = true;
+    // signal states live in ipos.w of every slot: upload the whole (small) range at flush
+    if (poles.count) { poles.mark(0); poles.mark(poles.count - 1); }
+    if (heads.count) { heads.mark(0); heads.mark(heads.count - 1); }
   }
 
   dispose() {
-    for (const p of [...Object.values(this.pools), this.nearTrees, this.nearConifers]) p.dispose();
+    for (const p of this.allPools()) p.dispose();
     this.group.removeFromParent();
   }
 }

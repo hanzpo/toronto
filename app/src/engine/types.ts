@@ -1,5 +1,6 @@
 import type * as THREE from 'three/webgpu';
 import type { Engine } from './Engine';
+import type { ViewCull } from './view';
 
 /** Shared per-frame context handed to every layer's `update`. Read-only for layers. */
 export interface FrameContext {
@@ -28,6 +29,8 @@ export interface FrameContext {
   daylight: number;
   anchor: Anchor;
   analyticsMode: boolean;
+  /** frustum + detail rings for this frame (per-instance culling / LOD) */
+  view: ViewCull;
 }
 
 /**

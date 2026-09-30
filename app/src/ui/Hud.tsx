@@ -136,6 +136,7 @@ function LayersPanel() {
   const analytics = useApp((s) => s.analytics);
   const mode = useApp((s) => s.analyticsMode);
   const shadows = useApp((s) => s.shadows);
+  const quality = useApp((s) => s.quality);
   const [open, setOpen] = useState(true);
   const st = useApp.getState();
   return (
@@ -171,6 +172,13 @@ function LayersPanel() {
             ))}
             <button className={`chip ${shadows ? 'on' : ''}`} onClick={() => st.setShadows(!shadows)}>Shadows</button>
           </div>
+
+          <h4>Quality</h4>
+          <div className="chips" title="Auto adapts detail and resolution to hold 60 fps">
+            {(['auto', 'high', 'medium', 'low'] as const).map((q) => (
+              <button key={q} className={`chip ${quality === q ? 'on' : ''}`} onClick={() => st.setQuality(q)}>{q[0].toUpperCase() + q.slice(1)}</button>
+            ))}
+          </div>
         </div>
       )}
     </aside>
@@ -195,6 +203,7 @@ function Stats() {
           <dt>alt</dt><dd>{s.altitude < 1000 ? `${s.altitude.toFixed(0)} m` : `${(s.altitude / 1000).toFixed(1)} km`}</dd>
           <dt>pos</dt><dd>{(s.cameraE / 1000).toFixed(2)}E {(s.cameraN / 1000).toFixed(2)}N</dd>
           <dt>gfx</dt><dd className="backend">{s.backend}</dd>
+          <dt>detail</dt><dd>{s.quality}</dd>
         </dl>
       )}
     </div>

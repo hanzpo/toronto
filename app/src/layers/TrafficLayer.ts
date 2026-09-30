@@ -24,7 +24,7 @@ import {
   CAR_FLAG, CAR_STRIDE, H, HEADER_BYTES, HF, MAX_CARS, MAX_PEDS, OB_FLAG, OB_STRIDE, PED_STRIDE, SAB_BYTES, SIG_OFFSET, SIG_STRIDE,
   SLOT_BYTES, SLOT_HEADER, type FromWorker, type TickMsg, type ToWorker,
 } from '../sim/protocol';
-import { CAR_LENGTH, carPalette, carVariantsForKind, pedestrianGeometries, shirtPalette, type CarVariant } from './traffic/models';
+import { CAR_LENGTH, carLowGeometries, carPalette, carVariantsForKind, pedestrianGeometries, pedestrianLowGeometry, shirtPalette, type CarVariant } from './traffic/models';
 import { CongestionOverlay } from './traffic/congestion';
 import { GroundSampler } from './traffic/ground';
 
@@ -56,7 +56,18 @@ const WALK_LIFT = 0.2;
 /** detailed ground contact (pitch / roll from 4 samples) within this range of the camera */
 const NEAR_GROUND = 700;
 const AMBER = 4, ALL_RED = 2;
+/** detail rings (× view scale): full car models (shadow casters) inside CAR_NEAR, box stand-ins beyond */
+const CAR_NEAR = 320;
+/** full pedestrians inside PED_NEAR, simple figures to PED_FAR, none beyond (sub-pixel) */
+const PED_NEAR = 170;
+const PED_FAR = 650;
 
+/**
+ * Instance pools: attributes keep the default (static) usage on purpose. In
+ * three's WebGPU renderer DynamicDrawUsage re-uploads the whole buffer for
+ * every render pass (main + shadow), ignoring update ranges; static usage
+ * uploads once per `needsUpdate`, limited to the update range.
+ */
 class Pool {
   mesh: THREE.InstancedMesh;
   /** rgb tint + flags (WebGPU allows only 8 vertex buffers: attributes are packed) */
@@ -65,16 +76,13 @@ class Pool {
   count = 0;
   constructor(geom: THREE.BufferGeometry, mat: THREE.Material, cap: number, parent: THREE.Object3D, name: string, extra = 0) {
     this.col = new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4);
-    this.col.setUsage(THREE.DynamicDrawUsage);
     geom.setAttribute('iColF', this.col);
     this.extra = null;
     if (extra) {
       this.extra = new THREE.InstancedBufferAttribute(new Float32Array(cap * extra), extra);
-      this.extra.setUsage(THREE.DynamicDrawUsage);
       geom.setAttribute('iAnim', this.extra);
     }
     this.mesh = new THREE.InstancedMesh(geom, mat, cap);
-    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.mesh.count = 0;
     this.mesh.frustumCulled = false;
     this.mesh.castShadow = true;
@@ -226,6 +234,9 @@ export class TrafficLayer implements Layer {
   private variants: CarVariant[] = [];
   private kindVariants: number[][] = [];
   private peds: Pool[] = [];
+  /** ring-1 stand-ins: one pool per sim kind / one for all pedestrians (no shadows) */
+  private carsLo: Pool[] = [];
+  private pedsLo: Pool | null = null;
   private ground!: GroundSampler;
   private ticksSent = 0;
   private stopsCount = 0;
@@ -282,12 +293,19 @@ export class TrafficLayer implements Layer {
       }
       this.kindVariants.push(idx);
     }
+    for (const [k, g] of carLowGeometries().entries()) {
+      const p = new Pool(packCar(g), cm, MAX_CARS, this.group, `carsLo-${k}`);
+      p.mesh.castShadow = false;
+      this.carsLo.push(p);
+    }
     const pm = pedMaterial();
     for (const [i, g] of pedestrianGeometries().entries()) {
       const p = new Pool(packPed(g), pm, MAX_PEDS, this.group, `pedestrians-${i}`, 3);
       p.mesh.castShadow = false;
       this.peds.push(p);
     }
+    this.pedsLo = new Pool(packPed(pedestrianLowGeometry()), pm, MAX_PEDS, this.group, 'pedestriansLo', 3);
+    this.pedsLo.mesh.castShadow = false;
     this.congestion = new CongestionOverlay(engine);
     this.congestion.bind((m) => this.post(m));
 
@@ -766,8 +784,11 @@ export class TrafficLayer implements Layer {
     const dtx = THREE.MathUtils.clamp((clock.simMs - snap.simMs) / 1000, 0, 0.12);
     const { f, u, count, oe, on } = snap;
     for (const p of this.cars) p.count = 0;
+    for (const p of this.carsLo) p.count = 0;
     const prevZ = this.zoff, nextZ = this.zoffNext;
     nextZ.clear();
+    const view = ctx.view;
+    const carNear2 = (CAR_NEAR * view.scale) ** 2;
     for (let i = 0; i < count; i++) {
       const o = i * CAR_STRIDE;
       const meta = u[o + 6];
@@ -775,26 +796,36 @@ export class TrafficLayer implements Layer {
       const flags = (meta >>> 16) & 0xff;
       const gbits = meta >>> 24;
       const id = u[o + 7];
-      const vars = this.kindVariants[kind < KINDS ? kind : 0];
-      let vi = vars[0];
-      if (vars.length > 1) {
-        const r = hash01(id);
-        // taxis are rare; other alternates split evenly
-        if (this.variants[vars[1]].key === 'taxi') vi = r < 0.04 ? vars[1] : vars[0];
-        else vi = vars[Math.floor(r * vars.length) % vars.length];
-      }
-      const pool = this.cars[vi];
-      const k = pool.count++;
       const h = f[o + 3], v = f[o + 5];
       const ch = Math.cos(h), sh = Math.sin(h);
-      const adv = flags & CAR_FLAG.PLAYER ? 0 : v * dtx;
+      const player = (flags & CAR_FLAG.PLAYER) !== 0;
+      const adv = player ? 0 : v * dtx;
       const e = f[o] + oe + ch * adv, n = f[o + 1] + on + sh * adv;
       const simZ = f[o + 2];
-      const structure = (gbits & 8) !== 0;
       const len = CAR_LENGTH[kind] ?? 4.7;
+      // frustum cull (generous radius: the sim elevation can differ from the drawn ground)
+      if (!player && !view.sphereEN(e, n, simZ, len * 0.5 + 4)) continue;
+      const dc2 = view.dist2EN(e, n, simZ);
+      const lo = !player && dc2 > carNear2;
+      let pool: Pool;
+      if (lo) {
+        pool = this.carsLo[kind < KINDS ? kind : 0];
+      } else {
+        const vars = this.kindVariants[kind < KINDS ? kind : 0];
+        let vi = vars[0];
+        if (vars.length > 1) {
+          const r = hash01(id);
+          // taxis are rare; other alternates split evenly
+          if (this.variants[vars[1]].key === 'taxi') vi = r < 0.04 ? vars[1] : vars[0];
+          else vi = vars[Math.floor(r * vars.length) % vars.length];
+        }
+        pool = this.cars[vi];
+      }
+      const k = pool.count++;
+      const structure = (gbits & 8) !== 0;
       // ground contact
       let z: number, pitch = f[o + 4], roll = 0;
-      const d2 = (e - camE) ** 2 + (n - camN) ** 2;
+      const d2 = lo ? Infinity : (e - camE) ** 2 + (n - camN) ** 2;
       const gc = G.at(e, n);
       if (d2 < near2 && Number.isFinite(gc)) {
         let target: number;
@@ -838,20 +869,26 @@ export class TrafficLayer implements Layer {
     }
     this.zoff = nextZ; this.zoffNext = prevZ;
     for (const p of this.cars) p.commit();
+    for (const p of this.carsLo) p.commit();
 
     const { pf, pu, pedCount } = snap;
     for (const p of this.peds) p.count = 0;
+    const pedsLo = this.pedsLo!;
+    pedsLo.count = 0;
+    const pedNear2 = (PED_NEAR * view.scale) ** 2, pedFar2 = (PED_FAR * view.scale) ** 2;
     for (let i = 0; i < pedCount; i++) {
       const o = i * PED_STRIDE;
+      const e = pf[o] + snap.oe, n = pf[o + 1] + snap.on;
+      const dp2 = view.dist2EN(e, n, pf[o + 2]);
+      if (dp2 > pedFar2 || !view.sphereEN(e, n, pf[o + 2] + 1, 3)) continue;
       const meta = pu[o + 5];
       const colour = meta & 0xff;
       const state = (meta >> 8) & 0xff;
       const structure = (meta >> 16) & 1;
-      const pool = this.peds[colour % this.peds.length];
+      const pool = dp2 > pedNear2 ? pedsLo : this.peds[colour % this.peds.length];
       const k = pool.count++;
       const h = pf[o + 3];
       const ch = Math.cos(h), sh = Math.sin(h);
-      const e = pf[o] + snap.oe, n = pf[o + 1] + snap.on;
       const g = structure ? NaN : G.at(e, n);
       // on the raised sidewalk except while crossing the carriageway
       const y = Number.isFinite(g) ? g + (state === 2 ? ROAD_LIFT : WALK_LIFT) : pf[o + 2] + 0.15;
@@ -868,6 +905,7 @@ export class TrafficLayer implements Layer {
       an[k * 3] = pf[o + 4]; an[k * 3 + 1] = h; an[k * 3 + 2] = state === 0 || state === 2 ? 1 : 0;
     }
     for (const p of this.peds) p.commit();
+    pedsLo.commit();
   }
 
   dispose() {
@@ -876,7 +914,7 @@ export class TrafficLayer implements Layer {
     window.removeEventListener('blur', this.onBlur);
     this.worker?.terminate();
     this.worker = null;
-    for (const p of [...this.cars, ...this.peds]) {
+    for (const p of [...this.cars, ...this.carsLo, ...this.peds, ...(this.pedsLo ? [this.pedsLo] : [])]) {
       p.mesh.geometry.dispose();
       p.mesh.dispose();
     }

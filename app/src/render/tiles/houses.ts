@@ -1,5 +1,7 @@
 // House archetypes (SPEC h_type) as unit models + global instanced pools with
 // slot allocation. Instance transforms are anchor-relative (floating origin).
+// Two detail levels: full archetypes (shadow casters) for tiles in the near
+// rings, a 12-triangle block with a hip roof for distant tiles (no shadows).
 import * as THREE from 'three/webgpu';
 import type { HouseBuf } from '../../workers/meshing';
 import { vertexColorMaterial } from './materials';
@@ -115,6 +117,27 @@ export function houseGeometry(type: number): THREE.BufferGeometry {
   return g.build();
 }
 
+/** distant-house stand-in: walls + low pyramid roof (12 triangles) */
+export function houseLowGeometry(type: number): THREE.BufferGeometry {
+  const g = new GeoBuilder();
+  const eave = type === 5 ? 0.92 : type === 3 ? 0.8 : 0.64;
+  // walls without the below-ground skirt (slopes are invisible from afar)
+  const b: V3[] = [[-0.5, 0, 0.5], [0.5, 0, 0.5], [0.5, 0, -0.5], [-0.5, 0, -0.5]];
+  for (let i = 0; i < 4; i++) {
+    const p = b[i], q = b[(i + 1) % 4];
+    g.quad([p[0], -0.1, p[2]], [q[0], -0.1, q[2]], [q[0], eave, q[2]], [p[0], eave, p[2]], WALL);
+  }
+  if (type === 5) flatRoof(g, eave, [0.5, 0.49, 0.47]);
+  else {
+    const top: V3 = [0, 1, 0];
+    for (let i = 0; i < 4; i++) {
+      const p = b[i], q = b[(i + 1) % 4];
+      g.tri([p[0], eave, p[2]], [q[0], eave, q[2]], top, ROOF);
+    }
+  }
+  return g.build();
+}
+
 // Toronto-ish house colours: red/buff brick, siding, stucco
 const HOUSE_COLORS = [
   0xb98a74, 0xa8796a, 0xc9a58a, 0xdccbab, 0xd3c09d, 0xe8e3d8, 0xc8cdcf, 0xaab3b8,
@@ -131,6 +154,7 @@ const _c = new THREE.Color();
 const _up = new THREE.Vector3(0, 1, 0);
 
 interface TileHouses {
+  pools: Pool[];
   originE: number;
   originN: number;
   data: HouseBuf;
@@ -149,22 +173,25 @@ class Pool {
   geometry: THREE.BufferGeometry;
   material: THREE.Material;
   parent: THREE.Object3D;
-  constructor(geometry: THREE.BufferGeometry, material: THREE.Material, cap: number, parent: THREE.Object3D) {
-    this.geometry = geometry; this.material = material; this.parent = parent;
+  shadows: boolean;
+  /** slot range written since the last flush (uploads only that range) */
+  lo = Infinity;
+  hi = -1;
+  mark(s: number) { if (s < this.lo) this.lo = s; if (s > this.hi) this.hi = s; }
+  constructor(geometry: THREE.BufferGeometry, material: THREE.Material, cap: number, parent: THREE.Object3D, shadows = true) {
+    this.geometry = geometry; this.material = material; this.parent = parent; this.shadows = shadows;
     this.cap = cap;
     this.mesh = this.makeMesh(cap);
     this.slotEntry = new Int32Array(cap);
   }
   private makeMesh(cap: number) {
     const m = new THREE.InstancedMesh(this.geometry, this.material, cap);
-    m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     m.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(cap * 3), 3);
-    m.instanceColor.setUsage(THREE.DynamicDrawUsage);
     m.count = 0;
     m.frustumCulled = false;
-    m.castShadow = true;
+    m.castShadow = this.shadows;
     m.receiveShadow = true;
-    m.name = 'houses';
+    m.name = this.shadows ? 'houses' : 'housesLo';
     this.parent.add(m);
     return m;
   }
@@ -189,6 +216,7 @@ class Pool {
 
 export class HousePools {
   pools: Pool[] = [];
+  poolsLo: Pool[] = [];
   tiles = new Map<string, TileHouses>();
   group = new THREE.Group();
   private anchorE = 0;
@@ -199,27 +227,35 @@ export class HousePools {
     this.group.name = 'housePools';
     const mat = vertexColorMaterial('houses');
     for (let t = 0; t < HOUSE_TYPES; t++) this.pools.push(new Pool(houseGeometry(t), mat, 4096, this.group));
+    for (let t = 0; t < HOUSE_TYPES; t++) this.poolsLo.push(new Pool(houseLowGeometry(t), mat, 4096, this.group, false));
   }
 
   get instanceCount() {
-    return this.pools.reduce((s, p) => s + p.count, 0);
+    return this.pools.reduce((s, p) => s + p.count, 0) + this.poolsLo.reduce((s, p) => s + p.count, 0);
+  }
+
+  /** detail level a tile's houses are drawn at (undefined = not shown) */
+  levelOf(key: string): 'hi' | 'lo' | undefined {
+    const t = this.tiles.get(key);
+    return t ? (t.pools === this.pools ? 'hi' : 'lo') : undefined;
   }
 
   /** place the pools at a new anchor (world E,N) and rewrite all instances */
   rebase(e: number, n: number) {
     this.anchorE = e; this.anchorN = n;
-    for (const p of this.pools) p.mesh.position.set(e, 0, -n);
+    for (const p of [...this.pools, ...this.poolsLo]) p.mesh.position.set(e, 0, -n);
     for (const t of this.tiles.values()) this.writeTile(t);
     this.dirty = true;
   }
 
-  add(key: string, originE: number, originN: number, data: HouseBuf) {
+  add(key: string, originE: number, originN: number, data: HouseBuf, lo = false) {
     if (this.tiles.has(key) || data.count === 0) return;
     const perType: number[][] = Array.from({ length: HOUSE_TYPES }, () => []);
     for (let i = 0; i < data.count; i++) perType[Math.min(data.type[i], HOUSE_TYPES - 1)].push(i);
-    const t: TileHouses = { originE, originN, data, slots: [], items: [] };
+    const pools = lo ? this.poolsLo : this.pools;
+    const t: TileHouses = { pools, originE, originN, data, slots: [], items: [] };
     for (let k = 0; k < HOUSE_TYPES; k++) {
-      const pool = this.pools[k];
+      const pool = pools[k];
       const items = Int32Array.from(perType[k]);
       pool.ensure(pool.count + items.length);
       const slots = new Int32Array(items.length);
@@ -242,7 +278,7 @@ export class HousePools {
     const t = this.tiles.get(key);
     if (!t) return;
     for (let k = 0; k < HOUSE_TYPES; k++) {
-      const pool = this.pools[k];
+      const pool = t.pools[k];
       const mArr = pool.mesh.instanceMatrix.array as Float32Array;
       const cArr = pool.mesh.instanceColor!.array as Float32Array;
       const slots = t.slots[k];
@@ -252,6 +288,7 @@ export class HousePools {
         if (s !== last) {
           mArr.copyWithin(s * 16, last * 16, last * 16 + 16);
           cArr.copyWithin(s * 3, last * 3, last * 3 + 3);
+          pool.mark(s);
           const owner = pool.slotTile[last]!;
           const entry = pool.slotEntry[last];
           owner.slots[k][entry] = s;
@@ -271,12 +308,13 @@ export class HousePools {
     const d = t.data;
     const ox = t.originE - this.anchorE, on = t.originN - this.anchorN;
     for (let k = 0; k < HOUSE_TYPES; k++) {
-      const pool = this.pools[k];
+      const pool = t.pools[k];
       const mArr = pool.mesh.instanceMatrix.array as Float32Array;
       const cArr = pool.mesh.instanceColor!.array as Float32Array;
       const items = t.items[k], slots = t.slots[k];
       for (let j = 0; j < items.length; j++) {
         const i = items[j], s = slots[j];
+        pool.mark(s);
         _p.set(ox + d.xy[i * 2], d.base[i], -(on + d.xy[i * 2 + 1]));
         _q.setFromAxisAngle(_up, d.angle[i]);
         _s.set(Math.max(d.len[i], 2), Math.max(d.height[i], 2), Math.max(d.wid[i], 2));
@@ -293,9 +331,13 @@ export class HousePools {
   /** push pending changes to the GPU (call once per frame) */
   flush() {
     if (!this.dirty) return;
-    for (const p of this.pools) {
-      p.mesh.instanceMatrix.needsUpdate = true;
-      p.mesh.instanceColor!.needsUpdate = true;
+    for (const p of [...this.pools, ...this.poolsLo]) {
+      if (p.hi < p.lo) continue;
+      const lo = p.lo, n = Math.min(p.hi, p.cap - 1) - lo + 1;
+      const im = p.mesh.instanceMatrix, ic = p.mesh.instanceColor!;
+      im.clearUpdateRanges(); im.addUpdateRange(lo * 16, n * 16); im.needsUpdate = true;
+      ic.clearUpdateRanges(); ic.addUpdateRange(lo * 3, n * 3); ic.needsUpdate = true;
+      p.lo = Infinity; p.hi = -1;
     }
     this.dirty = false;
   }
@@ -305,7 +347,7 @@ export class HousePools {
   }
 
   dispose() {
-    for (const p of this.pools) {
+    for (const p of [...this.pools, ...this.poolsLo]) {
       p.mesh.dispose();
       p.geometry.dispose();
     }

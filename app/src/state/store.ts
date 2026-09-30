@@ -28,6 +28,18 @@ export interface EngineStats {
   cameraN: number;
   heading: number; // radians, 0 = north, CW positive
   metersPerPixel: number;
+  /** current detail level of the quality governor */
+  quality: string;
+}
+
+export type QualityMode = 'auto' | 'high' | 'medium' | 'low';
+
+function savedQuality(): QualityMode {
+  try {
+    const q = new URLSearchParams(location.search).get('quality') ?? localStorage.getItem('quality');
+    if (q === 'auto' || q === 'high' || q === 'medium' || q === 'low') return q;
+  } catch { /* storage blocked */ }
+  return 'auto';
 }
 
 export interface AppState {
@@ -38,6 +50,7 @@ export interface AppState {
   analytics: Record<AnalyticsKey, boolean>;
   analyticsMode: boolean;
   shadows: boolean;
+  quality: QualityMode;
   selected: SelectedEntity | null;
   stats: EngineStats;
   // actions
@@ -50,6 +63,7 @@ export interface AppState {
   toggleAnalytics(k: AnalyticsKey): void;
   setAnalyticsMode(v: boolean): void;
   setShadows(v: boolean): void;
+  setQuality(q: QualityMode): void;
   select(e: SelectedEntity | null): void;
   setStats(s: EngineStats): void;
 }
@@ -65,11 +79,12 @@ export const useApp = create<AppState>((set, get) => ({
   },
   analyticsMode: false,
   shadows: true,
+  quality: savedQuality(),
   selected: null,
   stats: {
     fps: 0, frameMs: 0, drawCalls: 0, triangles: 0, tilesLoaded: 0, tilesVisible: 0,
     tilesPending: 0, gpuMB: 0, backend: '', altitude: 0, cameraE: 0, cameraN: 0, heading: 0,
-    metersPerPixel: 1,
+    metersPerPixel: 1, quality: '',
   },
   togglePlay: () => set((s) => ({ playing: !s.playing })),
   setSpeedIndex: (i) => set({ speedIndex: Math.max(0, Math.min(SPEEDS.length - 1, i)), playing: i > 0 ? true : get().playing }),
@@ -80,6 +95,7 @@ export const useApp = create<AppState>((set, get) => ({
   toggleAnalytics: (k) => set((s) => ({ analytics: { ...s.analytics, [k]: !s.analytics[k] } })),
   setAnalyticsMode: (v) => set({ analyticsMode: v }),
   setShadows: (v) => set({ shadows: v }),
+  setQuality: (q) => { try { localStorage.setItem('quality', q); } catch { /* */ } set({ quality: q }); },
   select: (e) => set({ selected: e }),
   setStats: (stats) => set({ stats }),
 }));

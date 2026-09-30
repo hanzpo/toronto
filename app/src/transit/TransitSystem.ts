@@ -43,6 +43,8 @@ export interface LoadOptions {
   kinds?: ('rail' | 'bus')[];
   /** called after each file is decoded (rail files are loaded first) */
   onFeed?: (agency: string, kind: 'rail' | 'bus') => void;
+  /** awaited before the (large) bus files are fetched, e.g. until the first view has loaded */
+  beforeBus?: () => Promise<void>;
 }
 
 /** Reusable SoA output of evaluate(). Only the first `count` entries are valid. */
@@ -130,6 +132,8 @@ interface FeedRt {
   stopPatK?: Uint32Array; // position of the stop within the pattern
   patTripOff?: Uint32Array;
   patTripVal?: Uint32Array;
+  /** per pattern: shape bounding box minX, minY, maxX, maxY (lazy, for evaluate culling) */
+  patBox?: Float32Array;
 }
 
 const HALF_LEN = 6; // m: heading/pitch from positions ±HALF_LEN along the shape
@@ -206,13 +210,16 @@ export class TransitSystem {
     const rail = jobs.filter((j) => j.kind === 'rail');
     const bus = jobs.filter((j) => j.kind === 'bus');
     for (const group of [rail, bus]) {
+      if (group === bus && bus.length && opts.beforeBus) await opts.beforeBus();
       const bufs = await Promise.all(group.map((j) => this.loader.binary(j.file)));
-      group.forEach((j, i) => {
+      for (let i = 0; i < group.length; i++) {
         const b = bufs[i];
-        if (!b) return;
+        if (!b) continue;
+        // one feed per task: decoding every file back to back is a multi-100 ms long task
+        if (i > 0) await new Promise<void>((r) => setTimeout(r, 0));
         this.addFeed(decodeFeed(b));
-        opts.onFeed?.(j.agency, j.kind);
-      });
+        opts.onFeed?.(group[i].agency, group[i].kind);
+      }
     }
   }
 
@@ -267,16 +274,44 @@ export class TransitSystem {
     return out;
   }
 
+  /**
+   * Skip trips whose whole pattern lies outside this box (E/N metres) in
+   * evaluate(), e.g. far beyond anything drawn at street level; null = all.
+   */
+  setEvalBounds(b: [number, number, number, number] | null): void {
+    this.evalBounds = b;
+  }
+  private evalBounds: [number, number, number, number] | null = null;
+
+  private patternBoxes(fr: FeedRt): Float32Array {
+    if (fr.patBox) return fr.patBox;
+    const f = fr.f, nP = f.patStopOff.length - 1;
+    const box = new Float32Array(nP * 4);
+    for (let p = 0; p < nP; p++) {
+      const g = f.patShape[p], v0 = f.shapeOff[g], v1 = f.shapeOff[g + 1];
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (let v = v0; v < v1; v++) {
+        const x = f.shapeXYZ[v * 3], y = f.shapeXYZ[v * 3 + 1];
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+      }
+      box[p * 4] = x0; box[p * 4 + 1] = y0; box[p * 4 + 2] = x1; box[p * 4 + 3] = y1;
+    }
+    return (fr.patBox = box);
+  }
+
   private evalFeed(fr: FeedRt, tt: number, out: VehicleBuffers): void {
     const f = fr.f;
     const start = f.tripStart;
     const lo = lowerBound(start, tt - f.maxDuration);
     const hi = upperBound(start, tt);
     const mask = this.modeMask;
+    const eb = this.evalBounds;
+    const box = eb ? this.patternBoxes(fr) : null;
     for (let i = lo; i < hi; i++) {
       if (f.tripEnd[i] < tt) continue;
       const p = f.tripPattern[i];
       if (!(mask & (1 << f.patMode[p]))) continue;
+      if (box && eb && (box[p * 4] > eb[2] || box[p * 4 + 2] < eb[0] || box[p * 4 + 1] > eb[3] || box[p * 4 + 3] < eb[1])) continue;
       if (out.count >= out.capacity) growBuffers(out);
       this.evalTrip(fr, i, tt, out, out.count);
       out.count++;

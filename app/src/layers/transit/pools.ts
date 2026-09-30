@@ -24,10 +24,8 @@ class Pool {
     this.geom = geom; this.mat = mat; this.parent = parent; this.shadows = shadows;
     this.capacity = cap;
     this.col = new THREE.InstancedBufferAttribute(new Float32Array(cap * 4), 4);
-    this.col.setUsage(THREE.DynamicDrawUsage);
     geom.setAttribute('iColF', this.col);
     this.mesh = new THREE.InstancedMesh(geom, mat, cap);
-    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.mesh.count = 0;
     this.mesh.frustumCulled = false;
     this.mesh.castShadow = shadows;
@@ -43,11 +41,9 @@ class Pool {
     const m = new Float32Array(cap * 16); m.set(old.instanceMatrix.array as Float32Array);
     const c = new Float32Array(cap * 4); c.set(this.col.array as Float32Array);
     this.col = new THREE.InstancedBufferAttribute(c, 4);
-    this.col.setUsage(THREE.DynamicDrawUsage);
     this.geom.setAttribute('iColF', this.col);
     const mesh = new THREE.InstancedMesh(this.geom, this.mat, cap);
     (mesh.instanceMatrix.array as Float32Array).set(m);
-    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.frustumCulled = false;
     mesh.castShadow = this.shadows;
     mesh.receiveShadow = this.shadows;

@@ -1,7 +1,7 @@
 // Tile worker: fetch + gunzip + decode TBN1 + build transferable geometry.
 import { decodeTbn } from '../data/tbn';
 
-import { buildBuildings, buildRail, buildRoads, buildTerrain, extractHouses, TerrainSampler, type MeshBuf, type TileMeshes } from './meshing';
+import { buildBuildings, buildRail, buildRoads, buildTerrain, concatMeshes, extractHouses, TerrainSampler, type MeshBuf, type TileMeshes } from './meshing';
 import { buildStreet } from './street';
 
 export type WorkerIn =
@@ -11,13 +11,16 @@ export type WorkerIn =
   | { type: 'cancel'; id: number };
 
 export type WorkerOut =
-  | { type: 'done'; id: number; result: TileMeshes; ms: { fetch: number; mesh: number } }
+  | { type: 'done'; id: number; result: TileMeshes; ms: { fetch: number; mesh: number }; src: TileSource }
   | { type: 'empty'; id: number }
   | { type: 'cancelled'; id: number }
   | { type: 'prefetched'; url: string }
   | { type: 'error'; id: number; message: string };
 
 let suppress = new Set<number>();
+/** where tile bytes came from: local Cache Storage, CDN edge cache, or R2 (edge miss) */
+export type TileSource = 'local' | 'edge' | 'origin';
+const sources = new Map<string, TileSource>();
 
 // ---------------------------------------------------------------- persistent tile cache
 // Compressed tile bytes live in Cache Storage keyed by data build, so revisits
@@ -43,8 +46,9 @@ function tileBytes(url: string): Promise<ArrayBuffer | null> {
   p = (async () => {
     const cache = await cacheP;
     const hit = cache ? await cache.match(url).catch(() => undefined) : undefined;
-    if (hit) return hit.arrayBuffer();
+    if (hit) { sources.set(url, 'local'); return hit.arrayBuffer(); }
     const res = await fetch(url);
+    sources.set(url, /cache;desc=hit/.test(res.headers.get('server-timing') ?? '') ? 'edge' : 'origin');
     if (res.status === 404) return null;
     if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`);
     const buf = await res.arrayBuffer();
@@ -62,6 +66,8 @@ async function gunzipBytes(raw: ArrayBuffer): Promise<ArrayBuffer> {
   return new Response(ds).arrayBuffer();
 }
 const jobs = new Map<number, AbortController>();
+/** urls of in-flight loads (a prefetch must not drop their source record) */
+const jobsByUrl = new Set<string>();
 
 function transfers(m: MeshBuf | null, out: Transferable[]) {
   if (!m) return;
@@ -78,7 +84,7 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     return;
   }
   if (msg.type === 'prefetch') {
-    tileBytes(msg.url).catch(() => null).finally(() => post({ type: 'prefetched', url: msg.url }));
+    tileBytes(msg.url).catch(() => null).finally(() => { if (!jobsByUrl.has(msg.url)) sources.delete(msg.url); post({ type: 'prefetched', url: msg.url }); });
     return;
   }
   if (msg.type === 'cancel') {
@@ -88,6 +94,7 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
   const { id, url, level, size, grid } = msg;
   const ac = new AbortController();
   jobs.set(id, ac);
+  jobsByUrl.add(url);
   const t0 = performance.now();
   try {
     const raw = await tileBytes(url);
@@ -106,21 +113,25 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     const rail = buildRail(a, sampler, level);
     const houses = level === 0 ? extractHouses(a, suppress) : null;
     const street = level === 0 ? buildStreet(a, roads.streets, roads.junctions, sampler, ground, msg.tx, msg.ty) : null;
+    const street3d = concatMeshes(roads.mesh, rail.mesh);
     const result: TileMeshes = {
       terrain: terr.mesh, heights: terr.heights, grid: G, ground, minH: terr.minH, maxH: Math.max(terr.maxH, 0),
-      buildings: bld.mesh, roads: roads.mesh, rail: rail.mesh, houses, street,
+      buildings: bld.mesh, roads: street3d, railStart: roads.mesh ? roads.mesh.index.length : 0, houses, street,
       counts: { buildings: bld.count, houses: houses?.count ?? 0, roads: roads.count, rails: rail.count },
     };
     const tr: Transferable[] = [terr.heights.buffer, ground.buffer];
-    transfers(terr.mesh, tr); transfers(bld.mesh, tr); transfers(roads.mesh, tr); transfers(rail.mesh, tr);
+    transfers(terr.mesh, tr); transfers(bld.mesh, tr); transfers(street3d, tr);
     if (street) tr.push(street.trees.buffer, street.lamps.buffer, street.signals.buffer, street.signalIds.buffer);
     if (houses) tr.push(houses.xy.buffer, houses.base.buffer, houses.angle.buffer, houses.len.buffer, houses.wid.buffer, houses.height.buffer, houses.type.buffer, houses.variant.buffer);
-    post({ type: 'done', id, result, ms: { fetch: t1 - t0, mesh: performance.now() - t1 } }, tr);
+    const src = sources.get(url) ?? 'local';
+    sources.delete(url);
+    post({ type: 'done', id, result, ms: { fetch: t1 - t0, mesh: performance.now() - t1 }, src }, tr);
   } catch (e) {
     if (ac.signal.aborted) post({ type: 'cancelled', id });
     else post({ type: 'error', id, message: String((e as Error)?.stack ?? e) });
   } finally {
     jobs.delete(id);
+    jobsByUrl.delete(url);
   }
 };
 

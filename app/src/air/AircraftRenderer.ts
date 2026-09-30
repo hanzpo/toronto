@@ -21,6 +21,8 @@ interface TypeMesh {
   /** interleaved per-instance data: 5 livery colours (rgb) + gear (1) = 16 floats */
   data: THREE.InstancedInterleavedBuffer;
   count: number;
+  /** an instance is within shadow range this frame */
+  near: boolean;
 }
 
 export interface DrawnPlane { idx: number; e: number; n: number; h: number; yaw: number; pitch: number; len: number; scale: number }
@@ -80,7 +82,6 @@ export class AircraftRenderer {
     this.lPos = new THREE.InstancedBufferAttribute(new Float32Array(LIGHT_CAP * 3), 3);
     this.lCol = new THREE.InstancedBufferAttribute(new Float32Array(LIGHT_CAP * 3), 3);
     this.lSize = new THREE.InstancedBufferAttribute(new Float32Array(LIGHT_CAP), 1);
-    for (const a of [this.lPos, this.lCol, this.lSize]) a.setUsage(THREE.DynamicDrawUsage);
     const lm = new THREE.SpriteNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
     lm.name = 'aircraft-lights';
     lm.positionNode = instancedBufferAttribute(this.lPos);
@@ -106,18 +107,16 @@ export class AircraftRenderer {
     const g = model.geometry.clone();
     // one interleaved vertex buffer (WebGPU allows only 8 vertex buffers per pipeline)
     const data = new THREE.InstancedInterleavedBuffer(new Float32Array(CAP * 16), 16);
-    data.setUsage(THREE.DynamicDrawUsage);
     ['iFuse', 'iTail', 'iBelly', 'iAccent', 'iEngine'].forEach((n, k) => g.setAttribute(n, new THREE.InterleavedBufferAttribute(data, 3, k * 3)));
     g.setAttribute('iGear', new THREE.InterleavedBufferAttribute(data, 1, 15));
     const mesh = new THREE.InstancedMesh(g, this.material, CAP);
-    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     mesh.count = 0;
     mesh.frustumCulled = false;
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     mesh.name = `aircraft-${code}`;
     this.root.add(mesh);
-    t = { model, mesh, data, count: 0 };
+    t = { model, mesh, data, count: 0, near: false };
     this.types.set(code, t);
     return t;
   }
@@ -126,7 +125,7 @@ export class AircraftRenderer {
   update(ctx: FrameContext, planes: AirPlane[], count: number, visible: boolean, selectedKey: string | null) {
     const anchor = ctx.anchor.origin;
     this.root.position.copy(anchor);
-    for (const t of this.types.values()) t.count = 0;
+    for (const t of this.types.values()) { t.count = 0; t.near = false; }
     this.lCount = 0;
     this.drawn.length = 0;
     this.root.visible = visible;
@@ -138,7 +137,6 @@ export class AircraftRenderer {
       const pl = planes[i];
       const t = this.typeMesh(pl.type);
       if (t.count >= CAP) continue;
-      const k = t.count++;
       const p = pl.pose;
       const x = p.e - anchor.x, y = p.h, z = -p.n - anchor.z;
       const dist = Math.hypot(p.e - cam.x, p.h - cam.y, -p.n - cam.z);
@@ -146,6 +144,11 @@ export class AircraftRenderer {
       const onGround = p.phase < 5 || p.phase >= 10;
       const minPx = pl.key === selectedKey ? 16 : pl.kind === 'park' ? 0 : onGround ? this.groundMinPixels : this.minPixels;
       const s = Math.max(1, (minPx * dist) / (ctx.pixelScale * L));
+      // off-screen: no instance, no lights (the landing-light glow sprites are ~10 m)
+      if (!ctx.view.sphere(p.e, p.h, -p.n, L * s * 0.6 + 12)) continue;
+      const k = t.count++;
+      // only aircraft near the camera can land in the (≤ 1.8 km) shadow map
+      if (dist < 2500) t.near = true;
       _eul.set(p.bank, p.yaw, p.pitch, 'YZX');
       _q.setFromEuler(_eul);
       _p.set(x, y, z);
@@ -217,6 +220,7 @@ export class AircraftRenderer {
         t.data.clearUpdateRanges(); t.data.addUpdateRange(0, t.count * 16); t.data.needsUpdate = true;
       }
       t.mesh.visible = t.count > 0;
+      t.mesh.castShadow = t.near;
     }
     this.lights.count = this.lCount;
     this.lights.visible = this.lCount > 0;

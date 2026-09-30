@@ -100,6 +100,7 @@ export class TransitLayer implements Layer {
   private nextSpeed = new Map<number, number>();
   private pose: CarPose = { e: 0, n: 0, z: 0, heading: 0, pitch: 0 };
   private ax = 0; private az = 0;
+  private evalBox: [number, number, number, number] = [0, 0, 0, 0];
   /** stats: cars drawn individually / vehicles held */
   stats = { cars: 0, held: 0, near: 0 };
 
@@ -135,12 +136,26 @@ export class TransitLayer implements Layer {
     if (p === this.profile || this.loading) return;
     this.loading = true;
     try {
-      await this.system.load(p, { onFeed: () => this.onFeedLoaded() });
+      // bus schedules (most of the bytes) wait for the first view's tiles
+      await this.system.load(p, { onFeed: () => this.onFeedLoaded(), beforeBus: () => this.firstView() });
       this.profile = p;
       this.onFeedLoaded();
     } finally {
       this.loading = false;
     }
+  }
+
+  /** resolves when the first tiles have loaded (or after 5 s) */
+  private firstView(): Promise<void> {
+    const t0 = performance.now();
+    return new Promise((resolve) => {
+      const poll = () => {
+        const t = this.engine.tiles;
+        if ((t.readyCount > 0 && !t.busy) || performance.now() - t0 > 5000) resolve();
+        else setTimeout(poll, 100);
+      };
+      poll();
+    });
   }
 
   private onFeedLoaded() {
@@ -184,6 +199,14 @@ export class TransitLayer implements Layer {
     this.stats.near = 0;
     if (an.vehicles && this.system.tripCount > 0) {
       this.lastT = clock.serviceDay().sec;
+      // low views: only evaluate trips whose route passes within reach of
+      // anything drawn (markers stop at markerMax); from high up, everything
+      if (ctx.altitude < 1500) {
+        const R = Math.max(ctx.view.r2 * 2.5, ctx.altitude * 40) + 2000;
+        const cE = ctx.cameraPos.x, cN = -ctx.cameraPos.z;
+        this.evalBox[0] = cE - R; this.evalBox[1] = cN - R; this.evalBox[2] = cE + R; this.evalBox[3] = cN + R;
+        this.system.setEvalBounds(this.evalBox);
+      } else this.system.setEvalBounds(null);
       const v = this.system.evaluate(this.lastT);
       const near = ctx.altitude < 3000;
       if (this.drawn.length < v.capacity) this.drawn = new Uint8Array(v.capacity);
@@ -230,14 +253,23 @@ export class TransitLayer implements Layer {
       // --- draw
       const next = this.nextSpeed;
       next.clear();
+      const view = ctx.view;
+      // markers beyond this are hidden at street level (far below a pixel / behind the skyline)
+      const markerMax = Math.max(view.r2 * 2.5, ctx.altitude * 40);
+      const pxK = 1 / Math.max(1, ctx.pixelScale);
       for (let i = 0; i < v.count; i++) {
         const mode = MODE_LIST_BY_ID[v.mode[i]];
         if (!mode) continue;
         if (!near && !an[STYLE[mode].key]) continue;
         if (this.overrides.size && this.overrides.has(v.trip[i])) continue;
+        const dc = Math.hypot(v.x[i] - camE, v.y[i] - camN);
+        if (dc > markerMax) continue;
+        const sty = STYLE[mode];
+        // bounding radius: the consist (plus hold slack) or the min-pixel marker
+        const rad = near && dc < NEAR ? sty.size[0] + 60 : Math.max(sty.size[0], sty.minPixels * 2 * dc * pxK);
+        if (!view.sphereEN(v.x[i], v.y[i], v.z[i], rad)) continue;
         this.drawn[i] = 1;
         const color = this.routeColor[v.route[i]] ?? 0xffffff;
-        const dc = Math.hypot(v.x[i] - camE, v.y[i] - camN);
         if (near && dc < NEAR) {
           const shape = this.system.patternShape(v.pattern[i]);
           if (shape) {

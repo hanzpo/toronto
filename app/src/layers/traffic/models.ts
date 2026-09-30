@@ -498,3 +498,52 @@ const SHIRTS = [
   0xd46a3a, 0x7b7f86, 0xb5b0a5, 0x274d6e,
 ];
 export const shirtPalette = SHIRTS.map((c) => new THREE.Color(c));
+
+// ------------------------------------------------------------------ low detail (ring 1+)
+/** [height, cabin start (fraction of length from the rear), cabin end] per sim kind */
+const LO_SHAPE: [number, number, number][] = [
+  [1.45, 0.22, 0.62], [1.5, 0.12, 0.6], [1.76, 0.12, 0.66], [1.85, 0.3, 0.62], [2.0, 0.04, 0.8], [3.3, 0, 0.78],
+];
+const LO_HW = [0.92, 0.9, 0.98, 1.01, 1.0, 1.25];
+let _lo: THREE.BufferGeometry[] | null = null;
+/**
+ * ~30-triangle stand-ins per sim vehicle kind for distant traffic: tinted body,
+ * glass cabin, head / tail lamp decals (so night traffic still reads).
+ */
+export function carLowGeometries(): THREE.BufferGeometry[] {
+  return (_lo ??= CAR_LENGTH.map((L, k) => {
+    const b = new MeshBuilder();
+    const [h, c0, c1] = LO_SHAPE[k];
+    const hw = LO_HW[k], x0 = -L / 2, x1 = L / 2;
+    if (k === 5) {
+      // box truck: cab + cargo box
+      b.box(x0, x1 - 2.1, 0.45, h, -hw, hw, BODY);
+      b.box(x1 - 2.1, x1, 0.35, 2.2, -hw * 0.95, hw * 0.95, BODY, 0, 'bottom back');
+      b.box(x1 - 1.3, x1 + 0.01, 1.35, 2.0, -hw * 0.9, hw * 0.9, GLASS, 0, 'bottom back top left right');
+    } else {
+      const belt = h * (k === 4 ? 0.5 : 0.6);
+      b.box(x0, x1, 0.22, belt, -hw, hw, BODY);
+      const cx0 = x0 + L * c0, cx1 = x0 + L * c1;
+      b.taperBox(cx0, cx1, belt, h, hw * 0.96, k === 4 ? 0.05 : 0.25, 0.12, GLASS);
+    }
+    b.box(x1 + 0.005, x1 + 0.01, 0.55, 0.72, -hw * 0.85, -hw * 0.45, HEAD, 0, 'bottom top back left right');
+    b.box(x1 + 0.005, x1 + 0.01, 0.55, 0.72, hw * 0.45, hw * 0.85, HEAD, 0, 'bottom top back left right');
+    b.box(x0 - 0.01, x0 - 0.005, 0.7, 0.9, -hw * 0.9, hw * 0.9, TAIL, 0, 'bottom top front left right');
+    return finalize(b);
+  }));
+}
+
+let _pedLo: THREE.BufferGeometry | null = null;
+/** ~20-triangle pedestrian (legs, tinted torso, head) for ring 1; `limb` = 0 (no walk cycle). */
+export function pedestrianLowGeometry(): THREE.BufferGeometry {
+  if (_pedLo) return _pedLo;
+  const b = new MeshBuilder();
+  b.setExtra('limb', 0); b.setExtra('pivot', 0);
+  b.box(-0.09, 0.09, 0, 0.9, -0.16, 0.16, rgb(0x2b3446));
+  b.box(-0.12, 0.12, 0.9, 1.45, -0.21, 0.21, paint(0xffffff, { liv: 1 }), 0, 'bottom');
+  b.box(-0.09, 0.09, 1.5, 1.72, -0.08, 0.08, rgb(0xa47a5c), 0, 'bottom');
+  const g = b.build();
+  g.setAttribute('tint', g.attributes.livery);
+  g.computeBoundingSphere();
+  return (_pedLo = g);
+}

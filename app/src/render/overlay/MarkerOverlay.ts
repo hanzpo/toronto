@@ -81,8 +81,6 @@ export class MarkerOverlay {
     this.world = new Float64Array(this.capacity * 3);
     this.iPos = new THREE.InstancedBufferAttribute(new Float32Array(this.capacity * 4), 4);
     this.iCol = new THREE.InstancedBufferAttribute(new Float32Array(this.capacity * 3), 3);
-    this.iPos.setUsage(THREE.DynamicDrawUsage);
-    this.iCol.setUsage(THREE.DynamicDrawUsage);
     g.setAttribute('iPos', this.iPos);
     g.setAttribute('iCol', this.iCol);
     g.instanceCount = 0;

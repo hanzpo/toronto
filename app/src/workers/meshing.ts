@@ -34,11 +34,37 @@ export interface TileMeshes {
   minH: number;
   maxH: number;
   buildings: MeshBuf | null;
+  /** roads, sidewalks and (appended) rail: one draw; rail indices start at `railStart` */
   roads: MeshBuf | null;
-  rail: MeshBuf | null;
+  railStart: number;
   houses: HouseBuf | null;
   street: import('./street').StreetBuf | null;
   counts: { buildings: number; houses: number; roads: number; rails: number };
+}
+
+/**
+ * Concatenate two meshes with identical attribute layouts (roads + rail share
+ * the street material, so they become one draw call per tile).
+ */
+export function concatMeshes(a: MeshBuf | null, b: MeshBuf | null): MeshBuf | null {
+  if (!a || !b) return a ?? b;
+  const na = a.position.length / 3, nb = b.position.length / 3;
+  const cat = <T extends Float32Array | Int8Array | Uint8Array>(x: T, y: T): T => {
+    const o = new (x.constructor as new (n: number) => T)(x.length + y.length);
+    o.set(x); o.set(y, x.length);
+    return o;
+  };
+  const n = na + nb;
+  const index = n < 65536 ? new Uint16Array(a.index.length + b.index.length) : new Uint32Array(a.index.length + b.index.length);
+  index.set(a.index);
+  for (let i = 0; i < b.index.length; i++) index[a.index.length + i] = b.index[i] + na;
+  const out: MeshBuf = { position: cat(a.position, b.position), normal: cat(a.normal, b.normal), index };
+  if (a.color && b.color) out.color = cat(a.color, b.color);
+  if (a.attrs && b.attrs) {
+    out.attrs = {};
+    for (const k in a.attrs) if (b.attrs[k]) out.attrs[k] = { array: cat(a.attrs[k].array, b.attrs[k].array), size: a.attrs[k].size };
+  }
+  return out;
 }
 
 // --------------------------------------------------------------------------- growable builder

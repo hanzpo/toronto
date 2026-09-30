@@ -37,8 +37,11 @@ export interface Tile {
   group: THREE.Group | null;
   terrain: THREE.Mesh | null;
   buildings: THREE.Mesh | null;
+  /** roads + sidewalks + rail in one mesh; rail = indices from `railStart` */
   roads: THREE.Mesh | null;
-  rail: THREE.Mesh | null;
+  railStart: number;
+  /** draw range state last applied (roads on, rail on) */
+  streetMask: number;
   heights: Float32Array | null;
   grid: number;
   minH: number;
@@ -71,7 +74,7 @@ function attrBytes(m: MeshBuf): number {
 
 function meshBytes(r: TileMeshes): number {
   let b = 0;
-  for (const m of [r.terrain, r.buildings, r.roads, r.rail]) {
+  for (const m of [r.terrain, r.buildings, r.roads]) {
     if (m) b += m.position.byteLength + m.normal.byteLength + m.index.byteLength + (m.color?.byteLength ?? 0) + attrBytes(m);
   }
   return b;
@@ -79,6 +82,16 @@ function meshBytes(r: TileMeshes): number {
 
 /** Distance (m) below which a tile of level L is refined into its children. */
 const REFINE_K: Record<number, number> = { 2: 0.85, 1: 1.0 };
+/**
+ * Detail rings at street level: level-0 tiles (full street detail) are only
+ * refined in while an L1 tile is within ~1.9 km; beyond that the L1 tiles
+ * (simplified buildings ≥ 12 m, roads in the ground raster) stand in, seen at
+ * grazing angles. From higher up the full range comes back (houses, roads
+ * seen from above), reaching the old 1.0 by ~1.1 km altitude.
+ */
+function refineL1(altitude: number) {
+  return Math.min(1, 0.46 + Math.max(0, altitude) / 2000);
+}
 /** a refined tile only merges back once 25% further away than it refined (no LOD thrash) */
 const HYSTERESIS = 1.25;
 /** max geometry bytes turned into GPU objects per frame (uploads happen at render) */
@@ -117,18 +130,28 @@ export class TileManager {
   bytes = 0;
   readyCount = 0;
   loadMs: number[] = [];
+  /** network/cache time per tile (ms), all tiles since the last reset (benchmarks) */
+  fetchLog: number[] = [];
+  /** tiles loaded per source since start (RUM: local Cache Storage / CDN edge / R2) */
+  sourceCounts = { local: 0, edge: 0, origin: 0 };
   /** time spent building GPU objects on the main thread (last 50 tiles) */
   buildMs: number[] = [];
   onFirstReady: (() => void) | null = null;
   /** set by the engine: compile a new page's material off the critical path */
   warm: ((obj: THREE.Object3D) => void) | null = null;
   lodScale = 1;
+  /** altitude-dependent L1 refinement factor (street-level detail rings) */
+  private l1K = 1;
 
   dataRoot: string;
   constructor(dataRoot: string) {
     this.dataRoot = dataRoot;
     this.root.name = 'tiles';
     this.root.add(this.houses.group);
+    // ~1000 static tile groups: skip them in the per-frame scene matrix walk
+    // (each tile group computes its world matrix once when built; the house
+    // pools are refreshed in update())
+    this.root.matrixWorldAutoUpdate = false;
   }
 
   async init() {
@@ -141,7 +164,7 @@ export class TileManager {
         const S = this.manifest.tileSize[L];
         const t: Tile = {
           key: key(l, tx, ty), L: l, tx, ty, S, state: 'none', jobId: 0, group: null, terrain: null,
-          buildings: null, roads: null, rail: null, heights: null, grid: 0, minH: 0, maxH: 120,
+          buildings: null, roads: null, railStart: 0, streetMask: 3, heights: null, grid: 0, minH: 0, maxH: 120,
           houses: null, housesShown: false, street: null, page: null, layer: -1, bytes: 0, lastUsed: 0, drawn: false,
           requestedAt: 0, priority: 0, kids: null, counts: null, retryAt: 0, refined: false,
         };
@@ -215,6 +238,7 @@ export class TileManager {
     this.projView.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
     this.frustum.setFromProjectionMatrix(this.projView, cam.coordinateSystem, cam.reversedDepth);
     const E = ctx.cameraPos.x, N = -ctx.cameraPos.z, H = ctx.cameraPos.y;
+    this.l1K = refineL1(ctx.altitude);
 
     const prevDrawn = this.drawnList;
     this.drawnList = [];
@@ -230,14 +254,44 @@ export class TileManager {
       t.lastUsed = this.now;
       if (t.group) {
         t.group.visible = true;
-        if (t.terrain) t.terrain.visible = layers.terrain;
+        const d = this.tileDist(t, E, N, H);
+        // Far tiles seen from low altitude: flat ground projects to a sliver
+        // (eye height · S / d²) and its relief to (maxH − minH) / d. Under
+        // ~0.6 px neither is worth a draw (fogged to the horizon colour anyway).
+        let sliver = false;
+        if (d > ctx.view.r2) {
+          const eye = Math.max(1, H - t.maxH);
+          const px = ctx.pixelScale * Math.max((eye * t.S) / (d * (d + t.S)), (t.maxH - t.minH) / d);
+          sliver = px < 0.6;
+        }
+        if (t.terrain) t.terrain.visible = layers.terrain && !sliver;
         if (t.buildings) t.buildings.visible = layers.buildings;
-        if (t.roads) t.roads.visible = layers.roads;
-        if (t.rail) t.rail.visible = layers.rail;
+        if (t.roads) {
+          const mask = (layers.roads ? 1 : 0) | (layers.rail ? 2 : 0);
+          if (mask !== t.streetMask) {
+            t.streetMask = mask;
+            const g = t.roads.geometry, n = g.index!.count, rs = t.railStart;
+            if (mask === 3) g.setDrawRange(0, Infinity);
+            else if (mask === 1) g.setDrawRange(0, rs);
+            else if (mask === 2) g.setDrawRange(rs, n - rs);
+          }
+          // ring 2+: street surfaces of far tiles seen at a grazing angle
+          // (< ~1.2°) cover no pixels worth a draw call
+          const grazing = sliver || (d > ctx.view.r1 && (H - t.maxH) < d * 0.02);
+          t.roads.visible = !grazing && mask !== 0 && !(mask === 1 && t.railStart === 0) && !(mask === 2 && t.railStart === t.roads.geometry.index!.count);
+        }
       }
-      if (t.houses && !t.housesShown) {
-        this.houses.add(t.key, t.tx * t.S, t.ty * t.S, t.houses);
-        t.housesShown = true;
+      if (t.houses) {
+        // near rings: full archetypes (shadows); beyond ring 1: 12-triangle blocks
+        const d = this.tileDist(t, E, N, H);
+        const cur = t.housesShown ? this.houses.levelOf(t.key) : undefined;
+        const r1 = ctx.view.r1;
+        const lo = cur === 'lo' ? d > r1 * 0.85 : d > r1;
+        if (cur && (cur === 'lo') !== lo) { this.houses.remove(t.key); t.housesShown = false; }
+        if (!t.housesShown) {
+          this.houses.add(t.key, t.tx * t.S, t.ty * t.S, t.houses, lo);
+          t.housesShown = true;
+        }
       }
     }
     for (const t of prevDrawn) {
@@ -253,6 +307,7 @@ export class TileManager {
     this.consumeResults();
     this.evict();
     this.houses.flush();
+    this.houses.group.updateMatrixWorld();
   }
 
   private tileDist(t: Tile, E: number, N: number, H: number) {
@@ -292,7 +347,7 @@ export class TileManager {
     const vis = this.inFrustum(t);
     const kids = t.L > 0 ? this.kidsOf(t) : [];
     if (kids.length) {
-      const k = t.S * (REFINE_K[t.L] ?? 0) * this.lodScale;
+      const k = t.S * (REFINE_K[t.L] ?? 0) * this.lodScale * (t.L === 1 ? this.l1K : 1);
       t.refined = d < (t.refined ? k * HYSTERESIS : k);
     } else {
       t.refined = false;
@@ -345,7 +400,7 @@ export class TileManager {
       if (t.state !== 'ready' && t.state !== 'loading' && t.state !== 'empty' && !this.prefetched.has(t.key)) {
         this.pfList.push({ t, d: d / (1 + t.L * 1.5) });
       }
-      if (kids.length && d < t.S * (REFINE_K[t.L] ?? 0) * this.lodScale * 1.6) for (const c of kids) walk(c);
+      if (kids.length && d < t.S * (REFINE_K[t.L] ?? 0) * this.lodScale * (t.L === 1 ? this.l1K : 1) * 1.6) for (const c of kids) walk(c);
     };
     for (const r of this.roots) walk(r);
     this.pfList.sort((a, b) => a.d - b.d);
@@ -405,6 +460,8 @@ export class TileManager {
     if (m.type === 'done') {
       this.results.push({ tile: t, res: m.result });
       this.loadMs.push(m.ms.fetch + m.ms.mesh);
+      if (this.fetchLog.length < 5000) this.fetchLog.push(m.ms.fetch);
+      this.sourceCounts[m.src]++;
       if (this.loadMs.length > 50) this.loadMs.shift();
     } else if (m.type === 'empty') {
       t.state = 'empty';
@@ -515,9 +572,9 @@ export class TileManager {
     };
     t.buildings = add(r.buildings, this.buildingMat, 'buildings', true);
     t.roads = add(r.roads, this.roadMat, 'roads', false);
-    t.rail = add(r.rail, this.railMat, 'rail', false);
+    t.railStart = r.railStart;
+    t.streetMask = 3;
     if (t.roads) t.roads.renderOrder = 1;
-    if (t.rail) t.rail.renderOrder = 2;
     t.heights = r.heights;
     t.grid = r.grid;
     t.houses = r.houses;
@@ -531,6 +588,7 @@ export class TileManager {
     this.root.add(g);
     t.state = 'ready';
     this.readyCount++;
+    if (this.readyCount === 1 && !performance.getEntriesByName('first-tile').length) performance.mark('first-tile');
     if (this.onFirstReady && this.readyCount === 1) this.onFirstReady();
   }
 
@@ -543,7 +601,7 @@ export class TileManager {
     if (t.page && t.layer >= 0) t.page.release(t.layer);
     this.bytes -= t.bytes;
     Object.assign(t, {
-      group: null, terrain: null, buildings: null, roads: null, rail: null, heights: null, houses: null, street: null,
+      group: null, terrain: null, buildings: null, roads: null, railStart: 0, streetMask: 3, heights: null, houses: null, street: null,
       page: null, layer: -1, bytes: 0, state: 'none', counts: null,
     });
     this.readyCount--;
@@ -572,6 +630,11 @@ export class TileManager {
       bytes: this.bytes + this.pages.length * GROUND_LAYERS * 65536,
       houses: this.houses.instanceCount,
     };
+  }
+
+  /** tiles are being fetched / meshed / uploaded (frame spikes are expected) */
+  get busy(): boolean {
+    return this.jobs.size > 0 || this.results.length > 0;
   }
 
   /** tiles currently drawn (read-only) */
