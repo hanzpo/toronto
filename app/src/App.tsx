@@ -79,6 +79,7 @@ export default function App() {
         if (mods.debug) await engine.addLayer(new (await mods.debug).DebugOverlayLayer());
         setEngine(engine);
         Object.assign(window as object, { __engine: engine, __clock: clock, __app: useApp });
+        void import('./qa/runtime').then((m) => m.installQa(engine!));
         performance.mark('layers-ready');
         void engine.prewarm();
         setReady(true);

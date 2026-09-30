@@ -18,3 +18,4 @@ target/
 worker/node_modules/
 app/public/data-synthetic/
 .playwright-cli/
+qa-shots/
