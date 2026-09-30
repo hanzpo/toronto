@@ -5,7 +5,7 @@ import { SPEEDS, clock, dayTypeOf, type DayType } from './clock';
 
 export type BaseLayerKey = 'terrain' | 'buildings' | 'houses' | 'roads' | 'rail' | 'labels';
 export type AnalyticsKey =
-  | 'subway' | 'streetcar' | 'lrt' | 'go' | 'upx' | 'via' | 'bus' | 'vehicles' | 'congestion';
+  | 'subway' | 'streetcar' | 'lrt' | 'go' | 'upx' | 'via' | 'bus' | 'vehicles' | 'congestion' | 'air';
 
 export interface SelectedEntity {
   kind: string; // e.g. 'vehicle' | 'building' | 'landmark'
@@ -61,7 +61,7 @@ export const useApp = create<AppState>((set, get) => ({
   layers: { terrain: true, buildings: true, houses: true, roads: true, rail: true, labels: true },
   analytics: {
     subway: true, streetcar: false, lrt: true, go: true, upx: true, via: false,
-    bus: false, vehicles: true, congestion: false,
+    bus: false, vehicles: true, congestion: false, air: true,
   },
   analyticsMode: false,
   shadows: true,

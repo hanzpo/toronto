@@ -40,3 +40,6 @@ uv run python -m tpipe.graph
 uv run python -m tpipe.congestion
 uv run python -m tpipe.transit
 uv run python -m tpipe.landmarks
+
+# 5. Air traffic (needs raw/air/sd: vradarserver standing-data, see docs/AIR.md)
+uv run python -m tpipe.air

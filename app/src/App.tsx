@@ -35,6 +35,7 @@ export default function App() {
         await engine.addLayer(new InteractLayer());
         { const stations = new (await import('./layers/StationsLayer')).StationsLayer(transit.system); await engine.addLayer(stations); Object.assign(window as object, { __stations: stations }); }
         { const traffic = new (await import('./layers/TrafficLayer')).TrafficLayer(transit); await engine.addLayer(traffic); Object.assign(window as object, { __traffic: traffic }); }
+        { const air = new (await import('./layers/AirLayer')).AirLayer(engine.dataRoot); await engine.addLayer(air); Object.assign(window as object, { __air: air }); }
         if (config.debug) await engine.addLayer(new DebugOverlayLayer());
         setEngine(engine);
         Object.assign(window as object, { __engine: engine, __clock: clock, __app: useApp });

@@ -277,7 +277,7 @@ function buildAircraft(s: AircraftSpec): AircraftModel {
   for (let i = 1; i <= NT; i++) {
     const t = i / NT;
     const r = R * (1 - 0.86 * Math.pow(t, 1.15));
-    const c = top - r - (1 - t) * 0; // top line stays level; bottom line sweeps up
+    const c = top - r; // top line stays level; bottom line sweeps up
     rings.push([X(L - tailLen + t * tailLen), c + t * R * 0.05, r * (1 - 0.1 * t), r]);
   }
   // loft expects increasing x: our X() decreases with fromNose, so reverse
@@ -441,8 +441,8 @@ function buildAircraft(s: AircraftSpec): AircraftModel {
     tail: V(ringsX[0][0] - 0.1, ringsX[0][1], 0),
     beaconTop: V(X(wingLE + s.wing.rootChord * 0.4), top + 0.15, 0),
     beaconBottom: V(X(wingLE), s.gearH - 0.1, 0),
-    landing: V(rootLE.x + 0.4, wy, 0),
-    nose: V(X(0), cy, 0),
+    landing: V(rootLE.x + 1.2, wy - 0.3, R + 1.4),
+    nose: V(X(0) + 0.9, cy - R * 0.3, 0),
     noseX: X(0), tailX: ringsX[0][0],
   };
   return { spec: s, geometry, points };

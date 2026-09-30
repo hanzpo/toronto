@@ -128,6 +128,7 @@ const ANALYTICS: { k: AnalyticsKey; label: string; color: string; sub?: string }
   { k: 'bus', label: 'Buses', color: 'var(--bus)' },
   { k: 'vehicles', label: 'Live vehicles', color: 'var(--live)', sub: 'schedule positions' },
   { k: 'congestion', label: 'Congestion', color: 'var(--warn)', sub: 'major roads · model + live' },
+  { k: 'air', label: 'Air traffic', color: '#9fb4ff', sub: 'YYZ · YTZ · YHM · YKF' },
 ];
 
 function LayersPanel() {
@@ -261,7 +262,7 @@ export function Hud() {
         <Compass />
       </div>
       <Panels />
-      {selected && selected.kind !== 'vehicle' && selected.kind !== 'stop' && (
+      {selected && selected.kind !== 'vehicle' && selected.kind !== 'stop' && selected.kind !== 'aircraft' && (
         <div className="selection panel">
           <small>{selected.kind}</small>
           <b>{selected.label ?? selected.id}</b>
