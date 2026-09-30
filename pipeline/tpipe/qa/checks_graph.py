@@ -24,7 +24,8 @@ import numpy as np
 from .. import geo, tbn
 from .core import finding
 
-GRAPH_CATS = {"graph_connectivity", "hooked_edge", "micro_link", "carriageway_overlap", "graph_vs_drawn_elevation"}
+GRAPH_CATS = {"graph_connectivity", "hooked_edge", "micro_link", "carriageway_overlap", "graph_vs_drawn_elevation",
+              "rail_above_bed"}
 GRAPH_DIR = Path(__import__("os").environ["QA_GRAPH_DIR"]) if __import__("os").environ.get("QA_GRAPH_DIR") else None
 S0 = geo.TILE_SIZE[0]
 HALO_TILES = 1
@@ -296,11 +297,45 @@ def check_overlap(B, cats) -> list[dict]:
     return out
 
 
+RAIL_BED_TOL = 0.5
+
+
+def check_rail_bed(B) -> list[dict]:
+    """rail_above_bed: the rail top (tile l_xyz z, the level the trains run at) more than 0.5 m
+    off the ballast bed the client draws under it (sub 'above': floating rails, 'below': rails
+    and trains sunk into the bed). One finding per run of offending vertices."""
+    L = B.rails
+    out = []
+    if not len(L.X) or getattr(L, "ZD", None) is None:
+        return out
+    vf = L.vattrs.get("vf")
+    tun = (np.nan_to_num(vf).astype(np.int64) & 2) != 0 if vf is not None else np.zeros(len(L.X), bool)
+    d = L.Z - L.ZD
+    bad = np.isfinite(d) & ~tun & (np.abs(d) > RAIL_BED_TOL) & B.in_core(L.X, L.Y)
+    vp = L.vpiece()
+    osm = L.attrs["osm"]
+    i = 0
+    idx = np.nonzero(bad)[0]
+    while i < len(idx):
+        j = i
+        while j + 1 < len(idx) and idx[j + 1] == idx[j] + 1 and vp[idx[j + 1]] == vp[idx[i]]:
+            j += 1
+        run_ = idx[i:j + 1]
+        k = run_[np.argmax(np.abs(d[run_]))]
+        sub = "above" if d[k] > 0 else "below"
+        out.append(finding("rail_above_bed", sub, 2 + min(abs(d[k]), 5), L.X[k], L.Y[k], float(L.Z[k]), [osm[vp[k]]],
+                           f"rail top {d[k]:+.1f} m off the drawn bed over {len(run_)} vertices (way {int(osm[vp[k]])})",
+                           key=("rail_above_bed", int(osm[vp[k]]), round(float(L.X[k]) / 50), round(float(L.Y[k]) / 50))))
+        i = j + 1
+    return out
+
 def run(B, cats: set) -> list[dict]:
     cats = cats & GRAPH_CATS
     if not cats:
         return []
     out = []
+    if "rail_above_bed" in cats:
+        out += check_rail_bed(B)
     if "carriageway_overlap" in cats:
         out += check_overlap(B, cats)
     if cats & {"graph_connectivity", "hooked_edge", "micro_link", "graph_vs_drawn_elevation"}:

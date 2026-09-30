@@ -883,6 +883,33 @@ def union_columns() -> list[list[float]]:
     return cols
 
 
+def union_deck_check(net: "Network") -> None:
+    """Warn when the rail graph's z on the Union deck (curated/union_deck.json extent) differs
+    from the network model's curated rail level there (curated/corridors.json 'usrc')."""
+    p = geo.PIPE / "curated" / "union_deck.json"
+    if not p.exists():
+        return
+    u = json.loads(p.read_text())
+    (ox, oy), r, dk = u["frame"]["pos"], u["frame"]["rotation"], u["deck"]
+    from . import tbn
+    from .rail_geom import curated_rail_z
+
+    a, _ = tbn.read(geo.OUT / "rail" / "network.bin.gz")
+    xyz = a["e_xyz"].reshape(-1, 3)
+    dx, dy = xyz[:, 0] - ox, xyz[:, 1] - oy
+    lx = dx * math.cos(r) + dy * math.sin(r)
+    ly = -dx * math.sin(r) + dy * math.cos(r)
+    m = (lx >= dk["x0"] + 5) & (lx <= dk["x1"] - 5) & (ly >= dk["y0"]) & (ly <= dk["y1"])
+    mz = curated_rail_z(xyz[:, :2].astype(np.float64))
+    m &= np.isfinite(mz) & (np.abs(xyz[:, 2] - mz) < 10)      # surface tracks (not the subway below)
+    if not m.any():
+        return
+    dz = xyz[m, 2] - mz[m]
+    bad = np.abs(dz) > 0.05
+    print(f"Union deck: {int(m.sum())} rail vertices, z − model rail level: median {np.median(dz):+.2f} m, {int(bad.sum())} off by > 5 cm"
+          + ("  ← trains don't run at the model's rail level (curated/corridors.json usrc)" if bad.any() else ""))
+
+
 def build() -> None:
     cur = json.loads(CURATED.read_text())
     index = json.loads(INDEX.read_text())
@@ -975,6 +1002,7 @@ def build() -> None:
         print("\n".join(errs))
         raise SystemExit(1)
     print(f"platforms snapped to the rail graph; {len(dropped)} dropped (no track fit): {dropped[:12]}")
+    union_deck_check(net)
     zones = station_zones(out)
     suppress, report = clearance_suppress(zones)
     suppress |= {int(x["osm"]) for x in cur.get("suppress_extra", [])}

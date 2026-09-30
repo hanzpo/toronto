@@ -145,9 +145,14 @@ class Block:
         net = np.isfinite(vf)
         v = np.nan_to_num(vf).astype(np.int64)
         d = np.nan_to_num(dz)
-        br, graded = (v & 1) != 0, (v & 4) != 0
-        w = np.where(br, 1.0, np.where(graded, np.clip((d - 1.5) / 3, 0, 1), 0.0))
-        zdr = t + np.where(graded, d, 0.0)
+        br, graded, tun = (v & 1) != 0, (v & 4) != 0, (v & 2) != 0
+        absz = br | ((v >> 4) == 11)                      # decks, curated exact levels
+        if L is self.rails and "class" in L.attrs:
+            # heavy rail off the street is drawn at its solved z (roads.ts buildRail)
+            absz |= (L.attrs["class"][L.vpiece()] <= 2) & ((v & 8) == 0) & ~tun
+        w = np.where(absz, 1.0, np.where(graded, np.clip((d - 1.5) / 3, 0, 1), 0.0))
+        # roads: the draped part never below the drawn ground (roads.ts); track keeps its dz
+        zdr = t + np.where(graded, d if L is self.rails else np.where(tun, d, np.maximum(d, 0.0)), 0.0)
         zd = zdr + (L.Z - zdr) * w
         return np.where(net & np.isfinite(t), zd, L.Z)
 

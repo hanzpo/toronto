@@ -283,6 +283,72 @@ ids per piece. It gives exactly the centrelines and elevations the tiles
 draw, including rail raised onto embankments and bridges by the grade
 separation solve. The train sim should follow these. The same xy can be
 reproduced from OSM with `fillet` and the class radii.
+Subway / LRT elevations are the other way round: the vertical solve pins them to
+the rail graph (`work/rail_graph.pkl`, the path the trains run on; run
+`tpipe.rail_graph` first), and a road crossing a subway / LRT dips under it
+unless the rail graph is at grade there (a covered way: the road is lifted).
+
+## Source of truth
+
+**The network model is authoritative for road and rail geometry and elevation.** It is
+`tpipe.roadnet`'s output (`work/roadnet.npz`) built from OSM with the curated overrides applied.
+Every consumer derives from it. Manual fixes go into the overrides, never into a renderer or a
+second copy of a height.
+
+### Authoritative
+
+- **Plan:** smoothed centrelines (`rail_geom.fillet`, shared by roads, tracks and the train
+  graph) and per-vertex cross-sections: `eL/eR` lane edges, `pL/pR` pavement edges, `sw`
+  sidewalk / median bits, `ws` walk-to-building widths.
+- **Elevation:** the solved `z` per vertex (`road_xyz`, `rail_xyz`, `way_xyz`), with `vf` bits:
+  bridge, tunnel, graded, embedded, and the structure type. Structure 11 (`exact`) means drawn
+  at `z` as is (curated levels, dipped street underpasses).
+- **Derived lists:**
+  - `crossings.json`: level crossings, from OSM nodes.
+  - `underpasses.json`: every street × main-line / siding crossing with the rail more than
+    3 m above the street, with both z values and the clearance. The structures builder uses it.
+
+### Overrides (`pipeline/curated/`), applied inside the solve
+
+- `corridors.json`: control polylines with a z profile.
+  - `kind` is `road` (default) or `rail`.
+  - `mode`: `absolute` is datum m; `above_ground` is m over the smoothed ground.
+  - `snap`: m from the line.
+  - `exact`: pinned z beats crossing clearances, drawn as is.
+  - `usrc` sets the Union Station Rail Corridor: Bathurst yards 3 m → Spadina 7.6 → Union deck
+    8.31 (York St to Bay St, UP platform 1A) → Yonge 8.2 → Jarvis 7.6 → Cherry 5.5.
+- `union_deck.json` is the deck extent in the landmark frame only. It holds no level.
+- Streets tagged as short tunnels under surface track are opened as underpasses:
+  - Rule: cls ≤ 5, layer −1, under 160 m.
+  - Streets crossing under an `exact` rail corridor dip to rail − 6.0 m (4.5 m clearance +
+    1.5 m deck) and are flagged `exact`. The rail gets a bridge over them.
+  - Their graph ways carry the tunnel flag, so cars take the graph's z there.
+- Track ends that touch another track without a shared node take the more constrained
+  track's level (`rail_touch_pins`).
+
+### Consumers
+
+| consumer | takes from the model |
+|---|---|
+| `workers/roads.ts` road ribbons, junctions, sidewalks | plan, cross-sections. z: absolute on decks, `exact` and high fills. Otherwise draped on the 32 m client terrain + `dz`, never below it. Interim until the surface builder (docs/SURFACE.md) conforms the terrain to the model. |
+| `workers/roads.ts` track, ballast, fills | heavy rail (main, siding, subway) at the model z, with 1:2 fills down to the terrain. Street track and crossing panels follow the draped road. |
+| `tpipe.graph` sim graph | `way_xyz` plan and z; `way_flags` (bridge / tunnel = use graph z) |
+| `tpipe.rail_graph` train paths | plan from the same fillet; z = the model's track z (`rail_geom.model_rail_z`, nearest model track of the same kind within 1.5 m). Its own grade profile is only a fallback where no model track is near. |
+| ground portals / open cuts (`ground.py _trenches`) | the rail graph, so the model's z |
+| `union_station` landmark (deck, platforms) | `landmarks.json` `union_station.rail_z` and `tracks` (11 centrelines), written by `tpipe.landmarks` from the model. The landmark no longer draws its own track bed or rails. |
+| `TransitLayer` / `consist.ts` | heavy-rail consists ride the pattern z. Only street-running vehicles snap to the drawn surface. |
+| `interact/tunnel.ts` cab view | heavy rail at the path z. Only street-running track follows the drawn surface. |
+| `tpipe.stations` Union check | the train graph against the model's rail level on the deck extent |
+
+### Merge gate (`tpipe.qa`, owner "model")
+
+- `rail_above_bed`: rail top more than 0.5 m off the drawn bed.
+- `duplicate_track`: two tracks drawn on one alignment for more than 25 m.
+- `underpass_drawn_at_grade`: the model separates a street and a track, but they are drawn
+  within 2 m of each other or with crossing panels.
+- `drawn_rail_vs_train_path`: plan more than 0.6 m, or heavy-rail z more than 0.3 m.
+- `graph_vs_model`: sim graph edges off the model ways by more than 1 m in plan or 0.3 m in z.
+  The 8 m at edge ends is skipped, where edges snap onto their nodes.
 
 ## Standards and references used
 

@@ -34,7 +34,7 @@ import shapely.ops
 from scipy.spatial import cKDTree
 
 from . import geo
-from .rail_geom import LINK_RADIUS, RAIL_RADIUS, ROAD_RADIUS, cumlen, fillet
+from .rail_geom import LINK_RADIUS, RAIL_RADIUS, ROAD_RADIUS, cumlen, curated_rail_z, fillet
 from .terrain import get as get_terrain
 
 # ------------------------------------------------------------------ constants
@@ -47,7 +47,9 @@ F_DUP = 64     # footway duplicating a drawn sidewalk / crossing way: not drawn
 V_BRIDGE, V_TUNNEL, V_GRADED, V_EMBED = 1, 2, 4, 8     # EMBED: rail set in pavement
 V_STRUCT_SHIFT = 4                                     # bits 4-7: structure type (STRUCT)
 STRUCT = {"none": 0, "girder": 1, "portal": 2, "hammerhead": 3, "truss": 4, "arch": 5, "footbridge": 6,
-          "rail": 7, "box": 8, "culvert": 9, "grass": 10}
+          "rail": 7, "box": 8, "culvert": 9, "grass": 10, "exact": 11}
+# "exact" (at grade only): the client draws the solved z as is instead of draping on its terrain
+# (curated rail levels such as the Union Station deck, which other layers are built to)
 
 # marking bits (mk, <= 24 bits so it survives a float attribute)
 MK_NF, MK_NB = 0, 4                    # lanes forward / backward (4 bits each)
@@ -70,8 +72,9 @@ WEAVE_JOIN = 350.0          # merge aux lane runs on into the next diverge if th
 GORE_MAX = 4.5              # painted gore up to this gap between edge lines (m)
 BRANCH_DEFL = math.radians(40)
 # vertical: clearances (Toronto ECS bridge design standard 2022; rail per Transport Canada / railway practice)
-CLEAR = {"road": 5.0, "rail": 7.0, "path": 2.7, "ped_over_road": 5.3}
-DECK = {"road": 1.3, "motorway": 1.9, "rail": 2.0, "path": 0.8}
+# road under rail: Toronto's rail underpasses (Yonge, Bay, York St under the USRC) are signed ~4.3-4.5 m
+CLEAR = {"road": 5.0, "rail": 7.0, "path": 2.7, "ped_over_road": 5.3, "road_under_rail": 4.5}
+DECK = {"road": 1.3, "motorway": 1.9, "rail": 1.5, "path": 0.8}
 GRADE = {"motorway": 0.035, "link": 0.055, "road": 0.05, "local": 0.07, "path": 0.12, "rail": 0.014,
          "subway": 0.035, "lrt": 0.05, "tram": 0.06}
 RAMP_SMOOTH = 14.0          # m, sigma of the vertical-curve smoothing
@@ -145,12 +148,27 @@ class Lines:
         self.wraw = g("wraw", np.float32) if "wraw" in d else np.full(len(sel), np.nan, np.float32)
         self.xmark = g("xmark")
         self.n = len(sel)
+        self.underpass = set()           # street ways opened from tunnel to rail underpass (below)
         # `covered=yes` / building passages were extracted as tunnels: at layer >= 0 they are
         # at grade (Union Station's train shed, passages through buildings), not underground
         lens_ = np.array([cumlen(self.xy[self.off[i]:self.off[i + 1]])[-1] for i in range(self.n)])
         short_cov = ((self.flags & F_TUNNEL) != 0) & (self.layer >= 0) & (lens_ < 600) & (
             ((self.kind == 1) & np.isin(self.cls, [0, 1])) | ((self.kind == 0) & (self.cls >= 5)))
         self.flags[short_cov] &= ~F_TUNNEL
+        # short street "tunnels" under a surface rail line are underpasses (York, Bay, Yonge
+        # under the Union Station Rail Corridor): open to the sky either side of the rail
+        # bridge, drawn at street level with the rail bridged over them
+        und = np.nonzero(((self.flags & F_TUNNEL) != 0) & (self.kind == 0) & (self.layer == -1) & (lens_ < 160)
+                         & (self.cls <= 5))[0]          # public streets (not PATH, teamways, service tunnels)
+        rl = np.nonzero((self.kind == 1) & np.isin(self.cls, [0, 1]) & ((self.flags & F_TUNNEL) == 0))[0]
+        if len(und) and len(rl):
+            rg = [shapely.LineString(self.xy[self.off[i]:self.off[i + 1]]) for i in rl]
+            tree = shapely.STRtree(rg)
+            ug = [shapely.LineString(self.xy[self.off[i]:self.off[i + 1]]) for i in und]
+            hit = tree.query(ug, predicate="intersects")
+            opened = np.unique(und[hit[0]]) if hit.size else np.zeros(0, np.int64)
+            self.flags[opened] &= ~F_TUNNEL
+            self.underpass = set(opened.tolist())
         self.len = np.array([cumlen(self.xy[self.off[i]:self.off[i + 1]])[-1] for i in range(self.n)])
 
     def pts(self, i):
@@ -463,10 +481,11 @@ def way_section(L: Lines, i: int, nF: int, nB: int, base: int):
 
 class Stroke:
     __slots__ = ("ways", "xy", "s", "vway", "pinned_v", "kind", "cls", "group", "oneway", "nodes", "node_s", "attrs",
-                 "z", "g", "vf", "req_lo", "req_hi", "pins", "struct", "sw", "ev", "dense", "ws")
+                 "z", "g", "vf", "req_lo", "req_hi", "pins", "struct", "sw", "ev", "dense", "ws", "exact")
 
     def __init__(self):
         self.dense = False
+        self.exact = False
         self.sw = None
         self.ws = None
         self.vf = None
@@ -906,11 +925,18 @@ def solve_profile(S: Stroke, L: Lines, curated=None):
         return k
     kb = run_ramp(br, 30.0)
     kt = run_ramp(tu, 90.0)
+    # subway / LRT vertices pinned to the rail graph (rail_graph_targets): the pin is the
+    # depth, no tunnel-cover bound on top of it
+    if curated is not None and S.kind == 1 and len(curated[0]):
+        kt[np.isin(np.array([int(L.cls[ws[k]]) for k in S.vway]), (2, 3))] = 0.0
     lo_hard = lo.copy()          # clearances over crossings: enforced first
     lo[br] = np.maximum(lo[br], gs[br] + 1.2 * kb[br] - 0.15)
     hi[tu] = np.minimum(hi[tu], g[tu] - 0.6 * cover[tu] * kt[tu] + 0.3)
     # at-grade roads never dip into the ground (4th-order solutions overshoot slightly)
     free = ~br & ~tu
+    # ... except where it must dip under a crossing (a street underpass below a rail corridor)
+    for (sv, Z, hwid) in S.req_hi:
+        free &= np.abs(s - sv) > hwid + 90.0
     lo[free] = np.maximum(lo[free], g[free] - 0.15)
     if S.pins:
         for vi, Z in S.pins.items():
@@ -955,7 +981,8 @@ def solve_profile(S: Stroke, L: Lines, curated=None):
     for vi, Z in eq.items():
         i = int(key[vi])
         # a clearance over a crossing beats a node / corridor pin
-        EQ[i] = max(Z, LO[i]) if np.isfinite(LO[i]) and LO[i] > -1e8 and (br[first[i]] or LO[i] > g[first[i]] + 1) else Z
+        EQ[i] = max(Z, LO[i]) if np.isfinite(LO[i]) and LO[i] > -1e8 and (br[first[i]] or LO[i] > g[first[i]] + 1) \
+            and not S.exact else Z
     # normal equations assembled directly in symmetric banded form (bandwidth 2), solved with
     # a banded Cholesky; equality / active constraints only add to the diagonal
     from scipy.linalg import solveh_banded
@@ -1285,11 +1312,68 @@ def make_dsm_sampler(terr):
 # ------------------------------------------------------------------ curated corridors
 
 
+_RG = None
+
+
+def _rail_graph_points():
+    """Dense (2 m) subway / LRT track points with the elevation the trains run on, from
+    work/rail_graph.pkl (tpipe.rail_graph; run it before roadnet), as (KD-tree, xyz)."""
+    global _RG
+    if _RG is None:
+        import pickle
+        p = geo.WORK / "rail_graph.pkl"
+        chunks = []
+        if p.exists():
+            from . import rail_graph as _rail_graph  # noqa: F401  (unpickling needs the class)
+            g = pickle.loads(p.read_bytes())
+            for e, (seg, _fl) in enumerate(g.e_xyz):
+                if int(g.e_kind[e]) not in (1, 2) or len(seg) < 2:
+                    continue
+                for a_, b_ in zip(seg[:-1], seg[1:]):
+                    k = max(1, int(math.ceil(float(np.hypot(*(b_[:2] - a_[:2]))) / 2.0)))
+                    t = np.arange(k)[:, None] / k
+                    chunks.append(a_[None, :3] + (b_[None, :3] - a_[None, :3]) * t)
+                chunks.append(seg[-1:, :3])
+            del g
+        pts = np.vstack(chunks) if chunks else np.zeros((0, 3))
+        _RG = (cKDTree(pts[:, :2]) if len(pts) else None, pts)
+    return _RG
+
+
+def rail_graph_targets(strokes: list, L, curated: dict, report) -> None:
+    """Pin subway / LRT strokes to the rail graph's elevations (exact targets, merged into the
+    curated ones): the drawn track is the path the trains run on (Yorkdale's east track was
+    solved 7 m above its at-grade station). Crossing clearances still apply on top."""
+    tree, pts = _rail_graph_points()
+    if tree is None:
+        return
+    n = 0
+    for si, S in enumerate(strokes):
+        if S.kind != 1:
+            continue
+        ws = [w for w, _ in S.ways]
+        vc = np.array([int(L.cls[ws[k]]) for k in S.vway])
+        if not np.isin(vc, (2, 3)).any():
+            continue
+        d, i = tree.query(S.xy, distance_upper_bound=1.5)
+        m = np.isfinite(d) & np.isin(vc, (2, 3))
+        if not m.any():
+            continue
+        idx = np.nonzero(m)[0]
+        z = pts[i[m], 2]
+        prev = curated.get(si)
+        if prev is not None:
+            keep = ~np.isin(idx, prev[0])
+            idx, z = np.concatenate([prev[0], idx[keep]]), np.concatenate([prev[1], z[keep]])
+        curated[si] = (idx, z)
+        n += 1
+    report["rail_graph_pinned_strokes"] = n
+
+
 def load_curated():
     p = geo.PIPE / "curated" / "corridors.json"
-    if not p.exists():
-        return []
-    return json.loads(p.read_text())["corridors"]
+    out = json.loads(p.read_text())["corridors"] if p.exists() else []
+    return out
 
 
 def curated_targets(C, strokes: list[Stroke], L: Lines, terr, report):
@@ -1313,8 +1397,9 @@ def curated_targets(C, strokes: list[Stroke], L: Lines, terr, report):
         force = bool(c.get("force_bridge", False))
         box = shapely.buffer(shapely.linestrings(cxy), reach)
         nst = 0
+        kind = 1 if c.get("kind") == "rail" else 0
         for si, S in enumerate(strokes):
-            if S.kind != 0 or S.cls > cls_max:
+            if S.kind != kind or S.cls > cls_max:
                 continue
             ws = [i for i, _ in S.ways]
             if ids:
@@ -1349,6 +1434,10 @@ def curated_targets(C, strokes: list[Stroke], L: Lines, terr, report):
                 S.vf[idx] |= V_BRIDGE
             bi = idx[(S.vf[idx] & V_BRIDGE) != 0]
             S.vf[bi] = (S.vf[bi] & 0x0F) | (struct << V_STRUCT_SHIFT)
+            if c.get("exact"):
+                ai = idx[(S.vf[idx] & (V_BRIDGE | V_TUNNEL)) == 0]
+                S.vf[ai] = (S.vf[ai] & 0x0F) | (STRUCT["exact"] << V_STRUCT_SHIFT)
+                S.exact = True
             ms = c.get("main_span")
             if ms:
                 mx, my = geo.project(ms["center"][0], ms["center"][1])
@@ -1673,6 +1762,17 @@ def run_block(G, core, halo):
             continue
         if L.flags[u["lo"]] & F_TUNNEL:
             u["down"] = True     # an underpass: the tunnel is pushed below the upper line instead
+        elif L.kind[u["up"]] == 1 and L.kind[u["lo"]] == 0 and (
+                u["lo"] in L.underpass or np.isfinite(curated_rail_z(np.asarray(u["p"], np.float64).reshape(1, 2))[0])):
+            # a street underpass below the rail (tagged as a short tunnel): the street dips under
+            # the track, which keeps its level (and gets a bridge over the street)
+            u["down"] = True
+            u["open"] = True
+        elif L.kind[u["up"]] == 1 and int(L.cls[u["up"]]) in (2, 3) and L.kind[u["lo"]] == 0:
+            # subway / LRT over a road: the track keeps the rail graph's grade (the path the
+            # trains run on, tpipe.rail_graph); the road dips under it. Lifting the track
+            # instead raised one Yorkdale track 7 m over its at-grade station.
+            u["down"] = True
         keep.append(u)
     report["crossings_over_tunnels_skipped"] = len(ups) - len(keep)
     ups = keep
@@ -1715,13 +1815,27 @@ def run_block(G, core, halo):
         u["hl"] = hl
         insert_stations(U, [u["su"] - hl, u["su"] + hl])
         m = np.abs(U.s - u["su"]) <= hl + 1e-6
-        if u.get("down"):
+        if u.get("down") and not u.get("open"):
             continue
         # always a structure over the whole width of the lower line (OSM bridge ways often stop short)
         st = STRUCT["rail"] if U.kind == 1 else STRUCT["footbridge"] if U.cls >= 7 else STRUCT["girder"]
         U.vf[m] |= V_BRIDGE | (st << V_STRUCT_SHIFT) * ((U.vf[m] >> V_STRUCT_SHIFT) == 0)
     report["structures_inferred"] = sum(1 for u in ups if u["how"] != "tags")
     curated = curated_targets(load_curated(), strokes, L, terr, report)
+
+    # a subway / LRT line under a road where the rail graph (the path the trains run on) is
+    # at grade -- a covered way, e.g. Lawrence West under Lawrence Ave -- keeps its grade:
+    # the road is lifted over it instead of the track diving 8 m
+    rg_tree, rg_pts = _rail_graph_points()
+    for u in ups:
+        if rg_tree is None or not u.get("down") or L.kind[u["lo"]] != 1 or int(L.cls[u["lo"]]) not in (2, 3):
+            continue
+        Lo = strokes[u["il"]]
+        k_ = int(np.argmin(np.abs(Lo.s - u["sl"])))
+        d_, i_ = rg_tree.query(Lo.xy[k_], distance_upper_bound=2.0)
+        if np.isfinite(d_) and Lo.g[k_] - rg_pts[i_, 2] < 3.0:
+            u["down"] = False
+    rail_graph_targets(strokes, L, curated, report)
 
     # ---- iterate: crossing requirements -> profiles -> node consistency
     need = set(i for i, S in enumerate(strokes) if (S.vf & (V_BRIDGE | V_TUNNEL)).any())
@@ -1741,7 +1855,7 @@ def run_block(G, core, halo):
             zl = float(np.interp(u["sl"], Lo.s, Lo.z))
             ku, kl = _kind_name(L, u["up"]), _kind_name(L, u["lo"])
             clr = CLEAR["rail"] if kl == "rail" else CLEAR["path"] if kl == "path" else (
-                CLEAR["ped_over_road"] if ku == "path" else CLEAR["road"])
+                CLEAR["ped_over_road"] if ku == "path" else CLEAR["road_under_rail"] if ku == "rail" else CLEAR["road"])
             deck = DECK["rail"] if ku == "rail" else DECK["path"] if ku == "path" else (
                 DECK["motorway"] if L.cls[u["up"]] <= 1 else DECK["road"])
             if u.get("down"):
@@ -1809,6 +1923,42 @@ def run_block(G, core, halo):
         # into clearances (a ramp pinned to its deck would otherwise lift the deck, and so on)
         solve(touched)
         memguard("solve")
+    # 2b. track ends that touch another track without a shared node (sidings and switches whose OSM
+    #     ways stop on, not at, the other track) take its level: a train must not step metres at a
+    #     switch. The flatter of the two follows the more constrained one.
+    rail_ids = [si for si, S in enumerate(strokes) if S.kind == 1 and len(S.s) >= 2 and not (S.vf & V_TUNNEL).all()]
+    if len(rail_ids) > 1:
+        allp = np.vstack([strokes[si].xy for si in rail_ids])
+        own = np.concatenate([np.full(len(strokes[si].xy), si) for si in rail_ids])
+        vix = np.concatenate([np.arange(len(strokes[si].xy)) for si in rail_ids])
+        rtree = cKDTree(allp)
+        extra = defaultdict(dict)
+        for si in rail_ids:
+            S = strokes[si]
+            for v in (0, len(S.s) - 1):
+                if S.vf[v] & V_TUNNEL:
+                    continue
+                best = None
+                for j in rtree.query_ball_point(S.xy[v], 1.0):
+                    if own[j] == si:
+                        continue
+                    T = strokes[own[j]]
+                    dz = float(T.z[vix[j]] - S.z[v])
+                    if abs(dz) > 0.3 and (best is None or abs(dz) < abs(best[2])):
+                        best = (own[j], vix[j], dz)
+                if best is None:
+                    continue
+                tj, tv, dz = best
+                T = strokes[tj]
+                if abs(T.z[tv] - T.g[tv]) >= abs(S.z[v] - S.g[v]):
+                    extra[si][v] = float(T.z[tv])
+                else:
+                    extra[tj][tv] = float(S.z[v])
+        for si, pins in extra.items():
+            strokes[si].pins = {**strokes[si].pins, **pins}
+        if extra:
+            solve(set(extra))
+        report["rail_touch_pins"] = sum(len(v) for v in extra.values())
     # 3. one last clearance pass against the final lower lines (a street lifted by a pin at a
     #    junction next to an underpass must not end up under the rail deck), no more pins after
     requirements()
@@ -1830,6 +1980,16 @@ def run_block(G, core, halo):
             S.vf[a_:b_ + 1] = (S.vf[a_:b_ + 1] & 0x0F) | V_BRIDGE | (S.vf[a_ - 1] & ~0x0F)
             filled += 1
     report["deck_gaps_filled"] = filled
+    # streets dipped under a rail line (open underpasses): drawn at their solved z, not draped
+    dipped = 0
+    for S in strokes:
+        if S.kind != 0 or S.z is None:
+            continue
+        m = (S.z < S.g - 0.5) & ((S.vf & (V_BRIDGE | V_TUNNEL)) == 0) & ((S.vf >> V_STRUCT_SHIFT) == 0)
+        if m.any():
+            S.vf[m] = (S.vf[m] & 0x0F) | (STRUCT["exact"] << V_STRUCT_SHIFT)
+            dipped += int(m.sum())
+    report["street_vertices_dipped"] = dipped
     for S in strokes:
         if S.kind == 0 and S.cls >= 7 and S.attrs is not None:
             m = (S.vf & V_BRIDGE) != 0
@@ -2730,12 +2890,16 @@ def embed_rail(strokes: list[Stroke], surfaces, report):
     polys = [g for _, g in surfaces]
     road_pts = []
     road_hw = []
+    road_z = []
     for S in strokes:
         if S.kind == 0 and S.group == 0 and S.cls <= 6:
-            road_pts.append(S.xy)
-            road_hw.append(np.maximum(S.attrs["pL"], S.attrs["pR"]))
+            keep = (S.vf & V_TUNNEL) == 0                 # a street in a tunnel / underpass is not
+            road_pts.append(S.xy[keep])                   # across the track
+            road_hw.append(np.maximum(S.attrs["pL"], S.attrs["pR"])[keep])
+            road_z.append((S.z if S.z is not None else S.g)[keep])
     rp = np.vstack(road_pts) if road_pts else np.zeros((0, 2))
     rh = np.concatenate(road_hw) if road_hw else np.zeros(0)
+    rz = np.concatenate(road_z) if road_z else np.zeros(0)
     tree = cKDTree(rp) if len(rp) else None
     ptree = shapely.STRtree(polys) if polys else None
     n = 0
@@ -2749,13 +2913,17 @@ def embed_rail(strokes: list[Stroke], surfaces, report):
             for k in range(len(S.s)):
                 if m[k] or S.vf[k] & (V_BRIDGE | V_TUNNEL):
                     continue
+                zk = S.z[k] if S.z is not None else S.g[k]
                 for j in tree.query_ball_point(S.xy[k], 25.0):
-                    if np.hypot(*(rp[j] - S.xy[k])) < rh[j] + 1.0:
+                    # same level only: a street passing under (or over) the track is no crossing
+                    if np.hypot(*(rp[j] - S.xy[k])) < rh[j] + 1.0 and abs(rz[j] - zk) < 1.5:
                         m[k] = True
                         break
         if ptree is not None:
             hit = ptree.query(shapely.points(S.xy), predicate="within")
-            m[hit[0]] = True
+            zz = S.z if S.z is not None else S.g
+            ok = np.abs(zz[hit[0]] - S.g[hit[0]]) < 1.0      # junction surfaces are at grade
+            m[hit[0][ok]] = True
         # grow by one vertex so panels cover the whole road width between samples
         m2 = m.copy()
         m2[1:] |= m[:-1]
@@ -2911,6 +3079,7 @@ def build(bbox=None, out_path=None, workers=2, only=None):
     shutil.rmtree(spool, ignore_errors=True)
     report = base_report
     report["rail_pieces_stitched"] = stitch_rail(A)
+    report["underpasses"] = write_underpasses(A)
     for r in reports:
         for k, v in r.items():
             if isinstance(v, (int, float)) and not isinstance(v, bool):
@@ -3114,6 +3283,8 @@ def emit(L: Lines, strokes, clusters, jrec, surf, walks, curbs, pads, poles, med
                 fl = int(L.flags[i])
                 if (S.vf[sl] & V_BRIDGE).any():
                     fl |= F_BRIDGE
+                if ((S.vf[sl] >> V_STRUCT_SHIFT) == STRUCT["exact"]).any():
+                    fl |= F_TUNNEL       # dipped under a rail corridor: cars take the graph's z there
                 O["way"].append(dict(id=float(L.id[i]), xyz=xyz, s=ss, nF=int(nF[i]), nB=int(nB[i]),
                                      width=float(S.attrs["pL"][mid] + S.attrs["pR"][mid]), flags=fl,
                                      node=ns.astype(np.int64), node_s=nss))
@@ -3176,6 +3347,53 @@ _OFFS = {"road_off": "road_xyz", "lot_off": "lot_xyz", "rail_off": "rail_xyz", "
          "way_off": "way_xyz", "way_node_off": "way_node", "jn_arm_off": "jn_arm_ang", "js_off": "js_tri",
          "jw_off": "jw_tri", "jc_off": "jc_xy", "md_off": "md_xyz"}
 _TRIS = {"js_tri": "js_xy", "jw_tri": "jw_xy"}
+
+
+def write_underpasses(A: dict, path=None) -> int:
+    """Streets passing under main-line / siding track (rail more than 3 m above the street at the
+    crossing, street not in a tunnel): one record per street x track crossing for the structures builder
+    (docs/STRUCTURES.md) -- data/underpasses.json = {underpasses: [{e, n, street, street_name,
+    track, z_street, z_rail, clearance}]}, z = datum m at the crossing, clearance = rail top - street."""
+    ro, rx, rv = A["road_off"], A["road_xyz"], A["road_vf"]
+    lo, lx, lv, lc = A["rail_off"], A["rail_xyz"], A["rail_vf"], A["rail_cls"]
+    loo, losm = A["rail_osm_off"], A["rail_osm"]
+    # streets (not in tunnels) that cross under a surface track by more than 3 m
+    tun = np.add.reduceat((rv & V_TUNNEL) != 0, ro[:-1].astype(np.int64)) if len(ro) > 1 else np.zeros(0)
+    dip = np.nonzero((A["road_cls"] <= 6) & (tun == 0))[0] if len(ro) > 1 else np.zeros(0, np.int64)
+    rails = [i for i in range(len(lo) - 1) if lc[i] <= 1 and lo[i + 1] - lo[i] >= 2]
+    out = []
+    if len(dip) and rails:
+        rg = [shapely.LineString(lx[lo[i]:lo[i + 1], :2]) for i in rails]
+        tree = shapely.STRtree(rg)
+        dip = dip[(ro[dip + 1] - ro[dip]) >= 2]
+        cnt = (ro[dip + 1] - ro[dip]).astype(np.int64)
+        vi = np.repeat(ro[dip].astype(np.int64) - np.concatenate([[0], np.cumsum(cnt)[:-1]]), cnt) + np.arange(cnt.sum())
+        roads = shapely.linestrings(rx[vi, :2], indices=np.repeat(np.arange(len(dip)), cnt))
+        pairs = tree.query(roads, predicate="intersects")        # (road index, rail index)
+
+        def z_at(Q, q):
+            k = int(np.argmin(np.hypot(*(Q[:, :2] - q).T)))
+            return float(Q[k, 2])
+        for a, j in zip(*pairs):
+            i = dip[a]
+            P = rx[ro[i]:ro[i + 1]]
+            for pt in shapely.get_parts(shapely.intersection(roads[a], rg[j])):
+                if pt.geom_type != "Point":
+                    continue
+                q = np.array([pt.x, pt.y])
+                ri = rails[j]
+                zr, zs = z_at(lx[lo[ri]:lo[ri + 1]], q), z_at(P, q)
+                if zr - zs < 3.0:
+                    continue
+                out.append(dict(e=round(float(q[0]), 1), n=round(float(q[1]), 1), street=int(A["road_osm"][i]),
+                                street_name=str(A["road_name"][i]), track=int(losm[loo[ri]]),
+                                z_street=round(zs, 2), z_rail=round(zr, 2), clearance=round(zr - zs, 2)))
+    if path is None:
+        path = (geo.OUT / "underpasses.json") if geo.WORK.resolve() == (geo.PIPE / "work").resolve() else (geo.WORK / "underpasses.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(version=1, underpasses=out), separators=(",", ":")))
+    print(f"wrote {path}: {len(out):,} street x track underpass crossings", flush=True)
+    return len(out)
 
 
 def stitch_rail(A: dict) -> int:

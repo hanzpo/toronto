@@ -47,7 +47,7 @@ from scipy.spatial import cKDTree
 
 from . import geo, tbn, terrain
 from .grade import profile as grade_profile
-from .rail_geom import RAIL_RADIUS, fillet
+from .rail_geom import RAIL_RADIUS, apply_curated_rail_z, fillet, model_rail_z
 
 KINDS = {"rail": 0, "subway": 1, "light_rail": 2, "tram": 3, "narrow_gauge": 0}
 KIND_NAMES = ["rail", "subway", "light_rail", "tram"]
@@ -674,6 +674,12 @@ class RailGraph:
                         w = np.clip(1.0 - np.abs(cum - cum[idx]) / RAMP, 0.0, 1.0)
                         corr += dz * w
             z = z + corr
+            # z comes from the network model (tpipe.roadnet: the drawn tracks, with the curated rail
+            # levels applied, docs/ROADS.md "Source of truth"); the own grade profile only where no
+            # model track is within 1.5 m (no roadnet output yet)
+            rc = {0: (0, 1, 5), 1: (2,), 2: (3,), 3: (4,)}
+            mz = model_rail_z(P, kinds={c for e, _ in st for c in rc.get(int(self.e_kind[e]), (0, 1, 5))})
+            z = np.where(np.isfinite(mz), mz, apply_curated_rail_z(P, z))
             for idx, n in node_pos:
                 if n not in node_z:
                     node_z[n] = float(z[idx])

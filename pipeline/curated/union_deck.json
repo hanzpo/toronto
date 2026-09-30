@@ -1,0 +1,22 @@
+{
+ "about": "Union Station track deck extent in the union_station landmark frame (landmarks.json pos / rotation; local x east along Front St, local y north). The rail LEVEL is not set here: it is the network model's (curated/corridors.json 'usrc', applied by tpipe.roadnet; docs/ROADS.md 'Source of truth'). tpipe.landmarks writes the model's rail z on the deck into landmarks.json union_station.rail_z (and the track centrelines), which the landmark deck and platforms use; platforms are rail_z + 0.9. tpipe.stations checks the train graph against the model on this extent.",
+ "frame": {
+  "pos": [
+   216.98,
+   -940.4
+  ],
+  "rotation": 0.2879,
+  "base": 1.81
+ },
+ "deck": {
+  "x0": -169,
+  "x1": 187,
+  "y0": -64,
+  "y1": 23
+ },
+ "up_deck": {
+  "x0": -268,
+  "x1": -169,
+  "note": "UP Express platform 1A on the north track west of York St, also at rail_z"
+ }
+}

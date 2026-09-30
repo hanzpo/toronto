@@ -46,11 +46,14 @@ OWNER = {  # which workstream fixes each category (docs/QA.md)
     **{c: "stations" for c in ("platform_track_clearance", "station_column_clearance", "tree_on_platform")},
     **{c: "rail" for c in ("rail_kink", "rail_gap", "route_track_conflict", "building_over_track")},
     **{c: "transit" for c in ("transit_route_off_road", "transit_wrong_way", "vehicle_path_through_building")},
-    **{c: "buildings-props" for c in ("building_overlap", "floating_object", "prop_in_lane", "prop_in_building", "house_overlap",
+    **{c: "buildings-props" for c in ("building_overlap", "floating_object", "prop_in_lane", "prop_in_crosswalk", "prop_in_building", "house_overlap",
                                       "building_over_road", "lot_over_building")},
     **{c: "vegetation" for c in ("tree_on_road", "tree_on_rail", "tree_over_track", "tree_on_airfield", "tree_on_water", "tree_in_building")},
     **{c: "landmarks" for c in ("landmark_overlap", "landmark_road_overlap")},
     "raster_shore": "ground",
+    # cross-layer merge gate against the network model (docs/ROADS.md "Source of truth")
+    **{c: "model" for c in ("rail_above_bed", "duplicate_track", "underpass_drawn_at_grade", "drawn_rail_vs_train_path",
+                            "graph_vs_model")},
 }
 
 

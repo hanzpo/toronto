@@ -1,88 +1,311 @@
 {
-  "about": "Curated deck profiles for elevated / long structures (tpipe.roadnet, docs/ROADS.md). profile = [lon, lat, height m]; mode above_ground = height over the (150 m smoothed) bare-earth terrain, absolute = datum metres. Vertices of matching strokes (by name or OSM way id, class <= max_class) within `snap` m of the control polyline are pinned to the interpolated height; ramps (links) are pinned only where they are bridges. Heights are estimates from the cited sources; see docs/ROADS.md.",
-  "corridors": [
-    {
-      "id": "gardiner_elevated",
-      "names": ["Gardiner Expressway"],
-      "max_class": 0,
-      "structure": "portal",
-      "force_bridge": true,
-      "snap": 45,
-      "profile": [
-        [-79.42710, 43.63300, 0.0],
-        [-79.42350, 43.63400, 5.5],
-        [-79.42038, 43.63498, 8.5],
-        [-79.41418, 43.63701, 10.0],
-        [-79.40799, 43.63751, 10.5],
-        [-79.40179, 43.63799, 11.0],
-        [-79.39559, 43.63818, 11.0],
-        [-79.38940, 43.63905, 11.0],
-        [-79.38320, 43.64065, 11.5],
-        [-79.37700, 43.64404, 12.0],
-        [-79.37081, 43.64550, 12.5],
-        [-79.36461, 43.64679, 12.5],
-        [-79.35841, 43.64886, 12.0],
-        [-79.35221, 43.64906, 11.0],
-        [-79.34911, 43.65156, 9.0]
-      ],
-      "sources": [
-        "Dillon/Waterfront Toronto, Gardiner East EA Appendix J, Infrastructure Baseline Conditions (2016): 2-3 column bents, reinforced-concrete caps, 18-21 m spans (30 m at Yonge, Jarvis, Sherbourne, Parliament, Cherry), 33-44 m deck width Yonge-DVP. https://www.waterfrontoronto.ca/sites/default/files/documents/appendix-j---infrastructure-baseline-conditions-report---2016-09-22.pdf",
-        "https://en.wikipedia.org/wiki/Gardiner_Expressway (elevated 6.8 km from east of Dufferin to east of the Don River)",
-        "Deck height ~10-13 m over Lake Shore Blvd estimated from street photos (not confirmed by a drawing)"
-      ]
-    },
-    {
-      "id": "burlington_skyway",
-      "names": ["Queen Elizabeth Way"],
-      "max_class": 0,
-      "structure": "girder",
-      "snap": 60,
-      "main_span": {"center": [-79.7995, 43.3015], "length": 151.0, "structure": "truss"},
-      "profile": [
-        [-79.79083, 43.28772, 4.0],
-        [-79.79400, 43.29320, 16.0],
-        [-79.79700, 43.29850, 34.0],
-        [-79.79950, 43.30150, 41.0],
-        [-79.80100, 43.30420, 30.0],
-        [-79.80308, 43.30895, 6.0]
-      ],
-      "sources": [
-        "https://en.wikipedia.org/wiki/Burlington_Bay_James_N._Allan_Skyway: 2,560 m (1958) / 2,215 m (1985), main span 151 m, back spans 83.7 m, navigation clearance 36.7 m"
-      ]
-    },
-    {
-      "id": "garden_city_skyway",
-      "names": ["Queen Elizabeth Way"],
-      "max_class": 0,
-      "structure": "girder",
-      "snap": 60,
-      "main_span": {"center": [-79.1975, 43.1665], "length": 110.0, "structure": "truss"},
-      "profile": [
-        [-79.21050, 43.16820, 4.0],
-        [-79.20400, 43.16750, 22.0],
-        [-79.19750, 43.16650, 40.0],
-        [-79.19100, 43.16560, 22.0],
-        [-79.18450, 43.16480, 4.0]
-      ],
-      "sources": [
-        "https://en.wikipedia.org/wiki/Garden_City_Skyway: 2.2 km, limits ship height to 35.5 m over the Welland Canal"
-      ]
-    },
-    {
-      "id": "prince_edward_viaduct",
-      "names": ["Bloor Street East", "Danforth Avenue"],
-      "max_class": 5,
-      "structure": "arch",
-      "pin": false,
-      "snap": 40,
-      "profile": [
-        [-79.36620, 43.67280, 0.0],
-        [-79.35870, 43.67630, 0.0]
-      ],
-      "sources": [
-        "https://en.wikipedia.org/wiki/Prince_Edward_Viaduct: 494 m, 40 m above the Don valley, three-hinged steel arches (85.8 m main, 73.6 m, 48.2 m spans), subway deck below the road deck",
-        "https://historicbridges.org/bridges/browser/?bridgebrowser=ontario%2Fbloorstreetprinceedwardviaduct%2F"
-      ]
-    }
-  ]
+ "about": "Curated deck profiles for elevated / long structures (tpipe.roadnet, docs/ROADS.md). profile = [lon, lat, height m]; mode above_ground = height over the (150 m smoothed) bare-earth terrain, absolute = datum metres. Vertices of matching strokes (by name or OSM way id, class <= max_class) within `snap` m of the control polyline are pinned to the interpolated height; ramps (links) are pinned only where they are bridges. Heights are estimates from the cited sources; see docs/ROADS.md.",
+ "corridors": [
+  {
+   "id": "gardiner_elevated",
+   "names": [
+    "Gardiner Expressway"
+   ],
+   "max_class": 0,
+   "structure": "portal",
+   "force_bridge": true,
+   "snap": 45,
+   "profile": [
+    [
+     -79.4271,
+     43.633,
+     0.0
+    ],
+    [
+     -79.4235,
+     43.634,
+     5.5
+    ],
+    [
+     -79.42038,
+     43.63498,
+     8.5
+    ],
+    [
+     -79.41418,
+     43.63701,
+     10.0
+    ],
+    [
+     -79.40799,
+     43.63751,
+     10.5
+    ],
+    [
+     -79.40179,
+     43.63799,
+     11.0
+    ],
+    [
+     -79.39559,
+     43.63818,
+     11.0
+    ],
+    [
+     -79.3894,
+     43.63905,
+     11.0
+    ],
+    [
+     -79.3832,
+     43.64065,
+     11.5
+    ],
+    [
+     -79.377,
+     43.64404,
+     12.0
+    ],
+    [
+     -79.37081,
+     43.6455,
+     12.5
+    ],
+    [
+     -79.36461,
+     43.64679,
+     12.5
+    ],
+    [
+     -79.35841,
+     43.64886,
+     12.0
+    ],
+    [
+     -79.35221,
+     43.64906,
+     11.0
+    ],
+    [
+     -79.34911,
+     43.65156,
+     9.0
+    ]
+   ],
+   "sources": [
+    "Dillon/Waterfront Toronto, Gardiner East EA Appendix J, Infrastructure Baseline Conditions (2016): 2-3 column bents, reinforced-concrete caps, 18-21 m spans (30 m at Yonge, Jarvis, Sherbourne, Parliament, Cherry), 33-44 m deck width Yonge-DVP. https://www.waterfrontoronto.ca/sites/default/files/documents/appendix-j---infrastructure-baseline-conditions-report---2016-09-22.pdf",
+    "https://en.wikipedia.org/wiki/Gardiner_Expressway (elevated 6.8 km from east of Dufferin to east of the Don River)",
+    "Deck height ~10-13 m over Lake Shore Blvd estimated from street photos (not confirmed by a drawing)"
+   ]
+  },
+  {
+   "id": "burlington_skyway",
+   "names": [
+    "Queen Elizabeth Way"
+   ],
+   "max_class": 0,
+   "structure": "girder",
+   "snap": 60,
+   "main_span": {
+    "center": [
+     -79.7995,
+     43.3015
+    ],
+    "length": 151.0,
+    "structure": "truss"
+   },
+   "profile": [
+    [
+     -79.79083,
+     43.28772,
+     4.0
+    ],
+    [
+     -79.794,
+     43.2932,
+     16.0
+    ],
+    [
+     -79.797,
+     43.2985,
+     34.0
+    ],
+    [
+     -79.7995,
+     43.3015,
+     41.0
+    ],
+    [
+     -79.801,
+     43.3042,
+     30.0
+    ],
+    [
+     -79.80308,
+     43.30895,
+     6.0
+    ]
+   ],
+   "sources": [
+    "https://en.wikipedia.org/wiki/Burlington_Bay_James_N._Allan_Skyway: 2,560 m (1958) / 2,215 m (1985), main span 151 m, back spans 83.7 m, navigation clearance 36.7 m"
+   ]
+  },
+  {
+   "id": "garden_city_skyway",
+   "names": [
+    "Queen Elizabeth Way"
+   ],
+   "max_class": 0,
+   "structure": "girder",
+   "snap": 60,
+   "main_span": {
+    "center": [
+     -79.1975,
+     43.1665
+    ],
+    "length": 110.0,
+    "structure": "truss"
+   },
+   "profile": [
+    [
+     -79.2105,
+     43.1682,
+     4.0
+    ],
+    [
+     -79.204,
+     43.1675,
+     22.0
+    ],
+    [
+     -79.1975,
+     43.1665,
+     40.0
+    ],
+    [
+     -79.191,
+     43.1656,
+     22.0
+    ],
+    [
+     -79.1845,
+     43.1648,
+     4.0
+    ]
+   ],
+   "sources": [
+    "https://en.wikipedia.org/wiki/Garden_City_Skyway: 2.2 km, limits ship height to 35.5 m over the Welland Canal"
+   ]
+  },
+  {
+   "id": "prince_edward_viaduct",
+   "names": [
+    "Bloor Street East",
+    "Danforth Avenue"
+   ],
+   "max_class": 5,
+   "structure": "arch",
+   "pin": false,
+   "snap": 40,
+   "profile": [
+    [
+     -79.3662,
+     43.6728,
+     0.0
+    ],
+    [
+     -79.3587,
+     43.6763,
+     0.0
+    ]
+   ],
+   "sources": [
+    "https://en.wikipedia.org/wiki/Prince_Edward_Viaduct: 494 m, 40 m above the Don valley, three-hinged steel arches (85.8 m main, 73.6 m, 48.2 m spans), subway deck below the road deck",
+    "https://historicbridges.org/bridges/browser/?bridgebrowser=ontario%2Fbloorstreetprinceedwardviaduct%2F"
+   ]
+  },
+  {
+   "id": "usrc",
+   "kind": "rail",
+   "names": [],
+   "max_class": 1,
+   "mode": "absolute",
+   "structure": "rail",
+   "exact": true,
+   "snap": 68.5,
+   "profile": [
+    [
+     -79.401828,
+     43.639957,
+     3.0
+    ],
+    [
+     -79.398264,
+     43.640725,
+     3.4
+    ],
+    [
+     -79.394105,
+     43.64162,
+     3.9
+    ],
+    [
+     -79.391728,
+     43.642131,
+     4.2
+    ],
+    [
+     -79.388757,
+     43.64277,
+     7.6
+    ],
+    [
+     -79.38543,
+     43.643486,
+     8.1
+    ],
+    [
+     -79.383623,
+     43.643874,
+     8.31
+    ],
+    [
+     -79.382447,
+     43.644127,
+     8.31
+    ],
+    [
+     -79.378216,
+     43.645037,
+     8.31
+    ],
+    [
+     -79.375447,
+     43.645632,
+     8.2
+    ],
+    [
+     -79.370931,
+     43.646603,
+     7.6
+    ],
+    [
+     -79.367365,
+     43.647369,
+     6.8
+    ],
+    [
+     -79.362611,
+     43.648391,
+     6.3
+    ],
+    [
+     -79.357857,
+     43.649412,
+     5.5
+    ]
+   ],
+   "note": "Union Station Rail Corridor: top-of-rail level (datum m) of every main / siding track within snap m of the control line, exact (drawn and driven at this z). The Union deck section (York St to Bay St, UP platform 1A west of York) is flat at 8.31 m; streets pass under in open underpasses (roadnet: short street tunnels below the track are opened and dipped under it). The union_station landmark deck and platforms read this level from the model (landmarks.json union_station.rail_z). West of Spadina the corridor falls to grade through the Bathurst yards (under the Bathurst St bridge).",
+   "sources": [
+    "Station deck level and approach hints: pipeline/curated/union_deck.json history (stations agent, from the Union landmark model and OSM platform ways)",
+    "City of Toronto DSM along the corridor (berm / viaduct tops 6-8 m datum between Spadina and Cherry)",
+    "https://en.wikipedia.org/wiki/Union_Station_Rail_Corridor (elevated corridor from Bathurst to the Don, street underpasses)"
+   ]
+  }
+ ]
 }

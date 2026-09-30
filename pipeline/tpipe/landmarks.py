@@ -475,6 +475,54 @@ def ring(g, tol=0.3) -> list[list[float]]:
     return [[round(x, 2), round(y, 2)] for x, y in list(ext.coords)[:-1]]
 
 
+def union_rails_from_model(entry: dict) -> dict:
+    """rail_z (datum m, top of rail) and the 11 through-track centrelines (local y, north to
+    south, every 15 m from local x = -195) on the Union deck, read from the network model
+    (work/roadnet.npz). Empty when the model is missing (the landmark keeps its defaults)."""
+    import shapely
+
+    p = geo.WORK / "roadnet.npz"
+    if not p.exists():
+        return {}
+    with np.load(p, allow_pickle=True) as d:
+        off, xyz, cls = d["rail_off"], d["rail_xyz"], d["rail_cls"]
+    (ox, oy), r = entry["pos"], float(entry["rotation"])
+    c, s_ = math.cos(r), math.sin(r)
+    dk = json.loads((geo.PIPE / "curated" / "union_deck.json").read_text())["deck"]
+    lines, zs = [], []
+    for i in range(len(off) - 1):
+        if cls[i] > 1 or off[i + 1] - off[i] < 2:
+            continue
+        Q = xyz[off[i]:off[i + 1]]
+        dx, dy = Q[:, 0] - ox, Q[:, 1] - oy
+        lx, ly = dx * c + dy * s_, -dx * s_ + dy * c
+        m = (lx > dk["x0"] - 60) & (lx < dk["x1"] + 60) & (ly > dk["y0"] - 15) & (ly < dk["y1"] + 15)
+        if not m.any():
+            continue
+        lines.append(np.stack([lx, ly, Q[:, 2]], 1))
+        on = (lx > dk["x0"] + 5) & (lx < dk["x1"] - 5) & (ly > dk["y0"]) & (ly < dk["y1"])
+        zs.append(Q[on, 2])
+    z = np.concatenate(zs) if zs else np.zeros(0)
+    z = z[np.abs(z - np.median(z)) < 2.0] if len(z) else z          # surface tracks (not the subway)
+    if not len(z):
+        return {}
+    rail_z = float(np.median(z))
+    rows = []
+    for x in range(-195, 226, 15):
+        cut = shapely.LineString([(x, dk["y0"] - 15), (x, dk["y1"] + 15)])
+        ys = []
+        for L3 in lines:
+            if np.abs(L3[:, 2] - rail_z).min() > 1.0:
+                continue
+            for pt in shapely.get_parts(shapely.intersection(shapely.LineString(L3[:, :2]), cut)):
+                if pt.geom_type == "Point":
+                    ys.append(pt.y)
+        ys = sorted(set(round(y, 2) for y in ys), reverse=True)
+        rows.append(ys if len(ys) == 11 else None)
+    print(f"union_station: model rail_z {rail_z:.2f} m, {sum(r_ is not None for r_ in rows)}/{len(rows)} track rows")
+    return dict(rail_z=round(rail_z, 3), tracks=dict(x0=-195, dx=15, rows=rows))
+
+
 def main() -> None:
     t0 = time.time()
     areas, lines = load_osm()
@@ -644,6 +692,12 @@ def main() -> None:
         out.append(entry)
         print(f"{L['id']:22s} pos=({pos[0]:8.1f},{pos[1]:8.1f}) base={base:6.1f} "
               f"rot={math.degrees(rot):6.1f}° suppress={len(entry['suppress'])}")
+
+    # Union Station: rail level and track centrelines on the deck come from the network model
+    # (tpipe.roadnet rail pieces with the curated rail levels applied; docs/ROADS.md "Source of truth")
+    for entry in out:
+        if entry.get("id") == "union_station":
+            entry.update(union_rails_from_model(entry))
 
     # Waterfalls: brink lines.
     for fid, name, wid, ref in WATERFALLS:

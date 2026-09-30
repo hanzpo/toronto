@@ -35,7 +35,7 @@ export const FEAT_NONE = 0, FEAT_JUNCTION = 1, FEAT_SIGNAL = 2, FEAT_ZEBRA = 3, 
 export const FX_LINK = 1, FX_RUMBLE = 2, FX_SHARROW = 4, FX_STAIRS = 8, FX_CYCLE = 16, FX_DIVIDED = 32;
 // per-vertex flags (tpipe.roadnet V_*)
 const V_BRIDGE = 1, V_TUNNEL = 2, V_GRADED = 4, V_EMBED = 8;
-const ST_GIRDER = 1, ST_PORTAL = 2, ST_HAMMER = 3, ST_TRUSS = 4, ST_ARCH = 5, ST_FOOT = 6, ST_RAIL = 7, ST_GRASS = 10;
+const ST_GIRDER = 1, ST_PORTAL = 2, ST_HAMMER = 3, ST_TRUSS = 4, ST_ARCH = 5, ST_FOOT = 6, ST_RAIL = 7, ST_GRASS = 10, ST_EXACT = 11;
 // sidewalk bits (tpipe.roadnet SW_*)
 export const SW_L = 1, SW_R = 2, BLVD_L = 4, BLVD_R = 8, PAVERS = 16, MEDIAN_L = 32;
 // road flags
@@ -469,20 +469,22 @@ export function buildRoads(a: Record<string, TypedArray>, terr: Terrain, level: 
         const br = (vf & V_BRIDGE) !== 0;
         const dz = net ? run.dz[k] : 0;
         // blend: draped + dz near the ground, the solved absolute profile higher up / on decks
-        const wAbs = br ? 1 : (vf & V_GRADED) ? Math.min(1, Math.max(0, (dz - 1.5) / 3)) : 0;
+        // exact: a street dipped under a rail corridor (below the terrain until the ground is cut)
+        const exact = (vf >> 4) === ST_EXACT;
+        const wAbs = br || exact ? 1 : (vf & V_GRADED) ? Math.min(1, Math.max(0, (dz - 1.5) / 3)) : 0;
         // draped part never below the drawn ground (the solve's at-grade floor is ground - 0.15 m:
         // a road 0.12 m under the terrain showed as grass bands where the graded flag toggles)
         const zDr = t0 + ((vf & V_GRADED) ? ((vf & V_TUNNEL) ? dz : Math.max(dz, 0)) : 0);
         zc[k] = zDr + (run.z[k] - zDr) * wAbs;
         structZ[k] = zc[k];
         const hl = run.pl[k], hr = run.pr[k];
-        zm[k] = br || (vf & V_TUNNEL) ? 2 : wAbs > 0.99 || (vf & V_GRADED && dz > 0.3) ? 1 : 0;
+        zm[k] = br || exact || (vf & V_TUNNEL) ? 2 : wAbs > 0.99 || (vf & V_GRADED && dz > 0.3) ? 1 : 0;
         if (wAbs > 0.99 || (vf & V_GRADED && dz > 0.3)) {
           zl[k] = zr[k] = zc[k];
           // graded (flat) cross-section on a side slope: the 32 m terrain triangles can rise
           // above the pavement edge (grass bands across DVP lanes, cars on the bank) -- the
           // high edge follows the drawn ground up instead (cars ride that ground)
-          if (!br && !(vf & V_TUNNEL)) {
+          if (!br && !exact && !(vf & V_TUNNEL)) {
             zl[k] = Math.max(zc[k], terr.at(x + ox[k] * hl, y + oy[k] * hl) + 0.02);
             zr[k] = Math.max(zc[k], terr.at(x - ox[k] * hr, y - oy[k] * hr) + 0.02);
           }
@@ -1201,8 +1203,13 @@ export function buildRail(a: Record<string, TypedArray>, terr: Terrain, level: n
         const vf = run.vf[k];
         const t0 = terr.at(run.x[k], run.y[k]);
         const dz = dzA ? run.dz[k] : 0;
-        const wAbs = vf & V_BRIDGE ? 1 : vf & V_GRADED ? Math.min(1, Math.max(0, (dz - 1.5) / 3)) : 0;
-        const zDr = t0 + (vf & V_GRADED ? ((vf & V_TUNNEL) ? dz : Math.max(dz, 0)) : 0);
+        // heavy rail off the street is drawn at the solved z as is -- the z the trains run at (rail
+        // graph) and the curated levels (Union deck) -- with fills down to the terrain where it is
+        // raised; draping it on the 32 m terrain put the bed up to 2-5 m off the trains. Track set
+        // in streets / crossings (embedded) and streetcar track follow the draped road surface.
+        const own = c <= 2 && !(vf & V_EMBED) && !(vf & V_TUNNEL);
+        const wAbs = vf & V_BRIDGE || (vf >> 4) === ST_EXACT || own ? 1 : vf & V_GRADED ? Math.min(1, Math.max(0, (dz - 1.5) / 3)) : 0;
+        const zDr = t0 + (vf & V_GRADED ? dz : 0); // street track dips into portals (open cuts) as solved
         z[k] = zDr + (run.z[k] - zDr) * wAbs;
       }
       count++;
@@ -1217,7 +1224,10 @@ export function buildRail(a: Record<string, TypedArray>, terr: Terrain, level: n
         if (level === 0) {
           // raised approaches (graded above the ground off the span): grass fill slopes, so an
           // abutment never stands in the air with the track floating behind it
-          for (let k = 0; k < nv; k++) if (!(run.vf[k] & V_BRIDGE)) { run.pl[k] = run.pr[k] = hwB + 0.2; run.sw[k] = 0; }
+          for (let k = 0; k < nv; k++) if (!(run.vf[k] & V_BRIDGE)) {
+            run.pl[k] = run.pr[k] = hwB + 0.2; run.sw[k] = 0;
+            if (c <= 2 && !(run.vf[k] & (V_EMBED | V_TUNNEL))) run.vf[k] |= V_GRADED; // drawn at z: fill where raised
+          }
           embankment(b, { ...P, lift: 0.03 }, 0, 0, terr);
           for (const [k0, k1] of vRanges(run, (k) => (run.vf[k] & V_BRIDGE) !== 0)) {
             for (let k = k0; k <= k1; k++) { run.pl[k] = run.pr[k] = hwB + 0.6; run.sw[k] = 0; }

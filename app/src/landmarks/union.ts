@@ -27,8 +27,11 @@ import { Parts, prism, rect, cyl, box, beam, P as P3, ccw, type V2 } from './kit
 import { addOsmParts } from './osmparts'
 import type { BuildCtx } from './types'
 
-/** rail elevation above the landmark base (8.3 m datum − 1.81 m) */
+/** rail elevation above the landmark base: the network model's rail level on the deck
+ *  (landmarks.json union_station.rail_z, from tpipe.roadnet + curated/corridors.json 'usrc';
+ *  docs/ROADS.md "Source of truth") − base. 6.5 m is only the fallback for old data. */
 export const UNION_RAIL = 6.5
+let RAIL = UNION_RAIL
 /** platform top above rail */
 const PLAT_H = 0.9
 /** track centrelines (local y), north → south, sampled every 15 m from x = −195 to 225 (OSM rail ways) */
@@ -75,10 +78,23 @@ const ATRIUM = { x0: -38, x1: 52, y0: -38, y1: 8 }
 /** Bush shed eave above rail (a GO bilevel is 4.8 m tall) */
 const EAVE = 5.9
 
+/** track centrelines in use: the model's (landmarks.json union_station.tracks) where given, else TRACK_TAB */
+let TAB: number[][] = TRACK_TAB
+
 export const trackY = (i: number, x: number) => {
-  const f = Math.max(0, Math.min(TRACK_TAB.length - 1.0001, (x - TX0) / TDX))
+  const f = Math.max(0, Math.min(TAB.length - 1.0001, (x - TX0) / TDX))
   const k = Math.floor(f), u = f - k
-  return TRACK_TAB[k][i] * (1 - u) + TRACK_TAB[k + 1][i] * u
+  return TAB[k][i] * (1 - u) + TAB[k + 1][i] * u
+}
+
+/** take the rail level and track centrelines from the network model (landmarks.json entry) */
+function fromModel(ctx: BuildCtx) {
+  const e = ctx.entry as (BuildCtx['entry'] & { rail_z?: number; tracks?: { x0: number; dx: number; rows: (number[] | null)[] } }) | null
+  RAIL = e && typeof e.rail_z === 'number' ? e.rail_z - e.base : UNION_RAIL
+  const rows = e?.tracks?.rows
+  TAB = rows && e!.tracks!.x0 === TX0 && e!.tracks!.dx === TDX && rows.length === TRACK_TAB.length
+    ? rows.map((r, k) => (r && r.length === NT ? r : TRACK_TAB[k]))
+    : TRACK_TAB
 }
 
 const upY = (x: number) => {
@@ -117,7 +133,8 @@ function strip(y0: (x: number) => number, y1: (x: number) => number, x0: number,
 export function buildUnionStation(ctx: BuildCtx) {
   const hi = ctx.detail === 'high'
   const P = new Parts()
-  const R = UNION_RAIL
+  fromModel(ctx)
+  const R = RAIL
 
   // ---------------------------------------------------------------- head house
   buildHeadHouse(P, ctx, hi)
@@ -146,13 +163,7 @@ export function buildUnionStation(ctx: BuildCtx) {
       if (pl.name !== '3') P.add('yellow', prism(ccw(strip((x) => pl.y1(x) - t, pl.y1, pl.x0, pl.x1)), R + PLAT_H, R + PLAT_H + 0.02))
     }
   }
-  // ballast / track bed under every track (dark), so the tracks read between the platforms
-  for (let i = 0; i < NT; i++) {
-    const t = (x: number) => trackY(i, x)
-    P.add('roofDark', prism(ccw(strip((x) => t(x) - 1.65, (x) => t(x) + 1.65, DECK_X0, DECK_X1)), R + 0.04, R + 0.07))
-    // running rails (standard gauge): the tile rails drape on the terrain below the deck
-    if (hi) for (const g of [-0.7175, 0.7175]) P.add('metalDark', prism(ccw(strip((x) => t(x) + g - 0.04, (x) => t(x) + g + 0.04, DECK_X0, DECK_X1)), R + 0.07, R + 0.2))
-  }
+  // (track bed and rails on the deck are the network model's tile track, drawn at the same rail level)
   // UP Express platform 1A (side platform north of the UP track, west of York)
   P.add('concrete', prism(ccw(strip((x) => upY(x) + EDGE, (x) => upY(x) + EDGE + 4.2, -262, -190, 6)), R - 0.3, R + 1.05))
   if (hi) P.add('yellow', prism(ccw(strip((x) => upY(x) + EDGE, (x) => upY(x) + EDGE + 0.6, -262, -190, 6)), R + 1.05, R + 1.07))
