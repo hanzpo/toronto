@@ -16,10 +16,19 @@ import { MarkerOverlay } from '../render/overlay/MarkerOverlay';
 import { VEHICLE_MODELS } from '../models/vehicles';
 import { clock } from '../state/clock';
 import { useApp, type AnalyticsKey } from '../state/store';
-import { MODES, MODE_ID, STATE_DWELL, TransitSystem, fetchLoader, type Mode, type PatternShape, type Profile } from '../transit';
+import { MODES, MODE_ID, STATE_DWELL, TransitSystem, fetchLoader, type Mode, type Profile } from '../transit';
 import { LANE_OFFSET, layoutFor, placeCar, type CarPose, type ConsistLayout } from './transit/consist';
 import { HoldController, type GroundVeh, type TrafficQueries } from './transit/hold';
 import { CarPools, FLAG_BRAKE } from './transit/pools';
+import { PatternShape } from '../transit/shape';
+import { RAIL_FLAG, RAIL_STRIDE } from '../sim/protocol';
+
+/** The traffic layer's view of the rail agents (sim/src/rail.rs, via the shared buffer). */
+interface RailSource {
+  railProfile: Profile | null;
+  railFeedsProfile: string;
+  railSnapshot(): { count: number; oe: number; on: number; simMs: number; feeds: string[]; f: Float32Array; u: Uint32Array; path: Float32Array } | null;
+}
 
 export type { GroundVeh } from './transit/hold';
 
@@ -29,6 +38,10 @@ const NEAR = 2600;
 const LOW_DETAIL = 450;
 /** m from the focus within which surface vehicles are held behind obstacles */
 const HOLD_RADIUS = 1400;
+/** altitude (m) range over which route lines fade in outside analytics mode */
+const LINES_FADE: [number, number] = [600, 1500];
+/** altitude (m) range over which far markers grow to their min-pixel size */
+const MARKER_PX_FADE: [number, number] = [150, 1200];
 const SURFACE = (1 << MODE_ID.bus) | (1 << MODE_ID.streetcar) | (1 << MODE_ID.lrt);
 
 interface ModeStyle {
@@ -53,6 +66,11 @@ const STYLE: Record<Mode, ModeStyle> = {
 const MODE_LIST = Object.keys(STYLE) as Mode[];
 /** transit MODE_ID (index into MODES) -> Mode */
 const MODE_LIST_BY_ID: readonly Mode[] = MODES;
+
+function smoothstep(a: number, b: number, x: number): number {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
 
 function hex(c: string): number {
   return parseInt(c.replace('#', ''), 16) || 0x888888;
@@ -101,8 +119,16 @@ export class TransitLayer implements Layer {
   private pose: CarPose = { e: 0, n: 0, z: 0, heading: 0, pitch: 0 };
   private ax = 0; private az = 0;
   private evalBox: [number, number, number, number] = [0, 0, 0, 0];
-  /** stats: cars drawn individually / vehicles held */
-  stats = { cars: 0, held: 0, near: 0 };
+  /** global trip -> rail agent record index this frame (-1: managed by the sim but not placed yet) */
+  private agents = new Map<number, number>();
+  private railSnap: ReturnType<RailSource['railSnapshot']> = null;
+  /** rail agents drawn this frame */
+  agentCount = 0;
+  /** stats: cars drawn individually / vehicles held; dupes = trips drawn by more than one representation (must stay 0) */
+  stats = { cars: 0, held: 0, near: 0, dupes: 0 };
+  /** trip -> pose of the vehicle as drawn this frame (centre, heading, length) */
+  private drawnPose = new Map<number, { x: number; y: number; z: number; heading: number; length: number }>();
+  private posePool: { x: number; y: number; z: number; heading: number; length: number }[] = [];
 
   constructor(dataRoot: string) {
     this.system = new TransitSystem(fetchLoader(`${dataRoot}/transit/`));
@@ -180,14 +206,20 @@ export class TransitLayer implements Layer {
     if (!this.loading && this.currentProfile() !== this.profile) void this.ensureProfile();
     const st = useApp.getState();
     const an = st.analytics;
-    // route lines per analytics toggle
+    // route lines per analytics toggle; outside analytics mode they fade in with altitude
+    // (never painted over the tracks at street level)
+    const lineFade = ctx.analyticsMode ? 1 : smoothstep(LINES_FADE[0], LINES_FADE[1], ctx.altitude);
     for (const m of MODE_LIST) {
-      const on = an[STYLE[m].key];
+      const on = an[STYLE[m].key] && lineFade > 0.01;
       const ov = this.lines.get(m)!;
       if (on && !this.linesBuilt.has(m) && this.system.tripCount > 0) this.buildLines(m);
       ov.setVisible(on && !this.hideLines);
+      ov.setOpacity(lineFade);
       ov.update(ctx);
     }
+    // min-pixel markers only from altitude (true size at street level)
+    const markerPx = ctx.analyticsMode ? 1 : smoothstep(MARKER_PX_FADE[0], MARKER_PX_FADE[1], ctx.altitude);
+    for (const m of MODE_LIST) this.markers.get(m)!.setMinPixels(STYLE[m].minPixels * markerPx);
     // vehicles
     const counts = new Map<Mode, number>();
     for (const m of MODE_LIST) counts.set(m, 0);
@@ -195,6 +227,9 @@ export class TransitLayer implements Layer {
     this.ax = ax; this.az = az;
     this.pools.group.position.set(ax, 0, az);
     this.pools.begin();
+    for (const p of this.drawnPose.values()) this.posePool.push(p);
+    this.drawnPose.clear();
+    let dupes = 0;
     this.groundN = 0;
     this.stats.near = 0;
     if (an.vehicles && this.system.tripCount > 0) {
@@ -209,6 +244,7 @@ export class TransitLayer implements Layer {
       } else this.system.setEvalBounds(null);
       const v = this.system.evaluate(this.lastT);
       const near = ctx.altitude < 3000;
+      const rail = this.railAgents();
       if (this.drawn.length < v.capacity) this.drawn = new Uint8Array(v.capacity);
       if (this.rdist.length < v.capacity) this.rdist = new Float64Array(v.capacity);
       this.drawn.fill(0, 0, v.count);
@@ -223,7 +259,7 @@ export class TransitLayer implements Layer {
         this.rdist[i] = v.dist[i];
         if (!near || !(SURFACE & (1 << v.mode[i]))) continue;
         if (Math.abs(v.x[i] - fE) > HOLD_RADIUS || Math.abs(v.y[i] - fN) > HOLD_RADIUS) continue;
-        if (this.overrides.has(v.trip[i])) continue;
+        if (this.overrides.has(v.trip[i]) || this.agents.has(v.trip[i])) continue;
         const shape = this.system.patternShape(v.pattern[i]);
         if (!shape) continue;
         const lay = layoutFor(MODE_LIST_BY_ID[v.mode[i]], this.system.routes[v.route[i]]);
@@ -262,11 +298,12 @@ export class TransitLayer implements Layer {
         if (!mode) continue;
         if (!near && !an[STYLE[mode].key]) continue;
         if (this.overrides.size && this.overrides.has(v.trip[i])) continue;
+        if (this.agents.has(v.trip[i])) continue; // drawn from the rail sim below
         const dc = Math.hypot(v.x[i] - camE, v.y[i] - camN);
         if (dc > markerMax) continue;
         const sty = STYLE[mode];
         // bounding radius: the consist (plus hold slack) or the min-pixel marker
-        const rad = near && dc < NEAR ? sty.size[0] + 60 : Math.max(sty.size[0], sty.minPixels * 2 * dc * pxK);
+        const rad = near && dc < NEAR ? sty.size[0] + 60 : Math.max(sty.size[0], sty.minPixels * markerPx * 2 * dc * pxK);
         if (!view.sphereEN(v.x[i], v.y[i], v.z[i], rad)) continue;
         this.drawn[i] = 1;
         const color = this.routeColor[v.route[i]] ?? 0xffffff;
@@ -280,6 +317,7 @@ export class TransitLayer implements Layer {
             next.set(trip, sp);
             const braking = sp < 0.2 || v.state[i] === STATE_DWELL || sp < prev - 0.01;
             this.drawConsist(shape, lay, this.rdist[i] + lay.length / 2, 1, this.routeTint[v.route[i]] ?? _white, dc > LOW_DETAIL, braking ? FLAG_BRAKE : 0, LANE_OFFSET[v.mode[i]]);
+            if (!this.notePose(trip, shape, this.rdist[i], lay.length, 1, LANE_OFFSET[v.mode[i]])) dupes++;
             this.stats.near++;
             continue;
           }
@@ -289,9 +327,59 @@ export class TransitLayer implements Layer {
         if (k >= mk.capacity) continue;
         mk.setMarker(k, v.x[i], v.y[i], v.z[i], v.heading[i], color);
         counts.set(mode, k + 1);
+        if (!this.notePoint(v.trip[i], v.x[i], v.y[i], v.z[i], v.heading[i], sty.size[0])) dupes++;
       }
       this.nextSpeed = this.prevSpeed;
       this.prevSpeed = next;
+      // --- rail agents (signalled trains from the sim)
+      if (rail) {
+        const { f, u, path, oe, on } = rail;
+        const adv = Math.min(0.15, Math.max(0, (clock.simMs - rail.simMs) / 1000));
+        this.agentCount = 0;
+        for (const [trip, k] of this.agents) {
+          if (k < 0 || this.overrides.has(trip)) continue;
+          const o = k * RAIL_STRIDE;
+          const pat = this.system.tripPattern(trip);
+          const mode = pat >= 0 ? this.system.patternMode(pat) : null;
+          if (!mode || (!near && !an[STYLE[mode].key])) continue;
+          const route = this.system.patternRoute(pat);
+          const p0 = f[o + 10], pn = f[o + 11];
+          if (pn < 2) continue;
+          const shape = pathShape(path, p0, pn, oe, on);
+          const lay = layoutFor(mode, this.system.routes[route]);
+          const front = shape.length - 3 + f[o + 3] * adv;
+          const c = shape.point(front - lay.length / 2, _p);
+          const dc = Math.hypot(c[0] - camE, c[1] - camN);
+          if (dc > markerMax) continue;
+          const sty = STYLE[mode];
+          const rad = near && dc < NEAR ? sty.size[0] + 20 : Math.max(sty.size[0], sty.minPixels * markerPx * 2 * dc * pxK);
+          if (!view.sphereEN(c[0], c[1], c[2], rad)) continue;
+          this.agentCount++;
+          const flags = u[o + 5];
+          // at-grade LRT agents are obstacles for road traffic
+          if (near && (SURFACE & (1 << MODE_ID[mode])) && Math.abs(c[0] - fE) < HOLD_RADIUS && Math.abs(c[1] - fN) < HOLD_RADIUS) {
+            const fp = shape.point(front, _q);
+            if (Math.abs(fp[2] - this.engine.heightAt(fp[0], fp[1])) < 4) {
+              const dd = shape.direction(front, _d);
+              this.pushGround(fp[0], fp[1], Math.atan2(dd[1], dd[0]), lay, f[o + 3], trip, -1, true, (flags & RAIL_FLAG.DOORS) !== 0);
+            }
+          }
+          if (near && dc < NEAR) {
+            this.drawConsist(shape, lay, front, 1, this.routeTint[route] ?? _white, dc > LOW_DETAIL, flags & RAIL_FLAG.BRAKE ? FLAG_BRAKE : 0, 0);
+            if (!this.notePose(trip, shape, front - lay.length / 2, lay.length, 1, 0)) dupes++;
+            this.stats.near++;
+          } else {
+            const mk = this.markers.get(mode)!;
+            const kk = counts.get(mode)!;
+            if (kk >= mk.capacity) continue;
+            const d = shape.direction(front - lay.length / 2, _d);
+            const hd = Math.atan2(d[1], d[0]);
+            mk.setMarker(kk, c[0], c[1], c[2], hd, this.routeColor[route] ?? 0xffffff);
+            counts.set(mode, kk + 1);
+            if (!this.notePoint(trip, c[0], c[1], c[2], hd, lay.length)) dupes++;
+          }
+        }
+      }
     }
     for (const o of this.overrides.values()) {
       if (!o) continue;
@@ -318,6 +406,13 @@ export class TransitLayer implements Layer {
     }
     this.pools.commit();
     this.stats.cars = this.pools.instances;
+    this.stats.dupes = dupes;
+    const qa = (globalThis as { __qa?: Record<string, unknown> }).__qa;
+    if (qa) {
+      qa.transitDupes = ((qa.transitDupes as number) || 0) + dupes;
+      const rs = (this.traffic() as unknown as { railStats?(): number[] } | null)?.railStats?.();
+      if (rs) { qa.railAgents = rs[0]; qa.trainOverlaps = rs[1]; qa.railOverruns = rs[2]; qa.railTurnbacks = rs[3]; }
+    }
     for (const m of MODE_LIST) {
       const mk = this.markers.get(m)!;
       mk.setCount(counts.get(m)!);
@@ -326,10 +421,85 @@ export class TransitLayer implements Layer {
     }
   }
 
-  private pushGround(e: number, n: number, heading: number, lay: ConsistLayout, speed: number, trip: number, slot: number) {
+  /** remember the drawn pose of a trip (false if it was already drawn this frame) */
+  private notePoint(trip: number, x: number, y: number, z: number, heading: number, length: number): boolean {
+    if (trip < 0) return true;
+    if (this.drawnPose.has(trip)) return false;
+    const p = this.posePool.pop() ?? { x: 0, y: 0, z: 0, heading: 0, length: 0 };
+    p.x = x; p.y = y; p.z = z; p.heading = heading; p.length = length;
+    this.drawnPose.set(trip, p);
+    return true;
+  }
+
+  private notePose(trip: number, shape: PatternShape, centre: number, length: number, dir: 1 | -1, lat: number): boolean {
+    const q = shape.point(centre, _p);
+    const d = shape.direction(centre, _d);
+    const hd = Math.atan2(d[1] * dir, d[0] * dir);
+    const z = Math.max(q[2], this.engine.heightAt(q[0], q[1]) - 3);
+    return this.notePoint(trip, q[0] + d[1] * lat, q[1] - d[0] * lat, z, hd, length);
+  }
+
+  /** Pose of a trip's vehicle as drawn this frame (centre, heading rad CCW from +E), or null. */
+  drawnVehicle(trip: number): { x: number; y: number; z: number; heading: number; length: number } | null {
+    return this.drawnPose.get(trip) ?? null;
+  }
+
+  /** read the rail agents published by the traffic sim; fills `agents` */
+  private railAgents() {
+    this.agents.clear();
+    const src = this.traffic() as unknown as Partial<RailSource> | null;
+    if (!src || typeof src.railSnapshot !== 'function') return null;
+    src.railProfile = this.profile;
+    if (!this.profile || src.railFeedsProfile !== this.profile) return null;
+    const snap = src.railSnapshot();
+    this.railSnap = snap;
+    if (!snap || !snap.count) return null;
+    const { f, u, feeds } = snap;
+    for (let k = 0; k < snap.count; k++) {
+      const o = k * RAIL_STRIDE;
+      const agency = feeds[f[o]];
+      if (!agency) continue;
+      const trip = this.system.tripIndex(agency, 'rail', f[o + 1]);
+      if (trip < 0) continue;
+      this.agents.set(trip, u[o + 5] & RAIL_FLAG.PENDING ? -1 : k);
+    }
+    return snap;
+  }
+
+  /**
+   * Trips for tests / tools: running now, optionally of a route (id "go:..." or short name
+   * like "KI" / "504"), near a point, only rail agents. Sorted by distance.
+   */
+  findTrips(q: { route?: string; near?: [number, number]; within?: number; agents?: boolean } = {}): { trip: number; route: string; headsign: string; agent: boolean; dist: number }[] {
+    const s = this.system, v = s.vehicles, out = [];
+    for (let i = 0; i < v.count; i++) {
+      const r = s.routes[v.route[i]];
+      if (q.route && r?.id !== q.route && r?.short !== q.route) continue;
+      const agent = this.agents.has(v.trip[i]);
+      if (q.agents && !agent) continue;
+      const dist = q.near ? Math.hypot(v.x[i] - q.near[0], v.y[i] - q.near[1]) : 0;
+      if (q.within !== undefined && dist > q.within) continue;
+      const info = s.tripInfo(v.trip[i]);
+      out.push({ trip: v.trip[i], route: r?.short ?? '', headsign: info?.headsign ?? '', agent, dist });
+    }
+    return out.sort((a, b) => a.dist - b.dist);
+  }
+
+  /** global trip ids currently driven by the rail sim (-1 values = not placed yet) */
+  get agentTrips(): number[] {
+    return [...this.agents.keys()];
+  }
+
+  /** Is this trip driven by the rail sim right now? */
+  isAgent(trip: number): boolean {
+    return this.agents.has(trip);
+  }
+
+  private pushGround(e: number, n: number, heading: number, lay: ConsistLayout, speed: number, trip: number, slot: number, rail?: boolean, doorsOpen?: boolean) {
     let g = this.ground[this.groundN];
     if (!g) this.ground.push((g = { e: 0, n: 0, heading: 0, length: 0, width: 0, speed: 0, trip: 0, slot: 0 }));
     g.e = e; g.n = n; g.heading = heading; g.length = lay.length; g.width = lay.width; g.speed = speed; g.trip = trip; g.slot = slot;
+    g.rail = rail; g.doorsOpen = doorsOpen;
     this.groundN++;
   }
 
@@ -359,12 +529,19 @@ export class TransitLayer implements Layer {
       const g = this.ground[k];
       const o = out[k] ?? (out[k] = { e: 0, n: 0, heading: 0, length: 0, width: 0, speed: 0, trip: 0 });
       o.e = g.e; o.n = g.n; o.heading = g.heading; o.length = g.length; o.width = g.width; o.speed = g.speed; o.trip = g.trip;
+      o.rail = g.rail; o.doorsOpen = g.doorsOpen;
     }
     return this.groundN;
   }
 
   /** Rendered distance of a trip along its pattern (the schedule's unless it is held behind an obstacle). */
   displayDist(trip: number, schedDist: number): number {
+    const k = this.agents.get(trip);
+    if (k !== undefined && k >= 0 && this.railSnap) {
+      // rail agent: its centre along the pattern (NaN while on a turnback move)
+      const o = k * RAIL_STRIDE, f = this.railSnap.f;
+      if (Number.isFinite(f[o + 2])) return f[o + 2];
+    }
     return this.hold.dist(trip, schedDist);
   }
 
@@ -393,5 +570,19 @@ export class TransitLayer implements Layer {
   }
 }
 
-const _p = [0, 0, 0], _d = [0, 0];
+const _p = [0, 0, 0], _q = [0, 0, 0], _d = [0, 0];
+
+/** consist path from a rail agent record: points rear -> front relative to (oe, on) */
+function pathShape(path: Float32Array, p0: number, n: number, oe: number, on: number): PatternShape {
+  const xyz = new Float32Array(n * 3);
+  const dist = new Float32Array(n);
+  let acc = 0;
+  for (let i = 0; i < n; i++) {
+    const j = (p0 + i) * 3;
+    xyz[i * 3] = path[j] + oe; xyz[i * 3 + 1] = path[j + 1] + on; xyz[i * 3 + 2] = path[j + 2];
+    if (i) acc += Math.hypot(path[j] - path[j - 3], path[j + 1] - path[j - 2]);
+    dist[i] = acc;
+  }
+  return new PatternShape(-1, xyz, dist);
+}
 const _white = new THREE.Color(0xffffff);

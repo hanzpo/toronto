@@ -64,6 +64,17 @@ export class LineOverlay {
   remove(id: string) { if (this.lines.delete(id)) this.dirty = true; }
   clear() { this.lines.clear(); this.dirty = true; }
   setVisible(v: boolean) { this.group.visible = v; }
+  /** fade all lines (0..1); lines at 0 are hidden */
+  setOpacity(o: number) {
+    if (o === this.opts.opacity) return;
+    this.opts.opacity = o;
+    for (const m of this.meshes.values()) {
+      const mat = m.material as THREE.Line2NodeMaterial;
+      const tr = o < 1;
+      if (mat.transparent !== tr) { mat.transparent = tr; mat.needsUpdate = true; }
+      mat.opacity = o;
+    }
+  }
   get visible() { return this.group.visible; }
 
   /** call once per frame */

@@ -138,6 +138,9 @@ export class MarkerOverlay {
     this.dirty = true;
   }
 
+  /** minimum on-screen length in pixels (0 = true size) */
+  setMinPixels(px: number) { this.minPx.value = px; }
+
   setCount(n: number) {
     this.count = Math.min(n, this.capacity);
     this.geom.instanceCount = this.count;

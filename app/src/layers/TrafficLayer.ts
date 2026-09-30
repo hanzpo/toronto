@@ -21,7 +21,7 @@ import { U } from '../render/uniforms';
 import { clock } from '../state/clock';
 import { useApp } from '../state/store';
 import {
-  CAR_FLAG, CAR_STRIDE, H, HEADER_BYTES, HF, MAX_CARS, MAX_PEDS, OB_FLAG, OB_STRIDE, PED_STRIDE, SAB_BYTES, SIG_OFFSET, SIG_STRIDE,
+  CAR_FLAG, CAR_STRIDE, H, HEADER_BYTES, HF, HF_COUNT, MAX_CARS, MAX_PEDS, OB_FLAG, OB_STRIDE, PED_STRIDE, RAIL_OFFSET, RAIL_PATH_OFFSET, RAIL_RADIUS, RAIL_STRIDE, SAB_BYTES, SIG_OFFSET, SIG_STRIDE,
   SLOT_BYTES, SLOT_HEADER, type FromWorker, type TickMsg, type ToWorker,
 } from '../sim/protocol';
 import { CAR_LENGTH, carLowGeometries, carPalette, carVariantsForKind, pedestrianGeometries, pedestrianLowGeometry, shirtPalette, type CarVariant } from './traffic/models';
@@ -315,7 +315,7 @@ export class TrafficLayer implements Layer {
     }
     this.sab = new SharedArrayBuffer(SAB_BYTES);
     this.hdr = new Int32Array(this.sab, 0, 64);
-    this.hf = new Float64Array(this.sab, 0, 32);
+    this.hf = new Float64Array(this.sab, 0, HF_COUNT);
     const w = new Worker(new URL('../sim/sim.worker.ts', import.meta.url), { type: 'module', name: 'traffic-sim' });
     w.onmessage = (ev: MessageEvent<FromWorker>) => this.onWorker(ev.data);
     w.onerror = (e) => console.error('[traffic] worker error', e.message);
@@ -342,6 +342,8 @@ export class TrafficLayer implements Layer {
           this.waiters.splice(0).forEach((f) => f(m.ok!));
         }
         break;
+      case 'railFeeds': this.railFeeds = m.agencies; this.railFeedsProfile = m.profile; break;
+      case 'railPlayer': this.railWaiters.splice(0).forEach((f) => f(m.ok)); break;
       case 'majorsGeom': this.congestion?.setGeometry(m); break;
       case 'majorsRatio': this.congestion?.setRatios(m.ratio); break;
       case 'plans':
@@ -351,6 +353,67 @@ export class TrafficLayer implements Layer {
         this.streetListAt = -1e9; // re-match signal heads
         break;
     }
+  }
+
+  // ------------------------------------------------------------------------ rail agents (sim/src/rail.rs)
+
+  /** agency id per rail feed index of the published rail records */
+  railFeeds: string[] = [];
+  railFeedsProfile = '';
+  /** service profile the rail agents follow (set by the TransitLayer) */
+  railProfile: 'weekday' | 'saturday' | 'sunday' | null = null;
+  railEnabled = true;
+  private railCmd: { cmd: number; emergency: boolean } | null = null;
+  private railWaiters: ((ok: boolean) => void)[] = [];
+
+  /** Latest rail agent records + body paths (views into the shared buffer), or null. */
+  railSnapshot() {
+    if (!this.hdr) return null;
+    const seq = Atomics.load(this.hdr, H.SEQ);
+    if (seq === 0) return null;
+    const slot = Atomics.load(this.hdr, H.SLOT);
+    const base = HEADER_BYTES + slot * SLOT_BYTES;
+    const si = new Int32Array(this.sab, base, 12);
+    const sf = new Float64Array(this.sab, base, 4);
+    const count = si[9], pts = si[10];
+    return {
+      seq, count, oe: sf[1], on: sf[2], simMs: sf[3], feeds: this.railFeeds,
+      f: new Float32Array(this.sab, base + RAIL_OFFSET, count * RAIL_STRIDE),
+      u: new Uint32Array(this.sab, base + RAIL_OFFSET, count * RAIL_STRIDE),
+      path: new Float32Array(this.sab, base + RAIL_PATH_OFFSET, pts * 3),
+    };
+  }
+
+  /** [trains, overlaps (total), overruns (total), turnbacks] */
+  railStats(): number[] {
+    if (!this.hf) return [0, 0, 0, 0];
+    return [0, 1, 2, 3].map((i) => this.hf[HF.RAIL + i]);
+  }
+
+  /** player train state (RAILP fields), or null when not driving a train */
+  railPlayerState(): Float64Array | null {
+    if (!this.hf || !this.hf[HF.RAILP]) return null;
+    return this.hf.subarray(HF.RAILP, HF.RAILP + 14);
+  }
+
+  /** The player drives trip `trip` (local index) of rail feed `agency`. */
+  railPlayerAttach(agency: string, trip: number): Promise<boolean> {
+    const feed = this.railFeeds.indexOf(agency);
+    if (feed < 0 || !this.worker) return Promise.resolve(false);
+    return new Promise((res) => {
+      this.railWaiters.push(res);
+      this.post({ type: 'railPlayer', feed, trip });
+    });
+  }
+
+  railPlayerRelease() {
+    this.railCmd = null;
+    this.post({ type: 'railRelease' });
+  }
+
+  /** player train controller: cmd -1 (full service brake) .. 1 (full power) */
+  setRailCommand(cmd: number, emergency = false) {
+    this.railCmd = { cmd, emergency };
   }
 
   // ------------------------------------------------------------------------ public API
@@ -670,6 +733,8 @@ export class TrafficLayer implements Layer {
       originE: ctx.anchor.origin.x, originN: -ctx.anchor.origin.z,
     };
     const obst = radius > 0 ? this.transitObstacles() : undefined;
+    if (this.railProfile) { m.railProfile = this.railProfile; m.railRadius = this.railEnabled ? RAIL_RADIUS : 0; }
+    if (this.railCmd) m.railCmd = this.railCmd;
     const transfer: Transferable[] = [];
     if (obst) { m.obst = obst; transfer.push(obst.buffer); }
     if (this.playerActive) {

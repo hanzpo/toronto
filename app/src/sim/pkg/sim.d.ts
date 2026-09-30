@@ -38,6 +38,47 @@ export class Sim {
      */
     player_state(): Float64Array;
     player_step(dt: number, throttle: number, brake: number, steer: number, handbrake: boolean, ground_z: number): void;
+    /**
+     * one agency's rail timetable (transit rail file of the current profile)
+     */
+    rail_add_feed(id: number, pat_mode: Uint8Array, pat_len: Float32Array, pat_rflags: Uint8Array, pat_rstart: Float32Array, pat_redge_off: Uint32Array, pat_redge: Uint32Array, pat_stop_off: Uint32Array, pat_stop_dist: Float32Array, pat_stop_flag: Uint8Array, tp_off: Uint32Array, tp_arr: Uint16Array, tp_dwell: Uint16Array, trip_start: Int32Array, trip_pattern: Uint32Array, trip_tp: Uint32Array, trip_next: Int32Array): void;
+    rail_clear_feeds(): void;
+    rail_count(): number;
+    /**
+     * is the player driving a train?
+     */
+    rail_has_player(): boolean;
+    rail_network(n_xyz: Float32Array, n_flags: Uint8Array, e_from: Uint32Array, e_to: Uint32Array, e_off: Uint32Array, e_xyz: Float32Array, e_vlim: Uint8Array, e_len: Float32Array, e_kind: Uint8Array, e_svc: Uint8Array, e_dir: Uint8Array, e_flags: Uint8Array, c_off: Uint32Array, c_to: Uint32Array): void;
+    rail_path_len(): number;
+    rail_path_ptr(): number;
+    rail_player_attach(feed: number, trip: number): boolean;
+    /**
+     * cmd -1 (full brake) .. 1 (full power)
+     */
+    rail_player_input(cmd: number, emergency: boolean): void;
+    rail_player_release(): void;
+    /**
+     * see RailSim::player_state
+     */
+    rail_player_state(): Float64Array;
+    rail_ptr(): number;
+    /**
+     * drop all agents (the timetable takes over), e.g. while sim time is being dropped
+     */
+    rail_reset(): void;
+    /**
+     * radius (m) around the focus within which rail trips run as agents; 0 = off
+     */
+    rail_set_radius(r: number): void;
+    /**
+     * [trains, overlaps (total), authority overruns (total), turnbacks]
+     */
+    rail_stats(): Float64Array;
+    /**
+     * advance the rail agents by `dt` s ending at time-of-day `tod` (independent of the
+     * road sim so trains keep up at high clock rates)
+     */
+    rail_step(dt: number, tod: number): void;
     release_player(): void;
     remove_footprints(tx: number, ty: number): void;
     remove_tile(tx: number, ty: number): void;
@@ -107,6 +148,22 @@ export interface InitOutput {
     readonly sim_ped_ptr: (a: number) => number;
     readonly sim_player_state: (a: number) => [number, number];
     readonly sim_player_step: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => void;
+    readonly sim_rail_add_feed: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number, a1: number, b1: number, c1: number, d1: number, e1: number, f1: number, g1: number, h1: number) => void;
+    readonly sim_rail_clear_feeds: (a: number) => void;
+    readonly sim_rail_count: (a: number) => number;
+    readonly sim_rail_has_player: (a: number) => number;
+    readonly sim_rail_network: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number, r: number, s: number, t: number, u: number, v: number, w: number, x: number, y: number, z: number, a1: number, b1: number, c1: number) => void;
+    readonly sim_rail_path_len: (a: number) => number;
+    readonly sim_rail_path_ptr: (a: number) => number;
+    readonly sim_rail_player_attach: (a: number, b: number, c: number) => number;
+    readonly sim_rail_player_input: (a: number, b: number, c: number) => void;
+    readonly sim_rail_player_release: (a: number) => void;
+    readonly sim_rail_player_state: (a: number) => [number, number];
+    readonly sim_rail_ptr: (a: number) => number;
+    readonly sim_rail_reset: (a: number) => void;
+    readonly sim_rail_set_radius: (a: number, b: number) => void;
+    readonly sim_rail_stats: (a: number) => [number, number];
+    readonly sim_rail_step: (a: number, b: number, c: number) => void;
     readonly sim_release_player: (a: number) => void;
     readonly sim_remove_footprints: (a: number, b: number, c: number) => void;
     readonly sim_remove_tile: (a: number, b: number, c: number) => void;

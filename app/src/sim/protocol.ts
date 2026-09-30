@@ -2,7 +2,7 @@
 // traffic simulation worker (sim.worker.ts → Rust/wasm `Sim`).
 //
 // SharedArrayBuffer layout (little endian):
-//   [0, 256)            global header
+//   [0, 512)            global header
 //     i32[0]  SEQ       bumped (Atomics) after each published snapshot
 //     i32[1]  SLOT      slot index of the latest snapshot (0..2)
 //     i32[2]  BUSY      1 while the worker processes a tick (back-pressure)
@@ -15,8 +15,11 @@
 //     f64[9]  STEP_AVG  exponential average of STEP_MS
 //     f64[10] TARGET_CARS   f64[11] TARGET_PEDS
 //     f64[12..26) PLAYER    [active, e, n, elev, heading, speed, pitch, onRoad, tileX, tileY, edgeIdx, carId, structure, bump]
+//     f64[26..30) RAIL      [trains, overlaps (total, must stay 0), authority overruns (total), turnbacks]
+//     f64[30..44) RAILP     player train: see Sim.rail_player_state (sim/src/rail.rs)
 //   then 3 snapshot slots of SLOT_BYTES each:
 //     i32[0] carCount · i32[1] pedCount · f64[1] originE · f64[2] originN · f64[3] simMs · i32[8] signalCount
+//     i32[9] railCount · i32[10] railPathPoints
 //     +64:             cars  MAX_CARS × CAR_STRIDE f32
 //                      [dE, dN, elev, heading, pitch, speed, meta u32, id u32]   (body centre)
 //                      meta = kind | colour << 8 | flags << 16 | ground << 24
@@ -27,6 +30,11 @@
 //     +…+pedBytes:     signals MAX_SIGNALS × SIG_STRIDE f32
 //                      [dE, dN, bearing, halfWidth, light]  stop line of a signalised approach
 //                      (bearing = travel direction, light 0 green · 1 amber · 2 red)
+//     +…+sigBytes:     rail  MAX_RAIL × RAIL_STRIDE f32 (rail agents, sim/src/rail.rs RailSim::write)
+//                      [feed, trip, centreDist, speed, accel, flags u32, delay, authorityAhead, pattern, id u32, pathOff, pathN]
+//                      feed = index into the 'railFeeds' agency list; trip / pattern = local indices in that
+//                      agency's rail file; flags RAIL_FLAG; PENDING records have no position (hide the trip)
+//     +…+railBytes:    rail paths MAX_RAIL_PTS × 3 f32: track under each consist, rear → front
 // Positions are relative to the slot's origin (the renderer's floating anchor).
 
 export const MAX_CARS = 16384;
@@ -39,15 +47,26 @@ export const SIG_STRIDE = 5;
 export const OB_STRIDE = 7;
 /** obstacle flags */
 export const OB_FLAG = { DOORS_KNOWN: 1, DOORS_OPEN: 2, RAIL: 4 } as const;
-export const HEADER_BYTES = 256;
+export const HEADER_BYTES = 512;
+export const MAX_RAIL = 1024;
+export const RAIL_STRIDE = 12;
+export const MAX_RAIL_PTS = 49152;
+export const RAIL_FLAG = { DWELL: 1, DOORS: 2, BRAKE: 4, PLAYER: 8, PENALTY: 16, HELD: 32, PENDING: 64 } as const;
+/** m around the focus within which rail trips run as signalled agents */
+export const RAIL_RADIUS = 9000;
 export const SLOT_HEADER = 64;
 export const SLOTS = 3;
-export const SLOT_BYTES = SLOT_HEADER + MAX_CARS * CAR_STRIDE * 4 + MAX_PEDS * PED_STRIDE * 4 + MAX_SIGNALS * SIG_STRIDE * 4;
 export const SIG_OFFSET = SLOT_HEADER + MAX_CARS * CAR_STRIDE * 4 + MAX_PEDS * PED_STRIDE * 4;
+export const RAIL_OFFSET = SIG_OFFSET + MAX_SIGNALS * SIG_STRIDE * 4;
+export const RAIL_PATH_OFFSET = RAIL_OFFSET + MAX_RAIL * RAIL_STRIDE * 4;
+export const SLOT_BYTES = RAIL_PATH_OFFSET + MAX_RAIL_PTS * 3 * 4;
 export const SAB_BYTES = HEADER_BYTES + SLOTS * SLOT_BYTES;
 
 export const H = { SEQ: 0, SLOT: 1, BUSY: 2, TILES: 3, PENDING: 4, SUBSTEPS: 5, FAST: 6, ACK: 7 } as const;
-export const HF = { STEP_MS: 8, STEP_AVG: 9, TARGET_CARS: 10, TARGET_PEDS: 11, PLAYER: 12 } as const;
+export const HF = { STEP_MS: 8, STEP_AVG: 9, TARGET_CARS: 10, TARGET_PEDS: 11, PLAYER: 12, RAIL: 26, RAILP: 30 } as const;
+export const HF_COUNT = 64;
+/** RAILP fields */
+export const RAILP = { ACTIVE: 0, FEED: 1, TRIP: 2, CENTRE: 3, V: 4, A: 5, AHEAD: 6, ASPECT: 7, PENALTY: 8, LIMIT: 9, NEXT_LIMIT: 10, NEXT_LIMIT_DIST: 11, PATTERN: 12, WARN: 13 } as const;
 
 export const CAR_FLAG = { BRAKE: 1, PLAYER: 2, LEFT: 4, RIGHT: 8 } as const;
 export const PED_STATE = { WALK: 0, WAIT: 1, CROSS: 2, IDLE: 3 } as const;
@@ -72,6 +91,12 @@ export interface TickMsg {
   player?: { throttle: number; brake: number; steer: number; handbrake: boolean; groundZ: number };
   /** surface transit near the focus as moving obstacles (OB_STRIDE floats each), or absent */
   obst?: Float64Array;
+  /** transit service profile the renderer shows (rail agents follow the same timetable) */
+  railProfile?: 'weekday' | 'saturday' | 'sunday';
+  /** rail agent radius (m, 0 = off) */
+  railRadius?: number;
+  /** player train command (-1 brake .. 1 power) */
+  railCmd?: { cmd: number; emergency: boolean };
 }
 
 export type ToWorker =
@@ -82,6 +107,8 @@ export type ToWorker =
   | { type: 'takeOver'; id: number }
   | { type: 'releasePlayer' }
   | { type: 'majors' }
+  | { type: 'railPlayer'; feed: number; trip: number }
+  | { type: 'railRelease' }
   | { type: 'congestion'; tod: number; weekday: number };
 
 export type FromWorker =
@@ -90,6 +117,9 @@ export type FromWorker =
   | { type: 'player'; roadName: string | null; ok?: boolean }
   | { type: 'majorsGeom'; off: Uint32Array; xyz: Float32Array; cls: Uint8Array; names: string[]; name: Uint16Array }
   | { type: 'majorsRatio'; ratio: Uint8Array; tod: number }
+  /** rail feeds loaded for agents: feed id = index, agency ids */
+  | { type: 'railFeeds'; profile: string; agencies: string[] }
+  | { type: 'railPlayer'; ok: boolean }
   /** signal plans of the loaded graph: [osmId, e, n, offset, axis, greenA, greenB]* */
   | { type: 'plans'; plans: Float64Array };
 

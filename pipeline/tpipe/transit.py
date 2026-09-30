@@ -23,6 +23,8 @@ from . import geo, tbn, terrain
 from .grade import profile as grade_profile
 from .transit_gtfs import PROFILES, Feed, parse_times, pick_dates, service_calendar
 from .transit_rail import RailNet, densify_xy
+from . import rail_graph
+from .rail_routes import Router, consist_len
 from .transit_sources import SOURCES
 
 OUTDIR = geo.OUT / "transit"
@@ -30,6 +32,7 @@ GTFS = geo.RAW / "gtfs"
 
 MODES = ["subway", "lrt", "streetcar", "commuter_rail", "airport_rail", "intercity_rail", "bus"]
 RAIL_MODES = set(MODES[:6])
+RAIL_AGENCIES = {"ttc", "go", "up", "via", "grt"}
 # vertical profile parameters: (tunnel cover, bridge clearance)
 COVER = {"subway": 14.0, "lrt": 10.0, "streetcar": 8.0}
 DWELL = {"subway": 25, "lrt": 20, "streetcar": 12, "commuter_rail": 45, "airport_rail": 40, "intercity_rail": 60, "bus": 8}
@@ -184,8 +187,10 @@ def cut_line(xy: np.ndarray, cum: np.ndarray, d0: float, d1: float) -> np.ndarra
 
 # ----------------------------------------------------------------------------
 class Agency:
-    def __init__(self, key: str, rail: RailNet | None) -> None:
+    def __init__(self, key: str, rail: RailNet | None, router: Router | None = None) -> None:
         self.key = key
+        self.router = router
+        self.route_stats: list = []
         self.src = SOURCES[key]
         self.feed = Feed(GTFS / f"{key}.zip")
         self.railnet = rail
@@ -215,7 +220,7 @@ class Agency:
                 id=f"{self.key}:{rid}", agency=self.key, short=short, long=long_ or "",
                 mode=mode, color="#" + color, textColor="#" + tcolor.lstrip("#").upper(),
             )
-        trips = f.read("trips.txt", ["route_id", "service_id", "trip_id", "trip_headsign", "trip_short_name", "direction_id", "shape_id"])
+        trips = f.read("trips.txt", ["route_id", "service_id", "trip_id", "trip_headsign", "trip_short_name", "direction_id", "shape_id", "block_id"])
         trips = trips.filter(pl.col("route_id").is_in(list(self.routes)))
         active = service_calendar(f)
         tps = Counter(trips["service_id"].to_list())
@@ -303,7 +308,7 @@ class Agency:
             r = self.trips.get(tid)
             if r is None:
                 continue
-            rid, _, _, head, tshort, direc, shp = r
+            rid, _, _, head, tshort, direc, shp, _blk = r
             key = (rid, direc, shp, sidx.tobytes(), head)
             p = pat_key.get(key)
             if p is None:
@@ -358,6 +363,10 @@ class Agency:
         if d_hi - d_lo < 1.0:
             return -1
         part = cut_line(sxy, cum, d_lo, d_hi)
+        if mode in RAIL_MODES and self.router is not None:
+            p = self._make_rail_pattern(rid, direc, head, mode, sidx, i0, i1, dist, d_lo, d_hi, virt_lo, virt_hi, part, cache)
+            if p is not None:
+                return p
         gkey = (np.round(part, 0).tobytes(), mode)
         g = cache.get(gkey)
         if g is None:
@@ -392,6 +401,50 @@ class Agency:
             geom=gid, stops=stops, flags=flags, dist=sd, mode=mode,
             # mapping from original stop_times rows -> pattern rows
             i0=i0, i1=i1, vlo=virt_lo, vhi=virt_hi, rawdist=dist,
+        ))
+        return len(self.patterns) - 1
+
+    def _make_rail_pattern(self, rid, direc, head, mode, sidx, i0, i1, dist, d_lo, d_hi, virt_lo, virt_hi, part, cache):
+        """Pattern routed through the rail graph (rail_routes); None if routing failed."""
+        stops = list(sidx[i0 : i1 + 1])
+        flags = [0] * len(stops)
+        sd = list(np.asarray(dist[i0 : i1 + 1], float) - d_lo)
+        if virt_lo is not None:
+            stops.insert(0, -1)
+            flags.insert(0, 1)
+            sd.insert(0, 0.0)
+        if virt_hi is not None:
+            stops.append(-2)
+            flags.append(1)
+            sd.append(d_hi - d_lo)
+        sd = np.maximum.accumulate(np.clip(np.array(sd), 0.0, d_hi - d_lo))
+        L = consist_len(mode, self.routes[rid]["short"])
+        pxy = np.asarray(part, float)[:, :2]
+        gkey = ("rail", np.round(pxy, 0).tobytes(), mode, np.round(sd, 0).tobytes(), round(L, 1))
+        g = cache.get(gkey)
+        if g is None:
+            rr = self.router.route(pxy, sd, [bool(f) for f in flags], mode, L)
+            if rr.xyz is None or len(rr.xyz) < 2:
+                cache[gkey] = False
+                return None
+            if not hasattr(self, "geoms"):
+                self.geoms = []
+                self.snap_stats = []
+            self.geoms.append(rr.xyz)
+            self.snap_stats.append(1.0 if rr.ok else 0.0)
+            self.route_stats.append((self.routes[rid]["short"], mode, rr.ok, rr.breaks, len(rr.edges)))
+            g = (len(self.geoms) - 1, rr)
+            cache[gkey] = g
+        elif g is False:
+            return None
+        gid, rr = g
+        fr = np.array(rr.fronts)
+        cen = np.where(np.array(flags) > 0, fr, fr - L * 0.5)
+        cen = np.maximum.accumulate(np.clip(cen, 0.0, rr.length))
+        self.patterns.append(dict(
+            route=rid, dir=int(direc) if direc not in (None, "") else 0, head=head or "",
+            geom=gid, stops=stops, flags=flags, dist=cen, mode=mode,
+            i0=i0, i1=i1, vlo=virt_lo, vhi=virt_hi, rawdist=dist, rr=rr, clen=L,
         ))
         return len(self.patterns) - 1
 
@@ -538,7 +591,7 @@ class Agency:
                 q = tp_key[k] = len(tps)
                 tps.append((ao.astype(np.uint16), do.astype(np.uint16)))
             for j, sh in enumerate(instances):
-                recs.append((tid if len(instances) == 1 else f"{tid}#{j}", p, q, base + sh))
+                recs.append((tid if len(instances) == 1 else f"{tid}#{j}", p, q, base + sh, base + sh + int(ao[-1])))
         info = {"id": self.key, "name": self.src["name"], "profiles": {}}
         for prof, date in self.dates.items():
             active = self.prof_trips[prof]
@@ -634,6 +687,7 @@ class Agency:
         durs = np.array([tps[r[2]][0][-1] for r in recs])
         header["maxDuration"] = int(durs.max()) if len(durs) else 0
         if kind == "rail":
+            self._rail_arrays(arrays, recs, pats, header)
             tripnames = []
             for r in recs:
                 tr = self.trips[r[0].split("#")[0]]
@@ -645,6 +699,53 @@ class Agency:
         meta = dict(trips=len(recs), patterns=len(pats), shapes=len(geoms), stops=len(stop_list), vertices=int(shape_off[-1]))
         self.last_stops = (stop_list, stop_z, pats, pat_off, pat_stop)
         return size, meta
+
+    def _rail_arrays(self, arrays: dict, recs: list, pats: list, header: dict) -> None:
+        """Rail routes through data/rail/network.bin.gz + vehicle blocks (see docs/RAIL.md)."""
+        emap = getattr(self.router, "out_map", None) if self.router is not None else None
+        r_off, r_edge, r_start, r_flags, p_len = [0], [], [], [], []
+        for p in pats:
+            pat = self.patterns[p]
+            rr = pat.get("rr")
+            ok = rr is not None and emap is not None and all(emap[e] >= 0 for e, _ in rr.edges)
+            if ok:
+                for e, d in rr.edges:
+                    r_edge.append(int(emap[e]) * 2 + (0 if d > 0 else 1))
+                r_start.append(rr.start)
+                r_flags.append(1 if rr.ok else 2)
+            else:
+                r_start.append(0.0)
+                r_flags.append(0)
+            r_off.append(len(r_edge))
+            p_len.append(pat.get("clen", 0.0))
+        arrays["pat_len"] = np.array(p_len, dtype=np.float32)
+        arrays["pat_rflags"] = np.array(r_flags, dtype=np.uint8)
+        arrays["pat_rstart"] = np.array(r_start, dtype=np.float32)
+        arrays["pat_redge_off"] = np.array(r_off, dtype=np.uint32)
+        arrays["pat_redge"] = np.array(r_edge, dtype=np.uint32)
+        # vehicle blocks: next trip of the same block (same vehicle) starting at the stop
+        # where this one ends, within 90 min
+        blk: dict = {}
+        for i, r in enumerate(recs):
+            b = self.trips[r[0].split("#")[0]][7]
+            if b and "#" not in r[0]:
+                blk.setdefault(b, []).append(i)
+        nxt = np.full(len(recs), -1, dtype=np.int32)
+        stop_of = lambda p, k: self.patterns[p]["stops"][k]  # noqa: E731
+        for b, lst in blk.items():
+            lst.sort(key=lambda i: recs[i][3])
+            for a, c in zip(lst[:-1], lst[1:]):
+                ra, rc = recs[a], recs[c]
+                if 0 <= rc[3] - ra[4] <= 5400:
+                    sa, sc = stop_of(ra[1], -1), stop_of(rc[1], 0)
+                    same = sa == sc or (sa >= 0 and sc >= 0 and (
+                        (self.stop_parent[sa] and self.stop_parent[sa] == self.stop_parent[sc])
+                        or PLATFORM.sub("", self.stop_name[sa]) == PLATFORM.sub("", self.stop_name[sc])
+                        or float(np.hypot(*(self.stop_xy[sa] - self.stop_xy[sc]))) < 250.0))
+                    if same:
+                        nxt[a] = c
+        arrays["trip_next"] = nxt
+        header["railNetwork"] = getattr(self.router, "net_hash", "")
 
     def stations(self) -> list[dict]:
         """Rail stations summary (grouped by parent station or name)."""
@@ -682,6 +783,16 @@ def main(argv: list[str]) -> None:
     t0 = time.time()
     rail = RailNet()
     print(f"rail network: {len(rail.kind)} ways ({time.time()-t0:.1f}s)")
+    router = None
+    if any(k in RAIL_AGENCIES for k in keys):
+        g = rail_graph.load()
+        for line in g.log:
+            print("  " + line)
+        info = g.write()
+        print("  " + g.log[-1])
+        router = Router(g)
+        router.out_map = g.out_map
+        router.net_hash = info["hash"]
     idx_path = OUTDIR / "index.json"
     old = json.loads(idx_path.read_text()) if idx_path.exists() else {}
     agencies = {a["id"]: a for a in old.get("agencies", [])}
@@ -689,9 +800,12 @@ def main(argv: list[str]) -> None:
     stations = {s["id"]: s for s in old.get("stations", [])}
     for k in keys:
         print(f"== {k}")
-        ag = Agency(k, rail)
+        ag = Agency(k, rail, router if k in RAIL_AGENCIES else None)
         ag.load()
         ag.build()
+        if ag.route_stats:
+            bad = [r for r in ag.route_stats if not r[2]]
+            print(f"  [{k}] rail routes: {len(ag.route_stats)}, broken {len(bad)} {sorted({(b[0], b[3]) for b in bad})[:20]}")
         if getattr(ag, "snap_stats", None):
             st = np.array(ag.snap_stats)
             print(f"  [{k}] rail snap: {len(st)} shapes, mean matched {st.mean():.2f}, min {st.min():.2f}")

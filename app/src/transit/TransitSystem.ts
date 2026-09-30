@@ -434,6 +434,26 @@ export class TransitSystem {
     return fr ? MODES[fr.f.patMode[pattern - fr.patBase]] : null;
   }
 
+  /** Global route index of a pattern (-1 if unknown). */
+  patternRoute(pattern: number): number {
+    const fr = this.findFeed(pattern, 'patBase');
+    return fr ? fr.routeMap[fr.f.patRoute[pattern - fr.patBase]] : -1;
+  }
+
+  /** Global trip index of local trip `local` in the (agency, kind) file of the loaded profile, or -1. */
+  tripIndex(agency: string, kind: 'rail' | 'bus', local: number): number {
+    for (const fr of this.feeds) {
+      if (fr.f.agency === agency && fr.f.kind === kind) return local >= 0 && local < fr.f.tripStart.length ? fr.tripBase + local : -1;
+    }
+    return -1;
+  }
+
+  /** (agency, kind, local index) of a global trip, or null. */
+  tripLocal(trip: number): { agency: string; kind: 'rail' | 'bus'; local: number } | null {
+    const fr = this.feedOfTrip(trip);
+    return fr ? { agency: fr.f.agency, kind: fr.f.kind as 'rail' | 'bus', local: trip - fr.tripBase } : null;
+  }
+
   /** Global pattern index of a trip (-1 if unknown). */
   tripPattern(trip: number): number {
     const fr = this.feedOfTrip(trip);

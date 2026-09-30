@@ -13,6 +13,7 @@ import type { TransitLayer } from '../layers/TransitLayer';
 import { MODES, STATE_DWELL, type Mode, type TripInfo, type VehicleState } from '../transit';
 import { pathForTrip, type PatternPath, type Pose } from './path';
 import { DYN, EB, MAX_NOTCH, TrainOperator } from './operate';
+import { RAILP } from '../sim/protocol';
 import { TunnelBuilder } from './tunnel';
 import { Walker } from './walker';
 import { useInteract, type CamMode, type WalkInfo } from './state';
@@ -32,6 +33,11 @@ interface TrafficApi {
   getPlayer?(): { e: number; n: number; elev?: number; heading?: number; speed?: number; roadName?: string | null } | null;
   setPlayerInput?(inp: { throttle: number; brake: number; steer: number; handbrake?: boolean }): void;
   releasePlayer?(): void;
+  // player train in the signalled rail sim
+  railPlayerAttach?(agency: string, trip: number): Promise<boolean>;
+  railPlayerRelease?(): void;
+  setRailCommand?(cmd: number, emergency?: boolean): void;
+  railPlayerState?(): Float64Array | null;
 }
 
 export interface PickResult {
@@ -212,6 +218,15 @@ export class InteractLayer implements Layer {
     this.tunnel.setPath(path, info.mode, op.dyn.length);
     useInteract.getState().set({ mode: 'operate', trip, ride: null, walk: null });
     op.flash(vs.state === STATE_DWELL ? 'You have control — close doors (C) when ready' : 'You have control — W/S to notch, O/C doors', 5);
+    // trains run in the signalled rail sim: the player's train becomes an agent there
+    // (signals and ATP apply; AI trains hold behind it)
+    const tr = this.traffic();
+    const loc = this.system.tripLocal(trip);
+    if (loc && loc.kind === 'rail' && info.mode !== 'streetcar' && tr?.railPlayerAttach) {
+      void tr.railPlayerAttach(loc.agency, loc.local).then((ok) => {
+        if (ok && this.op === op) op.external = true;
+      });
+    }
     return true;
   }
 
@@ -369,6 +384,7 @@ export class InteractLayer implements Layer {
     const prev = this.mode;
     if (prev === 'free') { if (!keepWalker) this.hideWalker(); return; }
     if (this.op) {
+      if (this.op.external) this.traffic()?.railPlayerRelease?.();
       this.transit.overrides.delete(this.op.info.trip);
       this.op = null;
     }
@@ -445,6 +461,15 @@ export class InteractLayer implements Layer {
     if (op) {
       const vb = this.system.tripCount > 0 ? this.system.vehicles : null;
       const prevDoors = op.doors;
+      if (op.external) {
+        // position / speed come from the rail sim; send the controller
+        const tr = this.traffic();
+        const doorsShut = op.doors === 'closed';
+        const cmd = op.notch === EB ? -1 : !doorsShut ? -1 : op.notch / MAX_NOTCH;
+        tr?.setRailCommand?.(cmd, op.notch === EB);
+        const rs = tr?.railPlayerState?.();
+        if (rs && rs[RAILP.ACTIVE]) op.syncFromSim(rs);
+      }
       op.step(Math.min(simDt, 2), t, vb);
       if (prevDoors !== op.doors) {
         if (op.doors === 'opening') doorsOpen();
@@ -628,11 +653,9 @@ export class InteractLayer implements Layer {
       if (this.op && this.op.info.trip === trip) {
         x = this.pose.e; y = this.pose.n; z = this.pose.z; hd = this.pose.heading; L = this.op.dyn.length; found = true;
       } else {
-        const v = sys.vehicles;
-        for (let i = 0; i < v.count; i++) {
-          if (v.trip[i] !== trip) continue;
-          x = v.x[i]; y = v.y[i]; z = v.z[i]; hd = v.heading[i]; L = DYN[MODES[v.mode[i]]].length; found = true;
-          break;
+        const dv = this.transit.drawnVehicle(trip);
+        if (dv) {
+          x = dv.x; y = dv.y; z = dv.z; hd = dv.heading; L = dv.length; found = true;
         }
       }
       if (found) {
@@ -653,13 +676,8 @@ export class InteractLayer implements Layer {
     let hvRing: Parameters<InteractLayer['showRing']>[2] = null;
     const h = this.hover;
     if (h?.kind === 'vehicle' && h.trip !== undefined && !(sel?.kind === 'vehicle' && +sel.id === h.trip)) {
-      const v = sys.vehicles;
-      for (let i = 0; i < v.count; i++) {
-        if (v.trip[i] !== h.trip) continue;
-        const L = DYN[MODES[v.mode[i]]].length;
-        hvRing = { L: L * 1.2, W: Math.max(L * 0.38, 10), x: v.x[i], y: v.y[i], z: v.z[i], hd: v.heading[i], color: 0xffffff };
-        break;
-      }
+      const dv = this.transit.drawnVehicle(h.trip);
+      if (dv) hvRing = { L: dv.length * 1.2, W: Math.max(dv.length * 0.38, 10), x: dv.x, y: dv.y, z: dv.z, hd: dv.heading, color: 0xffffff };
     } else if (h?.kind === 'stop' && h.stop !== undefined) {
       const p = sys.stopPosition(h.stop);
       hvRing = { L: 30, W: 30, x: p[0], y: p[1], z: Math.max(p[2], this.engine.heightAt(p[0], p[1])), hd: 0, color: 0xffffff };
@@ -701,7 +719,8 @@ export class InteractLayer implements Layer {
     let m = this.ringCache.get(key);
     if (!m) {
       const g = new THREE.RingGeometry(0.44, 0.5, 48).rotateX(-Math.PI / 2);
-      m = new MarkerOverlay(this.engine, { name: `ring-${key}`, capacity: 1, shape: g, size: [L, 1, W], minPixels: kind === 'sel' ? 30 : 24, depthMode: 'onTop', lift: 0.6 });
+      // depth-tested ring on the ground around the drawn vehicle (never over it)
+      m = new MarkerOverlay(this.engine, { name: `ring-${key}`, capacity: 1, shape: g, size: [L, 1, W], minPixels: kind === 'sel' ? 30 : 24, depthMode: 'auto', lift: 0.25 });
       this.ringCache.set(key, m);
     }
     return m;
@@ -712,7 +731,9 @@ export class InteractLayer implements Layer {
     for (const [k, m] of this.ringCache) {
       if (!k.startsWith(kind + ':')) continue;
       if (m === want) {
-        m.setMarker(0, on!.x, on!.y, on!.z, on!.hd, on!.color);
+        // min-pixel size only from altitude: at street level the ring hugs the vehicle
+        m.setMinPixels((kind === 'sel' ? 30 : 24) * Math.min(1, Math.max(0, (ctx.altitude - 150) / 1050)));
+        m.setMarker(0, on!.x, on!.y, Math.max(on!.z, this.engine.heightAt(on!.x, on!.y)), on!.hd, on!.color);
         m.setCount(1);
       } else m.setCount(0);
       m.commit();
@@ -734,14 +755,18 @@ export class InteractLayer implements Layer {
         op: {
           trip: op.info.trip, route: meta.short, routeColor: meta.color, routeText: meta.textColor,
           headsign: op.info.headsign, mode: op.mode, speed: op.v, limit: op.currentLimit(),
-          nextLimit: op.path.nextLowerLimit(op.s + op.dyn.length / 2, Math.max(300, (op.v * op.v) / op.dyn.brake * 1.5), op.currentLimit()),
+          nextLimit: op.external
+            ? (op.simNextDist > 0 && op.simNextDist < Math.max(300, (op.v * op.v) / op.dyn.brake * 1.5) ? { v: op.simNextLimit, at: op.simNextDist } : null)
+            : op.path.nextLowerLimit(op.s + op.dyn.length / 2, Math.max(300, (op.v * op.v) / op.dyn.brake * 1.5), op.currentLimit()),
           notch: op.notch, maxNotch: MAX_NOTCH, accel: op.a,
           nextStop: ns?.name ?? '—', nextStopDist: err ?? 0, stopTol: op.dyn.tol, canOpen: op.canOpen(),
           doors: op.doors,
           boarding: b ? { on: Math.round(b.on), off: Math.round(b.off), target: b.target, done: b.done } : null,
           deviation: op.doors !== 'closed' ? null : op.deviation(t), departIn,
           aspect: op.aspect, trainAhead: op.trainAhead, reverse: op.reverse,
-          message: op.atcTrip ? 'ATC: emergency brake — train ahead!' : op.overspeed ? 'ATC: overspeed — brakes applied' : op.message,
+          message: op.external
+            ? op.atcTrip ? 'ATP: penalty brake — stop, then brake to release' : op.atpWarn >= 0 ? `ATP: overspeed — brake now (${op.atpWarn.toFixed(0)} s)` : op.message
+            : op.atcTrip ? 'ATC: emergency brake — train ahead!' : op.overspeed ? 'ATC: overspeed — brakes applied' : op.message,
           progress: op.path.length ? op.s / op.path.length : 0, finished: op.finished,
           inTunnel: this.tunnel.isUnder(op.s), view: this.view === 'cab' ? 'cab' : 'chase',
         },

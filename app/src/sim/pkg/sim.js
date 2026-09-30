@@ -196,6 +196,209 @@ export class Sim {
     player_step(dt, throttle, brake, steer, handbrake, ground_z) {
         wasm.sim_player_step(this.__wbg_ptr, dt, throttle, brake, steer, handbrake, ground_z);
     }
+    /**
+     * one agency's rail timetable (transit rail file of the current profile)
+     * @param {number} id
+     * @param {Uint8Array} pat_mode
+     * @param {Float32Array} pat_len
+     * @param {Uint8Array} pat_rflags
+     * @param {Float32Array} pat_rstart
+     * @param {Uint32Array} pat_redge_off
+     * @param {Uint32Array} pat_redge
+     * @param {Uint32Array} pat_stop_off
+     * @param {Float32Array} pat_stop_dist
+     * @param {Uint8Array} pat_stop_flag
+     * @param {Uint32Array} tp_off
+     * @param {Uint16Array} tp_arr
+     * @param {Uint16Array} tp_dwell
+     * @param {Int32Array} trip_start
+     * @param {Uint32Array} trip_pattern
+     * @param {Uint32Array} trip_tp
+     * @param {Int32Array} trip_next
+     */
+    rail_add_feed(id, pat_mode, pat_len, pat_rflags, pat_rstart, pat_redge_off, pat_redge, pat_stop_off, pat_stop_dist, pat_stop_flag, tp_off, tp_arr, tp_dwell, trip_start, trip_pattern, trip_tp, trip_next) {
+        const ptr0 = passArray8ToWasm0(pat_mode, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArrayF32ToWasm0(pat_len, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArray8ToWasm0(pat_rflags, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passArrayF32ToWasm0(pat_rstart, wasm.__wbindgen_malloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passArray32ToWasm0(pat_redge_off, wasm.__wbindgen_malloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passArray32ToWasm0(pat_redge, wasm.__wbindgen_malloc);
+        const len5 = WASM_VECTOR_LEN;
+        const ptr6 = passArray32ToWasm0(pat_stop_off, wasm.__wbindgen_malloc);
+        const len6 = WASM_VECTOR_LEN;
+        const ptr7 = passArrayF32ToWasm0(pat_stop_dist, wasm.__wbindgen_malloc);
+        const len7 = WASM_VECTOR_LEN;
+        const ptr8 = passArray8ToWasm0(pat_stop_flag, wasm.__wbindgen_malloc);
+        const len8 = WASM_VECTOR_LEN;
+        const ptr9 = passArray32ToWasm0(tp_off, wasm.__wbindgen_malloc);
+        const len9 = WASM_VECTOR_LEN;
+        const ptr10 = passArray16ToWasm0(tp_arr, wasm.__wbindgen_malloc);
+        const len10 = WASM_VECTOR_LEN;
+        const ptr11 = passArray16ToWasm0(tp_dwell, wasm.__wbindgen_malloc);
+        const len11 = WASM_VECTOR_LEN;
+        const ptr12 = passArray32ToWasm0(trip_start, wasm.__wbindgen_malloc);
+        const len12 = WASM_VECTOR_LEN;
+        const ptr13 = passArray32ToWasm0(trip_pattern, wasm.__wbindgen_malloc);
+        const len13 = WASM_VECTOR_LEN;
+        const ptr14 = passArray32ToWasm0(trip_tp, wasm.__wbindgen_malloc);
+        const len14 = WASM_VECTOR_LEN;
+        const ptr15 = passArray32ToWasm0(trip_next, wasm.__wbindgen_malloc);
+        const len15 = WASM_VECTOR_LEN;
+        wasm.sim_rail_add_feed(this.__wbg_ptr, id, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9, ptr10, len10, ptr11, len11, ptr12, len12, ptr13, len13, ptr14, len14, ptr15, len15);
+    }
+    rail_clear_feeds() {
+        wasm.sim_rail_clear_feeds(this.__wbg_ptr);
+    }
+    /**
+     * @returns {number}
+     */
+    rail_count() {
+        const ret = wasm.sim_rail_count(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * is the player driving a train?
+     * @returns {boolean}
+     */
+    rail_has_player() {
+        const ret = wasm.sim_rail_has_player(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * @param {Float32Array} n_xyz
+     * @param {Uint8Array} n_flags
+     * @param {Uint32Array} e_from
+     * @param {Uint32Array} e_to
+     * @param {Uint32Array} e_off
+     * @param {Float32Array} e_xyz
+     * @param {Uint8Array} e_vlim
+     * @param {Float32Array} e_len
+     * @param {Uint8Array} e_kind
+     * @param {Uint8Array} e_svc
+     * @param {Uint8Array} e_dir
+     * @param {Uint8Array} e_flags
+     * @param {Uint32Array} c_off
+     * @param {Uint32Array} c_to
+     */
+    rail_network(n_xyz, n_flags, e_from, e_to, e_off, e_xyz, e_vlim, e_len, e_kind, e_svc, e_dir, e_flags, c_off, c_to) {
+        const ptr0 = passArrayF32ToWasm0(n_xyz, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(n_flags, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArray32ToWasm0(e_from, wasm.__wbindgen_malloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passArray32ToWasm0(e_to, wasm.__wbindgen_malloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passArray32ToWasm0(e_off, wasm.__wbindgen_malloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ptr5 = passArrayF32ToWasm0(e_xyz, wasm.__wbindgen_malloc);
+        const len5 = WASM_VECTOR_LEN;
+        const ptr6 = passArray8ToWasm0(e_vlim, wasm.__wbindgen_malloc);
+        const len6 = WASM_VECTOR_LEN;
+        const ptr7 = passArrayF32ToWasm0(e_len, wasm.__wbindgen_malloc);
+        const len7 = WASM_VECTOR_LEN;
+        const ptr8 = passArray8ToWasm0(e_kind, wasm.__wbindgen_malloc);
+        const len8 = WASM_VECTOR_LEN;
+        const ptr9 = passArray8ToWasm0(e_svc, wasm.__wbindgen_malloc);
+        const len9 = WASM_VECTOR_LEN;
+        const ptr10 = passArray8ToWasm0(e_dir, wasm.__wbindgen_malloc);
+        const len10 = WASM_VECTOR_LEN;
+        const ptr11 = passArray8ToWasm0(e_flags, wasm.__wbindgen_malloc);
+        const len11 = WASM_VECTOR_LEN;
+        const ptr12 = passArray32ToWasm0(c_off, wasm.__wbindgen_malloc);
+        const len12 = WASM_VECTOR_LEN;
+        const ptr13 = passArray32ToWasm0(c_to, wasm.__wbindgen_malloc);
+        const len13 = WASM_VECTOR_LEN;
+        wasm.sim_rail_network(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4, ptr5, len5, ptr6, len6, ptr7, len7, ptr8, len8, ptr9, len9, ptr10, len10, ptr11, len11, ptr12, len12, ptr13, len13);
+    }
+    /**
+     * @returns {number}
+     */
+    rail_path_len() {
+        const ret = wasm.sim_rail_path_len(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
+    rail_path_ptr() {
+        const ret = wasm.sim_rail_path_ptr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {number} feed
+     * @param {number} trip
+     * @returns {boolean}
+     */
+    rail_player_attach(feed, trip) {
+        const ret = wasm.sim_rail_player_attach(this.__wbg_ptr, feed, trip);
+        return ret !== 0;
+    }
+    /**
+     * cmd -1 (full brake) .. 1 (full power)
+     * @param {number} cmd
+     * @param {boolean} emergency
+     */
+    rail_player_input(cmd, emergency) {
+        wasm.sim_rail_player_input(this.__wbg_ptr, cmd, emergency);
+    }
+    rail_player_release() {
+        wasm.sim_rail_player_release(this.__wbg_ptr);
+    }
+    /**
+     * see RailSim::player_state
+     * @returns {Float64Array}
+     */
+    rail_player_state() {
+        const ret = wasm.sim_rail_player_state(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
+     * @returns {number}
+     */
+    rail_ptr() {
+        const ret = wasm.sim_rail_ptr(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * drop all agents (the timetable takes over), e.g. while sim time is being dropped
+     */
+    rail_reset() {
+        wasm.sim_rail_reset(this.__wbg_ptr);
+    }
+    /**
+     * radius (m) around the focus within which rail trips run as agents; 0 = off
+     * @param {number} r
+     */
+    rail_set_radius(r) {
+        wasm.sim_rail_set_radius(this.__wbg_ptr, r);
+    }
+    /**
+     * [trains, overlaps (total), authority overruns (total), turnbacks]
+     * @returns {Float64Array}
+     */
+    rail_stats() {
+        const ret = wasm.sim_rail_stats(this.__wbg_ptr);
+        var v1 = getArrayF64FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 8, 8);
+        return v1;
+    }
+    /**
+     * advance the rail agents by `dt` s ending at time-of-day `tod` (independent of the
+     * road sim so trains keep up at high clock rates)
+     * @param {number} dt
+     * @param {number} tod
+     */
+    rail_step(dt, tod) {
+        wasm.sim_rail_step(this.__wbg_ptr, dt, tod);
+    }
     release_player() {
         wasm.sim_release_player(this.__wbg_ptr);
     }
@@ -425,6 +628,14 @@ function getStringFromWasm0(ptr, len) {
     return decodeText(ptr >>> 0, len);
 }
 
+let cachedUint16ArrayMemory0 = null;
+function getUint16ArrayMemory0() {
+    if (cachedUint16ArrayMemory0 === null || cachedUint16ArrayMemory0.byteLength === 0) {
+        cachedUint16ArrayMemory0 = new Uint16Array(wasm.memory.buffer);
+    }
+    return cachedUint16ArrayMemory0;
+}
+
 let cachedUint32ArrayMemory0 = null;
 function getUint32ArrayMemory0() {
     if (cachedUint32ArrayMemory0 === null || cachedUint32ArrayMemory0.byteLength === 0) {
@@ -439,6 +650,13 @@ function getUint8ArrayMemory0() {
         cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8ArrayMemory0;
+}
+
+function passArray16ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 2, 2) >>> 0;
+    getUint16ArrayMemory0().set(arg, ptr / 2);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passArray32ToWasm0(arg, malloc) {
@@ -493,6 +711,7 @@ function __wbg_finalize_init(instance, module) {
     cachedFloat32ArrayMemory0 = null;
     cachedFloat64ArrayMemory0 = null;
     cachedInt32ArrayMemory0 = null;
+    cachedUint16ArrayMemory0 = null;
     cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();

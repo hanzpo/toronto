@@ -18,6 +18,10 @@ export interface GroundVeh {
   width: number;
   speed: number;
   trip: number;
+  /** rail vehicle (streetcar / LRT) */
+  rail?: boolean;
+  /** doors open (Toronto: traffic stops behind a streetcar with open doors); undefined = unknown */
+  doorsOpen?: boolean;
 }
 
 /** Duck-typed obstacle queries of the TrafficLayer (all optional). */

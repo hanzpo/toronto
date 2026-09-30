@@ -4,7 +4,8 @@
 import init, { Sim } from './pkg/sim.js';
 import { decodeTbn, type Tbn } from '../data/tbn';
 import {
-  bottleneckOf, CAR_STRIDE, H, HEADER_BYTES, HF, MAX_CARS, MAX_PEDS, MAX_SIGNALS, PED_STRIDE, SIG_OFFSET, SIG_STRIDE, SLOT_BYTES, SLOT_HEADER, SLOTS,
+  bottleneckOf, CAR_STRIDE, H, HEADER_BYTES, HF, HF_COUNT, MAX_CARS, MAX_PEDS, MAX_RAIL, MAX_RAIL_PTS, MAX_SIGNALS, PED_STRIDE, RAIL_OFFSET, RAIL_PATH_OFFSET,
+  RAIL_STRIDE, SIG_OFFSET, SIG_STRIDE, SLOT_BYTES, SLOT_HEADER, SLOTS,
   type FromWorker, type TickMsg, type ToWorker,
 } from './protocol';
 
@@ -57,6 +58,61 @@ async function fetchBin(url: string): Promise<ArrayBuffer | null> {
 }
 
 type GraphHeader = { names?: string[] };
+
+// ----------------------------------------------------------------------------- rail agents
+let railNetLoaded: Promise<boolean> | null = null;
+let railProfile = '';
+let railLoading = false;
+const u32 = (a: ArrayLike<number>) => (a instanceof Uint32Array ? a : Uint32Array.from(a));
+
+async function loadRailNet(): Promise<boolean> {
+  const buf = await fetchBin(`${dataRoot}/rail/network.bin.gz`);
+  if (!buf || !sim) return false;
+  const a = decodeTbn(buf).arrays;
+  sim.rail_network(
+    a.n_xyz as Float32Array, a.n_flags as Uint8Array, u32(a.e_from), u32(a.e_to), u32(a.e_off), a.e_xyz as Float32Array,
+    a.e_vlim as Uint8Array, a.e_len as Float32Array, a.e_kind as Uint8Array, a.e_service as Uint8Array, a.e_dir as Uint8Array,
+    a.e_flags as Uint8Array, u32(a.c_off), u32(a.c_to),
+  );
+  return true;
+}
+
+/** (re)load the rail timetables of `profile` as agent feeds */
+async function loadRail(profile: string) {
+  if (!sim || railLoading) return;
+  railLoading = true;
+  try {
+    railNetLoaded ??= loadRailNet();
+    if (!(await railNetLoaded)) return;
+    const res = await fetch(q(`${dataRoot}/transit/index.json`));
+    if (!res.ok) return;
+    const index = (await res.json()) as { agencies: { id: string; profiles: Record<string, { files: Record<string, { file: string }> }> }[] };
+    sim.rail_clear_feeds();
+    const agencies: string[] = [];
+    for (const ag of index.agencies) {
+      const f = ag.profiles[profile]?.files.rail;
+      if (!f) continue;
+      const buf = await fetchBin(`${dataRoot}/transit/${f.file}`);
+      if (!buf || !sim) continue;
+      const a = decodeTbn(buf).arrays;
+      if (!a.pat_redge) continue; // data from before rail routing: timetable only
+      const id = agencies.length;
+      agencies.push(ag.id);
+      sim.rail_add_feed(
+        id, a.pat_mode as Uint8Array, a.pat_len as Float32Array, a.pat_rflags as Uint8Array, a.pat_rstart as Float32Array,
+        u32(a.pat_redge_off), u32(a.pat_redge), u32(a.pat_stop_off), a.pat_stop_dist as Float32Array, a.pat_stop_flag as Uint8Array,
+        u32(a.tp_off), a.tp_arr as Uint16Array, a.tp_dwell as Uint16Array, a.trip_start as Int32Array, u32(a.trip_pattern), u32(a.trip_tp),
+        (a.trip_next as Int32Array | undefined) ?? new Int32Array(0),
+      );
+    }
+    railProfile = profile;
+    post({ type: 'railFeeds', profile, agencies });
+  } catch (e) {
+    console.warn('[sim] rail', e);
+  } finally {
+    railLoading = false;
+  }
+}
 
 async function loadTile(tx: number, ty: number) {
   const k = key(tx, ty);
@@ -144,9 +200,16 @@ function publish(m: TickMsg) {
   if (np) new Float32Array(sab, base + SLOT_HEADER + MAX_CARS * CAR_STRIDE * 4, np * PED_STRIDE).set(new Float32Array(mem, sim.ped_ptr(), np * PED_STRIDE));
   const ns = Math.min(sim.signal_count(), MAX_SIGNALS);
   if (ns) new Float32Array(sab, base + SIG_OFFSET, ns * SIG_STRIDE).set(new Float32Array(mem, sim.signal_ptr(), ns * SIG_STRIDE));
-  const si = new Int32Array(sab, base, 10);
+  let nr = Math.min(sim.rail_count(), MAX_RAIL);
+  const npts = sim.rail_path_len();
+  if (npts > MAX_RAIL_PTS) nr = 0; // (never expected) drop rather than publish truncated paths
+  if (nr) {
+    new Float32Array(sab, base + RAIL_OFFSET, nr * RAIL_STRIDE).set(new Float32Array(mem, sim.rail_ptr(), nr * RAIL_STRIDE));
+    if (npts) new Float32Array(sab, base + RAIL_PATH_OFFSET, npts * 3).set(new Float32Array(mem, sim.rail_path_ptr(), npts * 3));
+  }
+  const si = new Int32Array(sab, base, 12);
   const sf = new Float64Array(sab, base, 4);
-  si[0] = nc; si[1] = np; si[8] = ns;
+  si[0] = nc; si[1] = np; si[8] = ns; si[9] = nr; si[10] = nr ? npts : 0;
   sf[1] = m.originE; sf[2] = m.originN; sf[3] = m.simMs;
   Atomics.store(hdr, H.SLOT, slot);
   Atomics.add(hdr, H.SEQ, 1);
@@ -176,6 +239,9 @@ function tick(m: TickMsg) {
     if (m.radius > 0) {
       const t0 = performance.now();
       sim.set_view(m.focusE, m.focusN, m.radius, m.pedRadius);
+      if (m.railProfile && m.railProfile !== railProfile) void loadRail(m.railProfile);
+      sim.rail_set_radius(m.railRadius ?? 0);
+      if (m.railCmd) sim.rail_player_input(m.railCmd.cmd, m.railCmd.emergency);
       const pl = m.player;
       sim.set_obstacles(m.obst ?? new Float64Array(0));
       if (pl) manageFootprints(hf[HF.PLAYER + 1], hf[HF.PLAYER + 2]);
@@ -197,6 +263,19 @@ function tick(m: TickMsg) {
       const fast = remaining > 0.01;
       sim.set_time(m.tod, m.weekday);
       sim.set_fast(fast);
+      // rail agents (cheap) follow the full sim time in their own steps; only when the clock
+      // runs far too fast for them does the timetable take over (never under the player)
+      let rrem = Math.min(m.simDt, 3600);
+      let rt = m.tod - rrem;
+      let rk = 0;
+      while (rrem > 1e-4 && rk < 240) {
+        const h = Math.min(0.25, rrem);
+        rt += h;
+        rrem -= h;
+        sim.rail_step(h, rt);
+        rk++;
+      }
+      if (rrem > 1 && !sim.rail_has_player()) sim.rail_reset();
       sim.write_output(m.originE, m.originN);
       const ms = performance.now() - t0;
       stepAvg = stepAvg ? stepAvg * 0.95 + ms * 0.05 : ms;
@@ -204,6 +283,10 @@ function tick(m: TickMsg) {
       hf[HF.STEP_AVG] = stepAvg;
       Atomics.store(hdr, H.SUBSTEPS, k);
       Atomics.store(hdr, H.FAST, fast ? 1 : 0);
+      const rs = sim.rail_stats();
+      for (let i = 0; i < 4; i++) hf[HF.RAIL + i] = rs[i];
+      const rp = sim.rail_player_state();
+      for (let i = 0; i < 14; i++) hf[HF.RAILP + i] = rp[i] ?? 0;
       const st = sim.stats();
       hf[HF.TARGET_CARS] = st[0];
       hf[HF.TARGET_PEDS] = st[1];
@@ -216,6 +299,11 @@ function tick(m: TickMsg) {
         const plans = new Float64Array(sim.signal_plans());
         post({ type: 'plans', plans }, [plans.buffer]);
       }
+    } else if (sim.rail_count() > 0) {
+      // camera too high for agents: the timetable draws every train
+      sim.rail_set_radius(0);
+      sim.write_output(m.originE, m.originN);
+      publish(m);
     }
   } finally {
     Atomics.store(hdr, H.BUSY, 0);
@@ -359,7 +447,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
         memory = wasm.memory;
         sab = m.sab;
         hdr = new Int32Array(sab, 0, 64);
-        hf = new Float64Array(sab, 0, 32);
+        hf = new Float64Array(sab, 0, HF_COUNT);
         dataRoot = m.dataRoot;
         build = m.build;
         if (m.tiles.length) available = new Set(m.tiles.map(([x, y]) => key(x, y)));
@@ -385,6 +473,8 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       }
       case 'releasePlayer': sim?.release_player(); playerInfo(); break;
       case 'majors': await loadMajors(); break;
+      case 'railPlayer': post({ type: 'railPlayer', ok: sim?.rail_player_attach(m.feed, m.trip) ?? false }); break;
+      case 'railRelease': sim?.rail_player_release(); break;
       case 'congestion': congestion(m.tod, m.weekday); break;
     }
   } catch (e) {
@@ -402,6 +492,8 @@ function recover(e: unknown) {
   sim = new Sim((Math.random() * 1e9) >>> 0, MAX_CARS - 64, MAX_PEDS - 64);
   loaded.clear();
   majorsKey = null;
+  railNetLoaded = null;
+  railProfile = '';
   if (hadMajors) void loadMajors();
   console.warn('[sim] recovered from a simulation panic');
 }

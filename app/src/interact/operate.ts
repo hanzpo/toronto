@@ -74,6 +74,12 @@ export class TrainOperator {
   overspeed = false;
   /** seconds without overspeed enforcement (right after takeover) */
   graceT = 8;
+  /** driven by the signalled rail sim (position / speed / signals / ATP from there) */
+  external = false;
+  /** ATP overspeed warning countdown (s), -1 none */
+  atpWarn = -1;
+  /** distance to the end of the movement authority (m), from the sim */
+  authority = Infinity;
 
   constructor(info: TripInfo, path: PatternPath, s: number, v: number, dwelling: boolean, t: number) {
     this.info = info;
@@ -125,8 +131,14 @@ export class TrainOperator {
     this.flash(this.reverse ? 'Reverser: REVERSE (max 10 km/h)' : 'Reverser: FORWARD');
   }
 
+  /** sim civil limit here / next lower limit and its distance (external) */
+  simLimit = Infinity;
+  simNextLimit = Infinity;
+  simNextDist = 0;
+
   currentLimit(): number {
     if (this.reverse) return kmh(10);
+    if (this.external && Number.isFinite(this.simLimit)) return this.simLimit;
     const L2 = this.dyn.length / 2, p = this.path;
     return Math.min(p.limitAt(this.s + L2), p.limitAt(this.s), p.limitAt(this.s - L2));
   }
@@ -201,11 +213,11 @@ export class TrainOperator {
       else b.done = true;
     }
 
-    if (vehicles) this.checkAhead(vehicles);
+    if (vehicles && !this.external) this.checkAhead(vehicles);
 
     // integrate in sub-steps
     const h = 0.05;
-    let rest = dt;
+    let rest = this.external ? 0 : dt;
     while (rest > 1e-6) {
       const d = Math.min(h, rest);
       rest -= d;
@@ -297,6 +309,22 @@ export class TrainOperator {
     this.trainAhead = gap;
     const brakeDist = (this.v * this.v) / (2 * this.dyn.brake);
     this.aspect = gap < 80 + brakeDist * 0.5 ? 'red' : gap < 300 + brakeDist * 1.5 ? 'yellow' : 'green';
+  }
+
+  /** Take position, speed and signalling from the rail sim (RAILP fields, sim/protocol.ts). */
+  syncFromSim(r: Float64Array) {
+    this.s = r[3];
+    this.v = r[4];
+    this.a = r[5];
+    this.authority = r[6];
+    this.aspect = r[7] >= 2 ? 'red' : r[7] >= 1 ? 'yellow' : 'green';
+    this.trainAhead = r[6] < 3000 ? r[6] : null;
+    this.atcTrip = r[8] > 0.5;
+    this.atpWarn = r[13];
+    this.overspeed = r[13] >= 0;
+    this.simLimit = r[9];
+    this.simNextLimit = r[10];
+    this.simNextDist = r[11];
   }
 
   /** Scheduled time (s) at which the trip is due at distance s. */
