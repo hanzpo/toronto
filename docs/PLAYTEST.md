@@ -45,6 +45,21 @@ owner; fixed items move to the bottom with the commit that fixed them.
   first (tone + HUD), then brake. → transit-agents
 - [ ] Far station labels still stack at street level. → stations/UX
 
+### Night (21:30)
+- [ ] Lit windows are huge flat quads (~3 m), break across building corners
+  and don't follow floor/window grids; at street level they read as stickers.
+  Needs the facade shader: real window grid, varied warm/cool interiors,
+  some rooms lit, blinds, lobby glow, ground-floor storefront light spill.
+  → buildings/props
+- [ ] From 2–3 km every building sparkles uniformly (noise). Lit-window
+  density and brightness should vary by building type and time (offices dark
+  after 22:00, residential warmer), with a smooth far-LOD emissive average.
+  → buildings/props
+- [ ] Route overlay lines and oversized red far-vehicle markers show in
+  normal (non-analytics) mode at city zoom. → transit-agents (already told)
+- [ ] Street lights: pools OK, but no light on facades or road reflection;
+  car headlights don't light the road. (nice-to-have) → later lighting pass
+
 ### Carried over from user screenshots (see docs/GROUND_LEVEL_AUDIT.md and the QA categories)
 Width tapers, ramp gores, bridge width anomalies, median-ROW intersection
 clustering, flat grade separations, footpaths and footbridges, bus loops,
