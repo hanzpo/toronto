@@ -177,6 +177,10 @@ Border pieces (level 0; for placement only, never meshed)
   tile (tile-local coords); `xl_off` · `xl_xyz` · `xl_class` · `xl_flags` —
   the same for rail. Trees / props near a border keep clear of carriageways
   and tracks that run just outside it.
+- `xb_off` u32 · `xb_xy` f32 — outer rings (tile-local) of the neighbouring
+  tiles' buildings and houses that reach within 12 m of this tile (a building
+  belongs to the tile of its centre, so a large one can extend well into the
+  next tile).
 
 Junctions (level 0; ≥ 3 arms of road classes 0–5, tunnels excluded; duplicated
 into every tile within 80 m)

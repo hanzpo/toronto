@@ -178,6 +178,32 @@ platforms.
 - [ ] Pipeline outputs could be written into app/public/data through a stray
   symlink (736 tiles overwritten once). Agents now use TPIPE_OUT.
 
+## Session 2 (2026-09-30 08:00, live site 1efc201, playtest agent, 38 findings)
+Shots in the session scratchpad play/. Sent to owners: transit/sim (GO train
+vanishes before Union [P1], LW crawl, reversed rush direction, Gardiner
+pile-up, 504 overlaps, low volumes and empty platforms, route 94 headways),
+player-experience (Drive spawns off-road [P1], camera ignores URL pitch,
+camera in embankments and awnings, NPCs through the avatar, body roll, Layers
+panel re-opening), buildings (03:00 towers lit like 21:30, plain Distillery
+facades, Agincourt lots without stalls, pilaster seams), roads (grass bands
+across the DVP [P1], phantom curb, Bloor viaduct edge, Kennedy rail
+overpass, Gardiner hump at Park Lawn, grass verges on King & Bay, white
+centre lines on residential streets).
+Queued (no agent yet):
+- [ ] P1 Niagara Falls: flat bands with a ~15 m sine pattern instead of a
+  50 m white cascade with mist. `?cam=25000,-63000,900,200,30&t=2026-10-03T13:00:00`
+  → landmarks / ground-water
+- [ ] Aircraft: following a landing 737 loses it; "Taxi to gate" starts at
+  108–148 km/h and rolls down the runway instead of exiting; Q400 rollout
+  near the YTZ runway edge → aircraft/airports
+- [ ] UI: speed readouts disagree (top bar vs panel); passed stops stay
+  "Due"; St Andrew pill cut off at the screen edge; ~12 pills stack at 3 km
+- [ ] Museum station: no signature columns or name sign from the cab → stations
+- [ ] Rogers Centre reads as a tall white ball from 3 km → landmarks
+- [ ] Zoom hitches: 129 ms frame on the jump to 3 km, 83 ms at 1 km → perf
+- [ ] Downtown at 08:15 on production: 4.57 M tris / 383 draws (check the
+  perf pass reached production caches)
+
 ## Resolved
 - [x] Tree LOD popping and stippled crowns: matched high/mid/far models,
   per-tree CPU LOD with hysteresis and 0.4 s alpha-to-coverage cross-fade,

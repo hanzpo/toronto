@@ -1,6 +1,7 @@
 // Quadtree-ish (4×4 split) tile streaming: LOD selection, prioritized loading
 // through a worker pool, cancellation, LRU eviction and hole-free transitions.
 import * as THREE from 'three/webgpu';
+import { TILE_FACADE_LANDMARKS } from './heritage';
 import type { WorkerIn, WorkerOut } from '../../workers/tileWorker';
 import type { MeshBuf, TileMeshes } from '../../workers/meshing';
 import { GroundPage, GROUND_LAYERS } from './materials';
@@ -223,12 +224,13 @@ export class TileManager {
     for (const t of this.tiles.values()) {
       if (t.L < 2 && !this.tiles.has(key(t.L + 1, Math.floor(t.tx / 4), Math.floor(t.ty / 4)))) this.roots.push(t);
     }
-    let suppress: number[] = [];
+    let suppress: number[] = [], heritage: number[] = [];
     try {
       const lr = await fetch(`${this.dataRoot}/landmarks.json`);
       if (lr.ok && (lr.headers.get('content-type') ?? '').includes('json')) {
-        const lm = (await lr.json()) as { suppress?: number[] }[];
-        suppress = lm.flatMap((l) => l.suppress ?? []);
+        const lm = (await lr.json()) as { id?: string; suppress?: number[] }[];
+        suppress = lm.filter((l) => !TILE_FACADE_LANDMARKS.has(l.id ?? '')).flatMap((l) => l.suppress ?? []);
+        heritage = lm.filter((l) => TILE_FACADE_LANDMARKS.has(l.id ?? '')).flatMap((l) => l.suppress ?? []);
       }
     } catch { /* optional */ }
     // rail stations: buildings clipping tracks/platforms + paved, tree-free zones (docs/STATIONS.md)
@@ -245,7 +247,7 @@ export class TileManager {
     for (let i = 0; i < n; i++) {
       const w = new Worker(new URL('../../workers/tileWorker.ts', import.meta.url), { type: 'module' });
       w.onmessage = (ev: MessageEvent<WorkerOut>) => this.onWorker(i, ev.data);
-      w.postMessage({ type: 'config', suppress, zones, build: this.manifest.build ?? 0, vground: !/[?&]vground=0\b/.test(location.search) } satisfies WorkerIn);
+      w.postMessage({ type: 'config', suppress, heritage, zones, build: this.manifest.build ?? 0, vground: !/[?&]vground=0\b/.test(location.search) } satisfies WorkerIn);
       this.workers.push(w);
       this.workerLoad.push(0);
     }

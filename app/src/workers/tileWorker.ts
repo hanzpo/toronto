@@ -1,5 +1,6 @@
 // Tile worker: fetch + gunzip + decode TBN1 + build transferable geometry.
 import { decodeTbn } from '../data/tbn';
+import { setHeritage } from './buildings';
 
 import { buildBuildings, buildRail, buildRoads, buildTerrain, concatMeshes, extractHouses, frontSurfaces, promoteNonHouses, TerrainSampler, type MeshBuf, type TileMeshes } from './meshing';
 import { buildProps } from './props';
@@ -17,7 +18,7 @@ import { SURF_CURB, SURF_TACTILE } from './roads';
 const NEAR_SURFS = new Set([SURF_CURB, SURF_TACTILE]);
 
 export type WorkerIn =
-  | { type: 'config'; suppress: number[]; build: number; zones?: number[][]; vground?: boolean }
+  | { type: 'config'; suppress: number[]; heritage?: number[]; build: number; zones?: number[][]; vground?: boolean }
   | { type: 'prefetch'; url: string }
   | { type: 'load'; id: number; url: string; level: number; tx: number; ty: number; size: number; grid: number }
   | { type: 'cancel'; id: number };
@@ -96,6 +97,7 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     suppress = new Set(msg.suppress);
     useVGround = msg.vground !== false;
     setStationZones(msg.zones);
+    setHeritage(msg.heritage ?? []);
     openCache(msg.build);
     return;
   }

@@ -3,10 +3,9 @@
 // Reference Library, Art Gallery of Ontario, Meridian Hall, Roy Thomson Hall.
 import * as THREE from 'three/webgpu'
 import { Parts, prism, slab, bbox, cyl, lathe, offsetPoly, ccw, cleanPoly, rect, type V2 } from './kit'
-import type { MatKey } from './materials'
 import type { BuildCtx, OsmPart } from './types'
 import {
-  addHeritage, partOf, zOf, faceEdge, edgeBox, panel, vault, gableWing, lift, hOf, block, along, slabHoles,
+  addHeritage, partOf, zOf, faceEdge, edgeBox, panel, vault, gableWing, along, slabHoles,
 } from './kit2'
 
 const T = (z: number) => (z ? new THREE.Matrix4().makeTranslation(0, z, 0) : undefined)
@@ -69,27 +68,9 @@ export function buildStLawrenceMarket(ctx: BuildCtx) {
 export function buildDistillery(ctx: BuildCtx) {
   const hi = ctx.detail === 'high'
   const P = new Parts()
-  const STONE = new Set([192836912, 192836911]) // Stone Distillery & Fermenting Cellar range
-  for (const p of ctx.entry?.osmParts ?? []) {
-    if (p.outline) continue
-    const poly = ccw(cleanPoly(p.poly))
-    if (poly.length < 3) continue
-    const z = lift(p)
-    const h = Math.max(hOf(p, 4.3), 5)
-    const y0 = p.minH || 0
-    const wall: MatKey = STONE.has(p.id) ? 'limestone' : 'victorianBrick'
-    const g = new Parts()
-    const b = bbox(poly)
-    const narrow = Math.min(b.w, b.d)
-    if (p.roof === 'gabled' || p.roof === 'hipped' || narrow < 24) {
-      block(g, poly, [], y0, h, Math.min(narrow / 2, 8), Math.min(narrow * 0.28, 4.5), wall, 'slate')
-    } else {
-      g.add(wall, prism(poly, y0, h, { top: false, bottom: y0 > 0.5 }))
-      g.add('roofDark', slab(poly, h))
-      if (hi) g.add(wall, prism(offsetPoly(poly, -0.2), h - 0.6, h + 0.9, { top: false, bottom: true }))
-    }
-    P.addParts(g, T(z))
-  }
+  // The buildings themselves are drawn by the tile facade shader (render/tiles/heritage.ts:
+  // Victorian loft brick with arched multi-pane sash, limestone for the Stone Distillery, shopfronts
+  // on the lanes); this model keeps the lane paving, the catwalks and the chimney.
   // Brick-paved pedestrian lanes (Trinity St, Gristmill / Tank House / Case
   // Goods lanes) between the blocks, and the iron catwalks bridging them
   const lanes = (ctx.entry as unknown as { lanes?: { paving: { ring: V2[]; holes?: V2[][] }[]; catwalks: [V2, V2][] } } | null)?.lanes

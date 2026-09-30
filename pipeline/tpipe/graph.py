@@ -50,6 +50,12 @@ def _snap_ends(G, na, nb, nuq, nxy_all, reach=30.0):
         if d.min() > 15.0:        # the node is not near this end at all: leave the geometry alone
             ends.append(None)
             continue
+        end_i = 0 if which == 0 else len(G) - 1
+        if np.hypot(*(G[end_i, :2] - P)) < 1.0:
+            # the edge already ends on its node: no trimming (on curves the closest approach
+            # search would cut real geometry away)
+            ends.append(P)
+            continue
         k = int(idx[np.argmin(d)])
         if which == 0:
             lo = k
@@ -67,6 +73,12 @@ def _snap_ends(G, na, nb, nuq, nxy_all, reach=30.0):
         H[0, :2] = ends[0]
     if ends[1] is not None:
         H[-1, :2] = ends[1]
+    if len(H) > 2:
+        # interior vertices within a metre of an end node would make a tiny hook there
+        dn = np.minimum(np.hypot(*(H[:, :2] - H[0, :2]).T), np.hypot(*(H[:, :2] - H[-1, :2]).T))
+        keep = dn >= 1.0
+        keep[0] = keep[-1] = True
+        H = H[keep]
     return H
 
 
@@ -75,9 +87,7 @@ MICRO = 2.0    # m: links shorter than this are merged into their junction
 
 def _merge_micro(E_geo, E_way, E_from, E_to, E_len):
     """Contract very short links (duplicate junction nodes a metre apart): their two nodes become
-    one (the lower OSM id), the link is dropped and neighbouring edges end on the kept node.
-    Then every node gets one elevation (median of its edge ends), blended into each edge over
-    its first / last 20 m, so no link carries a step."""
+    one (the lower OSM id), the link is dropped and neighbouring edges end on the kept node."""
     parent = {}
 
     def find(a):
@@ -112,17 +122,10 @@ def _merge_micro(E_geo, E_way, E_from, E_to, E_len):
         zs.setdefault(a, []).append(g[0, 2])
         zs.setdefault(b, []).append(g[-1, 2])
         out_g.append(g); out_w.append(E_way[k]); out_f.append(a); out_t.append(b)
-    zn = {n: float(np.median(v)) for n, v in zs.items()}
-    for g, a, b in zip(out_g, out_f, out_t):
-        cum = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(g[:, :2], axis=0).T))])
-        L = cum[-1]
-        for end, n in ((0, a), (1, b)):
-            dz = zn[n] - (g[0, 2] if end == 0 else g[-1, 2])
-            if abs(dz) < 1e-3 or abs(dz) > 6.0:
-                continue
-            d = cum if end == 0 else L - cum
-            g[:, 2] += dz * np.clip(1.0 - d / min(20.0, max(L, 1e-3)), 0.0, 1.0)
-        out_l.append(float(L))
+    # elevations are left exactly as drawn (roadnet solves node consistency); blending edge ends
+    # to a node median here made the graph differ from the drawn carriageway
+    for g in out_g:
+        out_l.append(float(np.hypot(*np.diff(g[:, :2], axis=0).T).sum()))
     print(f"  merged {len(E_geo) - len(keep):,} micro links (< {MICRO} m)", flush=True)
     return out_g, out_w, out_f, out_t, out_l
 

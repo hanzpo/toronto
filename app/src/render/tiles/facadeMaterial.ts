@@ -36,7 +36,7 @@ const STYLE: number[][][] = [
   /* 6 stucco   */[[3.5, 3.6, 0.42, 0.42], [0.32, 4.3, 0.25, 0.3], [0.92, 0.92, 0.9, 0], [0.1, 0.11, 0.12, 0]],
   /* 7 metal    */[[6.5, 7.0, 0.7, 0.14], [0.75, 4.5, 0.3, 0.15], [0.3, 0.3, 0.3, 0], [0.12, 0.14, 0.16, 3]],
   /* 8 parking  */[[3.0, 7.5, 0.92, 0.48], [0.38, 3.0, 0.0, 0.85], [0.6, 0.6, 0.58, 0], [0.07, 0.07, 0.07, 4]],
-  /* 9 loft     */[[4.3, 3.2, 0.62, 0.6], [0.16, 4.6, 0.3, 0.35], [0.14, 0.14, 0.14, 0], [0.09, 0.1, 0.11, 1]],
+  /* 9 loft     */[[4.3, 3.0, 0.5, 0.6], [0.16, 4.6, 0.3, 0.35], [0.16, 0.15, 0.14, 0], [0.09, 0.1, 0.11, 1]],
   /* 10 blank   */[[3.0, 3.0, 0.0, 0.0], [0.3, 4.0, 0.0, 0.0], [0.5, 0.5, 0.5, 0], [0.1, 0.1, 0.1, 0]],
   /* 11 house   */[[2.9, 3.0, 0.4, 0.5], [0.3, 0.0, 0.25, 0.3], [0.92, 0.92, 0.9, 0], [0.1, 0.1, 0.11, 1]],
   /* 12 modern  */[[4.0, 2.2, 0.78, 0.5], [0.25, 4.8, 0.45, 0.3], [0.25, 0.26, 0.27, 1], [0.12, 0.16, 0.19, 4]],
@@ -113,9 +113,16 @@ function refreshOcc() {
   (OCC2.value as THREE.Vector3).set(o[3], o[4], o[5]);
 }
 /** (residential, office, shop) lit fractions for the sim time of day (also used by houses.ts) */
-export const OCC = uniform(new THREE.Vector3(0.4, 0.4, 0.8)).onFrameUpdate(refreshOcc) as N;
+export const OCC = uniform(new THREE.Vector3(0.4, 0.4, 0.8)) as N;
 /** (hotel, civic / school, 24 h) lit fractions */
-export const OCC2 = uniform(new THREE.Vector3(0.4, 0.2, 0.5)).onFrameUpdate(refreshOcc) as N;
+export const OCC2 = uniform(new THREE.Vector3(0.4, 0.2, 0.5)) as N;
+// Driven from our own rAF tick: uniform .onFrameUpdate() callbacks never fired here (the
+// values stayed at their defaults, so 03:00 looked like 21:30). refreshOcc is cached per 30 s
+// of sim time, so the tick is free.
+if (typeof requestAnimationFrame !== 'undefined') {
+  const tick = () => { refreshOcc(); requestAnimationFrame(tick); };
+  requestAnimationFrame(tick);
+}
 
 const hash2 = (a: N, b: N): N => fract(sin(a.mul(12.9898).add(b.mul(78.233))).mul(43758.5453));
 /** anti-aliased box [a, b] on x with filter width w */
@@ -183,7 +190,12 @@ export function facadeMaterial(): THREE.MeshLambertNodeMaterial {
   const winW = P0.z, winH = P0.w, sill = P1.x;
   const x0 = float(0.5).sub(winW.mul(0.5)), x1 = float(0.5).add(winW.mul(0.5));
   const y0 = sill, y1 = sill.add(winH);
-  const inX = box(fx, x0, x1, wX), inY = box(fy, y0, y1, wY);
+  // Victorian industrial (loft style): segmental-arched heads, ~0.25 m rise
+  const isLoft = step(8.5, style).mul(step(style, 9.5));
+  const pxW = fx.sub(x0).div(max(x1.sub(x0), 0.01)).mul(2).sub(1); // −1..1 across the opening
+  const arch = isLoft.mul(float(0.25).div(fh)).mul(clamp(float(1).sub(pxW.mul(pxW)), 0, 1));
+  const y1a = y1.add(arch);
+  const inX = box(fx, x0, x1, wX), inY = box(fy, y0, y1a, wY);
   const valid = step(0, hu).mul(step(fl.add(1).mul(fh).add(gH), Ht.sub(0.3))).mul(step(1.6, L)).mul(step(0.01, winW)).mul(notParty)
     .mul(box(u, float(0.35), L.sub(0.35), max(fwidth(u), 0.001)));
   const far = smoothstep(0.22, 0.55, max(wX, wY));
@@ -197,6 +209,10 @@ export function facadeMaterial(): THREE.MeshLambertNodeMaterial {
   const fw = float(0.06).div(bw);
   const frameM = float(1).sub(box(fx, x0.add(fw), x1.sub(fw), wX).mul(box(fy, y0.add(fw.mul(bw).div(fh)), y1.sub(fw.mul(bw).div(fh)), wY)))
     .add(select((winW.mul(bw) as N).greaterThan(1.4).and((P2.w as N).lessThan(0.5)), box(fx, float(0.485), float(0.515), wX), float(0)))
+    // loft: multi-pane industrial sash — 3 panes across, 4 up per sash pair, 4 cm glazing bars
+    .add(isLoft.mul(inX).mul(inY).mul(
+      box(fract(fx.sub(x0).div(max(x1.sub(x0), 0.01)).mul(3).add(0.5)), float(0.47), float(0.53), wX.mul(3).div(winW)).add(
+        box(fract(fy.sub(y0).div(max(winH, 0.01)).mul(4).add(0.5)), float(0.47), float(0.53), wY.mul(4).div(winH)))))
     .mul(float(1).sub(far));
   // ---- rooms: who lives / works behind each window
   // homes & hotel rooms: units of 2–3 bays; offices & the rest: open-plan zones of 4–7 bays that
@@ -282,7 +298,7 @@ export function facadeMaterial(): THREE.MeshLambertNodeMaterial {
   const brickTone = hash2(floor(bx), brow.mul(0.37)).sub(0.5).mul(0.16);
   let wallC: N = base.mul(float(1).add(isBrickO.mul(nearK).mul(brickTone.sub(mortar.mul(0.18)))));
   // lintels and sills (stone) on brick styles
-  const lint = box(fx, x0.sub(0.05), x1.add(0.05), wX).mul(box(fy, y1, y1.add(float(0.22).div(fh)), wY).add(box(fy, y0.sub(float(0.09).div(fh)), y0, wY)))
+  const lint = box(fx, x0.sub(0.05), x1.add(0.05), wX).mul(box(fy, y1a, y1a.add(float(0.22).div(fh)), wY).add(box(fy, y0.sub(float(0.09).div(fh)), y0, wY)))
     .mul(valid).mul(isBrickO).mul(float(1).sub(far));
   wallC = mix(wallC, lin(0.8, 0.77, 0.7), clamp(lint, 0, 1));
   // precast / curtain-wall joints
@@ -310,7 +326,9 @@ export function facadeMaterial(): THREE.MeshLambertNodeMaterial {
 
   // ---- storefront band
   const us = u.div(unitW), si = floor(us), um = fract(us).mul(unitW);
-  const wm = max(fwidth(um), 0.002), wh = max(fwidth(hh), 0.002);
+  // filter width from the continuous u: fwidth(um) spikes where fract() wraps at each unit edge and
+  // drew a dashed seam down the middle of every pilaster
+  const wm = max(fwidth(u), 0.002), wh = max(fwidth(hh), 0.002);
   const rs = hash2(seed.mul(0.371).add(si.mul(1.713)), L.mul(0.0917).add(3.1));
   const rs2 = fract(rs.mul(31.7)), rs3 = fract(rs.mul(7.13));
   const pier = float(1).sub(box(um, float(0.32), unitW.sub(0.32), wm));

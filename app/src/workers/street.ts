@@ -4,7 +4,8 @@
 // tile always produces the same furniture.
 import type { TypedArray } from '../data/tbn';
 import type { StreetRoad, Terrain } from './roads';
-import { placeVegetation } from './vegetation';
+import { buildExclusion, placeVegetation } from './vegetation';
+import { BLVD_L, BLVD_R, SW_L, SW_R } from './roads';
 
 export interface StreetBuf {
   /** vegetation records (layers/vegetation/species.ts VEG_STRIDE), sorted by (64 m cell, family) */
@@ -99,11 +100,6 @@ export function buildStreet(
       roads.add(Math.min(s.x0, s.x1) - m, Math.min(s.y0, s.y1) - m, Math.max(s.x0, s.x1) + m, Math.max(s.y0, s.y1) + m, s);
     }
   }
-  const onRoad = (x: number, y: number, margin: number) => {
-    const c = roads.at(x, y);
-    if (c) for (const s of c) if (segDist(s, x, y) < s.hw + margin) return true;
-    return false;
-  };
   const blds = new Grid<Poly>(32);
   const ro = a.b_ring_off as Uint32Array | undefined, vo = a.b_vert_off as Uint32Array | undefined, bxy = a.b_xy as Float32Array | undefined;
   if (ro && vo && bxy) {
@@ -113,6 +109,18 @@ export function buildStreet(
       const p: Poly = { xy: bxy, a: vo[r0], b: vo[r0 + 1] };
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
       for (let k = p.a; k < p.b; k++) { const x = bxy[k * 2], y = bxy[k * 2 + 1]; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+      blds.add(x0 - 2, y0 - 2, x1 + 2, y1 + 2, p);
+    }
+  }
+  // footprint halo: outer rings of the neighbouring tiles' buildings and houses that reach into
+  // this tile (xb_*, docs/SPEC.md), so placement near a border stays out of them
+  const xo = a.xb_off as Uint32Array | undefined, xxy = a.xb_xy as Float32Array | undefined;
+  if (xo && xxy) {
+    for (let i = 0; i < xo.length - 1; i++) {
+      const p: Poly = { xy: xxy, a: xo[i], b: xo[i + 1] };
+      if (p.b - p.a < 3) continue;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (let k = p.a; k < p.b; k++) { const x = xxy[k * 2], y = xxy[k * 2 + 1]; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
       blds.add(x0 - 2, y0 - 2, x1 + 2, y1 + 2, p);
     }
   }
@@ -139,13 +147,24 @@ export function buildStreet(
     return false;
   };
 
+  // ---- where furniture may stand: off every drawn carriageway (per-vertex pavement edges),
+  // junction surface and track; sidewalks are fine (shared with the vegetation placement)
+  const ex = buildExclusion(a, streets);
+  const lampOk = (x: number, y: number) => inTile(x, y) && !ex.blocked(x, y, 0.35, 0, true) && !inBuilding(x, y, 0.3);
+  const NUDGE = [[0, 0]];
+  for (const r of [1, 2, 3.5, 5]) for (let k = 0; k < 8; k++) NUDGE.push([Math.cos(k * Math.PI / 4) * r, Math.sin(k * Math.PI / 4) * r]);
+
   // ---- OSM points
   const pk = a.p_kind as Uint8Array | undefined, pxy = a.p_xy as Float32Array | undefined, pv = a.p_var as Uint8Array | undefined;
   const osmLamps = new Grid<number>(32);
   if (pk && pxy) {
     for (let i = 0; i < pk.length; i++) {
-      const x = pxy[i * 2], y = pxy[i * 2 + 1];
       if (pk[i] === 4) {
+        // mapped lamps a little off (in a lane): the nearest clear spot within 5 m, else dropped
+        let x = pxy[i * 2], y = pxy[i * 2 + 1];
+        const nd = NUDGE.find(([dx, dy]) => lampOk(x + dx, y + dy));
+        if (!nd) continue;
+        x += nd[0]; y += nd[1];
         // face the nearest road
         let best: Seg | null = null, bd = 25;
         const c = roads.at(x, y);
@@ -170,27 +189,36 @@ export function buildStreet(
   // ---- procedural street lamps along urban roads
   for (const r of streets) {
     if (!r.urban || r.cls < 2 || r.cls > 5) continue;
-    const at = (s: number) => {
+    /** curb point of side sd at s (per-vertex pavement edge along the meshing's miter offset), unit normal, sidewalk bits */
+    const at = (s: number, sd: number) => {
       let k = 0;
       while (k < r.s.length - 2 && r.s[k + 1] < s) k++;
       const t = Math.max(0, Math.min(1, (s - r.s[k]) / Math.max(1e-6, r.s[k + 1] - r.s[k])));
       const ox = r.ox[k] + (r.ox[k + 1] - r.ox[k]) * t, oy = r.oy[k] + (r.oy[k + 1] - r.oy[k]) * t;
       const l = Math.hypot(ox, oy) || 1;
-      return { x: r.x[k] + (r.x[k + 1] - r.x[k]) * t, y: r.y[k] + (r.y[k + 1] - r.y[k]) * t, nx: ox / l, ny: oy / l };
+      const E = sd > 0 ? r.pl : r.pr;
+      const e = E ? E[k] + (E[k + 1] - E[k]) * t : r.hw;
+      const x = r.x[k] + (r.x[k + 1] - r.x[k]) * t, y = r.y[k] + (r.y[k + 1] - r.y[k]) * t;
+      return { x: x + sd * ox * e, y: y + sd * oy * e, nx: ox / l, ny: oy / l, sw: r.sw ? r.sw[t < 0.5 ? k : k + 1] : r.side };
     };
     const lampStep = r.cls <= 3 ? 32 : 38;
     for (const sd of [1, -1]) {
-      const hasSW = (r.side & (sd === 1 ? 1 : 2)) !== 0;
       for (const [c0, c1] of r.clear) {
         // lamps: just behind the curb; both sides staggered on arterials, one side on locals
         if (r.cls <= 3 || sd === 1) {
           const phase = sd === 1 ? 0 : lampStep / 2;
           const first = Math.ceil((c0 + 4 - phase) / lampStep) * lampStep + phase;
           for (let s = first; s < c1 - 4; s += lampStep) {
-            const p = at(s);
-            const lo = r.hw + (hasSW ? 0.6 : 1.2);
-            const x = p.x + sd * p.nx * lo, y = p.y + sd * p.ny * lo;
-            if (!inTile(x, y) || nearOsmLamp(x, y) || inBuilding(x, y, 0.3) || onRoad(x, y, 0.2)) continue;
+            const p = at(s, sd);
+            const walk = (p.sw & (sd === 1 ? SW_L : SW_R)) !== 0, blvd = walk && (p.sw & (sd === 1 ? BLVD_L : BLVD_R)) !== 0;
+            // behind the curb: in the boulevard, at the kerb side of the sidewalk, or off the road edge
+            const lo0 = blvd ? 0.9 : walk ? 0.6 : 1.2;
+            let x = 0, y = 0, ok = false;
+            for (const extra of [0, 0.8, 1.8]) {
+              x = p.x + sd * p.nx * (lo0 + extra); y = p.y + sd * p.ny * (lo0 + extra);
+              if (lampOk(x, y)) { ok = true; break; }
+            }
+            if (!ok || nearOsmLamp(x, y)) continue;
             lamps.push(x, y, terr.at(x, y), Math.atan2(-sd * p.ny, -sd * p.nx), r.cls <= 3 ? 9.5 : 7.5);
           }
         }
@@ -234,7 +262,7 @@ export function buildStreet(
 
   // ---- trees, shrubs, hedges
   const veg = placeVegetation({
-    S, tx, ty, terr, ground, a, gAt, inBuilding, airfield, streets, lamps,
+    S, tx, ty, terr, ground, a, gAt, inBuilding, airfield, streets, lamps, ex,
     roadsAt: (x, y) => roads.at(x, y),
     houses: hxy && hang && hl && hwd ? { xy: hxy, angle: hang, len: hl, wid: hwd, type: a.h_type as Uint8Array | undefined } : null,
     osm: pk && pxy ? { kind: pk, xy: pxy, v: pv } : null,

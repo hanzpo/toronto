@@ -340,6 +340,34 @@ def split_by_tile(L, level):
 
 
 EDGE_PAD = 40.0  # m: border pieces reach this far outside a level-0 tile
+HALO_PAD = 12.0  # m: neighbouring footprints this close to (or inside) a level-0 tile
+
+
+def _halo_footprints(arrays, tx, ty, x0, y0, s):
+    """xb_off / xb_xy: outer rings (tile-local) of the 8 neighbouring tiles' buildings and houses that
+    reach within HALO_PAD of this tile. Buildings belong to the tile of their centre, so a large one can
+    extend tens of metres into the next tile; placement (trees, lamps) needs to see it."""
+    B = G["b"]
+    ro, bro = B["ring_off"], B["b_ring_off"]
+    rings = []
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            if dx == 0 and dy == 0:
+                continue
+            bi = G["bidx"][0].get((tx + dx, ty + dy))
+            if bi is None or not len(bi):
+                continue
+            cx, cy = B["cx"][bi], B["cy"][bi]
+            near = (cx > x0 - 300) & (cx < x0 + s + 300) & (cy > y0 - 300) & (cy < y0 + s + 300)
+            for i in bi[near]:
+                ring = B["xy"][ro[bro[i]]:ro[bro[i] + 1]]
+                if (ring[:, 0].max() < x0 - HALO_PAD or ring[:, 0].min() > x0 + s + HALO_PAD
+                        or ring[:, 1].max() < y0 - HALO_PAD or ring[:, 1].min() > y0 + s + HALO_PAD):
+                    continue
+                rings.append(ring)
+    if rings:
+        arrays["xb_off"] = _reduce_offsets(np.array([len(r) for r in rings], np.int64)).astype(np.uint32)
+        arrays["xb_xy"] = (np.vstack(rings) - [x0, y0]).astype(np.float32).ravel()
 
 
 def _edge_arrays(arrays, L, attr, tx, ty, x0, y0, s):
@@ -738,6 +766,7 @@ def build_tile(level, tx, ty):
     # + class / width / flags only; the client never meshes these.
     if level == 0:
         _edge_arrays(arrays, L, attr, tx, ty, x0, y0, s)
+        _halo_footprints(arrays, tx, ty, x0, y0, s)
     # ---- street points (level 0): signals, stop signs, marked crossings, trees, lamps
     if level == 0:
         pi = G["points"].get((tx, ty))

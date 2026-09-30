@@ -288,13 +288,20 @@ class BusRouter:
             A, B = cands[ka], cands[kb]
             seg = stops[kb] - stops[ka]
             res = {}
-            for prune, lim in ((True, 4 * seg + 800), (False, 8 * seg + 2000)):
+            # last attempt: start from every candidate at the stop, not only those the previous
+            # leg reached (on smoothed curves / divided roads the previous leg can end on the
+            # other carriageway or a neighbouring edge; the bus leaves the stop in its travel
+            # direction on whichever edge it is really on)
+            base = min(cost.values()) if cost else 0.0
+            for prune, lim, any_start in ((True, 4 * seg + 800, False), (False, 8 * seg + 2000, False),
+                                          (False, 8 * seg + 2000, True)):
                 ctx = _Ctx(net, sub, subt, prune)
                 for i, a in enumerate(A):
-                    if i not in cost:
+                    if i not in cost and not any_start:
                         continue
+                    ci = cost.get(i, base + A[i][3] ** 2 / 100.0 + 50.0)
                     for j, (c, p) in self.search(a, B, ctx, lim).items():
-                        tot = cost[i] + c + B[j][3] ** 2 / 100.0
+                        tot = ci + c + B[j][3] ** 2 / 100.0
                         if j not in res or tot < res[j][0]:
                             res[j] = (tot, i, p)
                 if res:

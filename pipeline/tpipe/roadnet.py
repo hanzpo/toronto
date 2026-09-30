@@ -30,6 +30,7 @@ from collections import defaultdict
 
 import numpy as np
 import shapely
+import shapely.ops
 from scipy.spatial import cKDTree
 
 from . import geo
@@ -144,6 +145,12 @@ class Lines:
         self.wraw = g("wraw", np.float32) if "wraw" in d else np.full(len(sel), np.nan, np.float32)
         self.xmark = g("xmark")
         self.n = len(sel)
+        # `covered=yes` / building passages were extracted as tunnels: at layer >= 0 they are
+        # at grade (Union Station's train shed, passages through buildings), not underground
+        lens_ = np.array([cumlen(self.xy[self.off[i]:self.off[i + 1]])[-1] for i in range(self.n)])
+        short_cov = ((self.flags & F_TUNNEL) != 0) & (self.layer >= 0) & (lens_ < 600) & (
+            ((self.kind == 1) & np.isin(self.cls, [0, 1])) | ((self.kind == 0) & (self.cls >= 5)))
+        self.flags[short_cov] &= ~F_TUNNEL
         self.len = np.array([cumlen(self.xy[self.off[i]:self.off[i + 1]])[-1] for i in range(self.n)])
 
     def pts(self, i):
@@ -898,6 +905,7 @@ def solve_profile(S: Stroke, L: Lines, curated=None):
         return k
     kb = run_ramp(br, 30.0)
     kt = run_ramp(tu, 90.0)
+    lo_hard = lo.copy()          # clearances over crossings: enforced first
     lo[br] = np.maximum(lo[br], gs[br] + 1.2 * kb[br] - 0.15)
     hi[tu] = np.minimum(hi[tu], g[tu] - 0.6 * cover[tu] * kt[tu] + 0.3)
     # at-grade roads never dip into the ground (4th-order solutions overshoot slightly)
@@ -937,8 +945,10 @@ def solve_profile(S: Stroke, L: Lines, curated=None):
     w = np.where(br[first], 1e-5, np.where(tu[first], 0.05, 1.0))
     t = np.where(tu[first], g[first] - cover[first] * kt[first], g[first])
     LO = np.full(n, -np.inf)
+    LOH = np.full(n, -np.inf)
     HI = np.full(n, np.inf)
     np.maximum.at(LO, key, lo)
+    np.maximum.at(LOH, key, lo_hard)
     np.minimum.at(HI, key, hi)
     EQ = {}
     for vi, Z in eq.items():
@@ -979,7 +989,11 @@ def solve_profile(S: Stroke, L: Lines, curated=None):
     BIG = 3e3 ** 2
     active = dict(EQ)
     z = None
-    for it in range(8):
+    # active set in two tiers: the hard bounds (crossing clearances, tunnel cover) first; the
+    # soft floors (decks over the ground, roads not below it) only where the hard-bound
+    # solution still violates them -- pinning floors early left single vertices stuck low
+    tier = LOH
+    for it in range(40):
         ab2 = ab.copy()
         rhs2 = rhs.copy()
         if active:
@@ -997,15 +1011,20 @@ def solve_profile(S: Stroke, L: Lines, curated=None):
             full[4, :-2] = ab2[0, 2:]
             z = solve_banded((2, 2), full, rhs2)
         viol = False
-        for i in np.nonzero(z < LO - 0.05)[0]:
-            if i not in EQ:
-                active[int(i)] = LO[i]
+        for i in np.nonzero(z < tier - 0.05)[0]:
+            if i not in EQ and active.get(int(i)) != tier[i] and not (tier[i] > HI[i]):
+                active[int(i)] = tier[i]
                 viol = True
         for i in np.nonzero(z > HI + 0.05)[0]:
-            if i not in EQ and not (LO[i] > HI[i]):
+            if i not in EQ and active.get(int(i)) != HI[i] and not (LO[i] > HI[i]):
                 active[int(i)] = HI[i]
                 viol = True
+        if __import__("os").environ.get("RN_DEBUG_SOLVE"):
+            print("   it", it, "tierH", tier is LOH, "active", len(active), "minviolLO", float(np.min(z - LO)), "viol", viol, "maxHIviol", float(np.max(z - HI)))
         if not viol:
+            if tier is LOH:
+                tier = LO
+                continue
             break
     z = z[key]
     # final grade limiter: halfway between the lower and upper G-Lipschitz envelopes removes
@@ -1013,7 +1032,9 @@ def solve_profile(S: Stroke, L: Lines, curated=None):
     ghard = np.array([_ghard(L, ws[k]) for k in S.vway])
     d_ = np.diff(z)
     h_ = np.maximum(np.diff(s), 1e-3)
-    if n0 > 2 and (np.abs(d_) > 2 * ghard[1:] * h_ + 0.05).any():
+    # (the two-tier active set leaves no conflicting cliffs; the limiter's halfway envelope made
+    # sawtooth decks between clearance vertices, so it is opt-in now)
+    if n0 > 2 and __import__("os").environ.get("RN_LIMIT") and (np.abs(d_) > 2 * ghard[1:] * h_ + 0.05).any():
         up = _sweep_max(s, (z, ghard))
         dn = -_sweep_max(s, (-z, ghard))
         zl_ = (up + dn) / 2
@@ -1194,6 +1215,19 @@ def decide_levels(L: Lines, X, dsm_sample, report):
                 pass
             bump_a = dsm_sample(L, a, x["p"])
             bump_b = dsm_sample(L, b, x["p"])
+            if (ka == "rail") != (kb == "rail") and not hwy and L.cls[a if ka == "rail" else b] in (0, 1) and ((bump_a is None or bump_b is None or abs(bump_a - bump_b) < 2.0)):
+                # a main-line / siding track and a street crossing without a shared node: level
+                # crossings are always mapped as nodes, so this is a grade separation; in the GTA
+                # the corridors run on embankments with streets underneath
+                rl = a if ka == "rail" else b
+                up = rl
+                how = "rail_over_street"
+                lon, lat = geo.unproject(*x["p"])
+                suspicious.append(dict(kind="inferred_rail_over_street", upper=int(L.id[up]), lower=int(L.id[b if up == a else a]),
+                                       lon=round(lon, 6), lat=round(lat, 6)))
+                stats["separated_rail_over_street"] += 1
+                ups.append(dict(up=up, lo=b if up == a else a, p=x["p"], how=how))
+                continue
             if bump_a is None or bump_b is None or abs(bump_a - bump_b) < 2.0:
                 # fallback: in Toronto the local road crosses over an at-grade freeway;
                 # rail and road: road over rail on arterials, otherwise flagged
@@ -1371,13 +1405,15 @@ def insert_stations(S: Stroke, sv) -> np.ndarray:
     nxt = np.clip(src + 1, 0, n - 1)
     xy = np.stack([np.interp(S2, s, S.xy[:, 0]), np.interp(S2, s, S.xy[:, 1])], 1)
     xy[oldpos] = S.xy
-    vway = S.vway[src]
+    # an inserted vertex lies on segment (src, nxt), which belongs to the way of its END vertex
+    # (same convention as the fillet labelling)
+    vway = S.vway[nxt]
     vway[oldpos] = S.vway
     if S.attrs is not None:
         A = {}
         for key, v in S.attrs.items():
             if key == "mk":
-                a = v[src].copy()
+                a = v[nxt].copy()     # per-way marking state: the segment's (end) way
             else:
                 a = np.interp(S2, s, v)
             a[oldpos] = v
@@ -1391,7 +1427,7 @@ def insert_stations(S: Stroke, sv) -> np.ndarray:
         vf[oldpos] = S.vf
         S.vf = vf
     if S.sw is not None:
-        sw = S.sw[src].copy()
+        sw = S.sw[nxt].copy()
         sw[oldpos] = S.sw
         S.sw = sw
     for key in ("g", "z"):
@@ -1630,8 +1666,10 @@ def run_block(G, core, halo):
     for u in ups:
         # a line in a tunnel below needs no structure above it (cover is solved per tunnel);
         # two lines both in tunnels are not our business either
-        if (L.flags[u["lo"]] & F_TUNNEL) or (L.flags[u["up"]] & F_TUNNEL):
+        if L.flags[u["up"]] & F_TUNNEL:
             continue
+        if L.flags[u["lo"]] & F_TUNNEL:
+            u["down"] = True     # an underpass: the tunnel is pushed below the upper line instead
         keep.append(u)
     report["crossings_over_tunnels_skipped"] = len(ups) - len(keep)
     ups = keep
@@ -1674,6 +1712,8 @@ def run_block(G, core, halo):
         u["hl"] = hl
         insert_stations(U, [u["su"] - hl, u["su"] + hl])
         m = np.abs(U.s - u["su"]) <= hl + 1e-6
+        if u.get("down"):
+            continue
         # always a structure over the whole width of the lower line (OSM bridge ways often stop short)
         st = STRUCT["rail"] if U.kind == 1 else STRUCT["footbridge"] if U.cls >= 7 else STRUCT["girder"]
         U.vf[m] |= V_BRIDGE | (st << V_STRUCT_SHIFT) * ((U.vf[m] >> V_STRUCT_SHIFT) == 0)
@@ -1684,7 +1724,7 @@ def run_block(G, core, halo):
     need = set(i for i, S in enumerate(strokes) if (S.vf & (V_BRIDGE | V_TUNNEL)).any())
     need |= set(curated.keys())
     for u in ups:
-        need.add(u["iu"])
+        need.add(u["il"] if u.get("down") else u["iu"])
     for S in strokes:
         S.z = S.g.copy()
         S.pins = {}
@@ -1692,6 +1732,7 @@ def run_block(G, core, halo):
     def requirements():
         for S in strokes:
             S.req_lo = []
+            S.req_hi = []
         for u in ups:
             U, Lo = strokes[u["iu"]], strokes[u["il"]]
             zl = float(np.interp(u["sl"], Lo.s, Lo.z))
@@ -1700,7 +1741,11 @@ def run_block(G, core, halo):
                 CLEAR["ped_over_road"] if ku == "path" else CLEAR["road"])
             deck = DECK["rail"] if ku == "rail" else DECK["path"] if ku == "path" else (
                 DECK["motorway"] if L.cls[u["up"]] <= 1 else DECK["road"])
-            U.req_lo.append((u["su"], zl + clr + deck, max(u["hl"] - 1.0, 3.0)))
+            if u.get("down"):
+                zu = float(np.interp(u["su"], U.s, U.z))
+                Lo.req_hi.append((u["sl"], zu - clr - deck, 6.0))
+            else:
+                U.req_lo.append((u["su"], zl + clr + deck, max(u["hl"] - 1.0, 3.0)))
 
     def solve(ids):
         for si in sorted(ids):
@@ -1761,6 +1806,11 @@ def run_block(G, core, halo):
         # into clearances (a ramp pinned to its deck would otherwise lift the deck, and so on)
         solve(touched)
         memguard("solve")
+    # 3. one last clearance pass against the final lower lines (a street lifted by a pin at a
+    #    junction next to an underpass must not end up under the rail deck), no more pins after
+    requirements()
+    solve(set(u["il"] if u.get("down") else u["iu"] for u in ups))
+
     for S in strokes:
         if S.kind == 0 and S.cls >= 7 and S.attrs is not None:
             m = (S.vf & V_BRIDGE) != 0
@@ -2071,6 +2121,24 @@ def junction_surfaces(clusters, strokes: list[Stroke], report):
     curbs = []
     pads = []
     poles = []
+    # every drivable carriageway quad of the block (poles / plates must stand clear of all of them)
+    quads = []
+    for S in strokes:
+        if S.kind != 0 or S.group not in (0, 2) or S.cls > 6 or S.attrs is None:
+            continue
+        P = S.xy
+        d_ = np.diff(P, axis=0)
+        ln_ = np.hypot(*d_.T)
+        for k in np.nonzero(ln_ > 0.2)[0]:
+            if S.vf[k] & V_TUNNEL:
+                continue
+            n_ = np.array([-d_[k, 1], d_[k, 0]]) / ln_[k]
+            quads.append(shapely.Polygon([P[k] + n_ * S.attrs["pL"][k], P[k + 1] + n_ * S.attrs["pL"][k + 1],
+                                          P[k + 1] - n_ * S.attrs["pR"][k + 1], P[k] - n_ * S.attrs["pR"][k]]))
+    qtree = shapely.STRtree(quads) if quads else None
+
+    def on_road(pt, margin=0.4):
+        return qtree is not None and len(qtree.query(pt, predicate="dwithin", distance=margin)) > 0
     for ci, C in enumerate(clusters):
         c = C["c"]
         strips = []
@@ -2117,22 +2185,64 @@ def junction_surfaces(clusters, strokes: list[Stroke], report):
             hp.append(c + a * R + nrm * (hi + 6))
         clip = shapely.convex_hull(shapely.multipoints(np.array(hp)))
         clip = clip.union(shapely.Point(c).buffer(max(3.0, min(g_["R"] for g_ in C["legs"]) * 0.8)))
+        # channelising islands (holes in the union of the carriageways: a slip-lane island in a
+        # fork) stay islands -- the closing would pave them over
+        islands = []
+        for part in shapely.get_parts(road):
+            if part.geom_type != "Polygon":
+                continue
+            for ring in part.interiors:
+                h = shapely.Polygon(ring)
+                if 6.0 < h.area < 4000.0:
+                    islands.append(h)
+        isl = shapely.union_all(islands).intersection(clip) if islands else shapely.Polygon()
         js = closed.intersection(clip)
+        if not isl.is_empty:
+            js = js.difference(isl)
         if js.is_empty or js.area < 4:
             continue
-        # median gaps inside the box are paved (the cross street runs through)
         js = shapely.make_valid(js)
         surf.append((ci, js))
+        cw = shapely.Polygon()
         if swstrips:
             sw = shapely.union_all([x for x in swstrips if x is not None]).buffer(rc * 0.6, quad_segs=4).buffer(-rc * 0.6, quad_segs=4)
-            cw = sw.difference(closed).intersection(clip)
-            cw = shapely.make_valid(cw)
-            if not cw.is_empty and cw.area > 1:
-                walks.append((ci, cw))
-                cl = closed.boundary.intersection(clip).intersection(cw.buffer(0.3))
-                if not cl.is_empty:
-                    curbs.append((ci, cl))
-        # tactile pads + signal poles at each leg's crosswalk ends
+            cw = shapely.make_valid(sw.difference(closed).intersection(clip))
+        ped = shapely.make_valid(cw.union(isl)) if not isl.is_empty else cw
+        if not ped.is_empty and ped.area > 1:
+            walks.append((ci, ped))
+            cl = shapely.union_all([closed.boundary.intersection(clip).intersection(cw.buffer(0.3)) if not cw.is_empty else shapely.Polygon(),
+                                    isl.boundary if not isl.is_empty else shapely.Polygon()])
+            if not cl.is_empty:
+                curbs.append((ci, cl))
+        # everything drivable around the intersection (poles and plates must stand clear of it)
+        drive = shapely.make_valid(shapely.union_all([js] + strips))
+        ped_in = ped.buffer(-0.45) if not ped.is_empty else ped
+
+        def place(p, allow_drop=False):
+            """Move a pole / plate standing on pavement onto the nearest corner sidewalk or island
+            (0.45 m in from the curb); failing that, just outside the pavement."""
+            pt = shapely.Point(p)
+            if not drive.buffer(0.4).contains(pt) and not on_road(pt):
+                return p
+            if not ped_in.is_empty:
+                q = shapely.ops.nearest_points(ped_in, pt)[0]
+                if q.distance(pt) < 15.0 and not on_road(q, 0.2):
+                    return np.array([q.x, q.y])
+            if allow_drop:
+                return None
+            # nearest free spot on rings around the point
+            for r_ in (1.5, 3.0, 4.5, 6.0, 8.0, 10.0, 13.0):
+                best = None
+                for k_ in range(16):
+                    a_ = k_ * math.pi / 8
+                    q = shapely.Point(p[0] + r_ * math.cos(a_), p[1] + r_ * math.sin(a_))
+                    if not drive.buffer(0.4).contains(q) and not on_road(q):
+                        best = q
+                        break
+                if best is not None:
+                    return np.array([best.x, best.y])
+            return None
+        # tactile pads at each leg's crosswalk ends (on the sidewalk / refuge)
         for g_ in C["legs"]:
             a = g_["dir"]
             nrm = np.array([-a[1], a[0]])
@@ -2142,39 +2252,34 @@ def junction_surfaces(clusters, strokes: list[Stroke], report):
             for e, sgn in ((hi, 1), (lo, -1)):
                 p = c + a * mid + nrm * (e + sgn * 0.45)
                 if C["sig"] or any(r["sw"] for r in g_["arms"]):
-                    pads.append((ci, p, math.atan2(nrm[1], nrm[0]) * 1.0 + (0 if sgn > 0 else math.pi), 3.0))
-            if C["sig"]:
-                # far-right corner pole for traffic approaching along -a (from this leg into the box):
-                # approach travels along -a; its right is -nrm... poles stand on the far side of the box
-                # handled per approach: pole behind the stop line on the right, mast over the approach
-                pass
+                    q = place(p, allow_drop=True)
+                    if q is not None:
+                        pads.append((ci, q, math.atan2(nrm[1], nrm[0]) + (0 if sgn > 0 else math.pi), 3.0))
         if C["sig"]:
             for g_ in C["legs"]:
                 a = g_["dir"]
                 nrm = np.array([-a[1], a[0]])
                 lo, hi = g_["lat"]
-                # the approach (inbound) half is on the right of inbound travel (-a): right of -a is +nrm
-                # far side: pole at the opposite leg's crosswalk, right side of travel
+                # travel into the box is along -a; its right is +nrm. Far-side pole beyond the box on
+                # the right, mast over the approach lanes; near-side pole on the approach corner;
+                # median poles only where a real median / island is there
                 opp = min(C["legs"], key=lambda h: math.cos(h["ang"] - g_["ang"]))
                 if opp is not g_ and math.cos(opp["ang"] - g_["ang"]) < -0.7:
                     far = opp["R"] + 2.2
                 else:  # T-junction stem: the far curb of the cross street
                     far = max((max(r["hw"] for r in h["arms"]) for h in C["legs"] if h is not g_), default=g_["R"]) + 2.5
-                # travel direction -a; beyond the box = -a * far; right of travel = +nrm... (for travel t=-a, right = (t_y, -t_x) = (-a_y, a_x) = nrm)
-                ext = hi if hi > 0 else abs(lo)
-                p_far = c - a * far + nrm * (max(hi, 2.5) + 1.0)
                 mast = float(np.clip(max(hi, 2.5) * 0.9, 2.5, 11.0))
-                poles.append((ci, p_far, g_["ang"], mast, 0))
-                # near-side pole (Toronto: signal on the near right corner too) with a short arm
-                p_near = c + a * (g_["R"] + 4.0) + nrm * (max(hi, 2.5) + 1.0)
-                poles.append((ci, p_near, g_["ang"], 1.2, 1))
-                # median pole for dual carriageways with a median wider than 2 m
-                inner = [r for r in g_["arms"]]
-                if len(inner) >= 2:
-                    offs = sorted(float(np.dot(r["p"] - c, nrm)) for r in inner)
-                    gap_mid = (offs[0] + offs[-1]) / 2
-                    p_med = c + a * (g_["R"] + 1.0) + nrm * gap_mid
-                    poles.append((ci, p_med, g_["ang"], 1.2, 2))
+                q = place(c - a * far + nrm * (max(hi, 2.5) + 1.0))
+                if q is not None:
+                    poles.append((ci, q, g_["ang"], mast, 0))
+                q = place(c + a * (g_["R"] + 4.0) + nrm * (max(hi, 2.5) + 1.0))
+                if q is not None:
+                    poles.append((ci, q, g_["ang"], 1.2, 1))
+                if len(g_["arms"]) >= 2:
+                    offs = sorted(float(np.dot(r["p"] - c, nrm)) for r in g_["arms"])
+                    q = place(c + a * (g_["R"] + 1.0) + nrm * ((offs[0] + offs[-1]) / 2), allow_drop=True)
+                    if q is not None:
+                        poles.append((ci, q, g_["ang"], 1.2, 2))
     report["junction_surfaces"] = len(surf)
     return surf, walks, curbs, pads, poles
 

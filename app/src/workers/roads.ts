@@ -37,16 +37,16 @@ export const FX_LINK = 1, FX_RUMBLE = 2, FX_SHARROW = 4, FX_STAIRS = 8, FX_CYCLE
 const V_BRIDGE = 1, V_TUNNEL = 2, V_GRADED = 4, V_EMBED = 8;
 const ST_GIRDER = 1, ST_PORTAL = 2, ST_HAMMER = 3, ST_TRUSS = 4, ST_ARCH = 5, ST_FOOT = 6, ST_RAIL = 7, ST_GRASS = 10;
 // sidewalk bits (tpipe.roadnet SW_*)
-const SW_L = 1, SW_R = 2, BLVD_L = 4, BLVD_R = 8, PAVERS = 16, MEDIAN_L = 32;
+export const SW_L = 1, SW_R = 2, BLVD_L = 4, BLVD_R = 8, PAVERS = 16, MEDIAN_L = 32;
 // road flags
 const F_ONEWAY = 1, F_BRIDGE = 2, F_LINK = 8, F_LOT = 32, F_DUP = 64;
 const FAR = 1e4;
 
 export const ROAD_W_DEFAULT = [24, 18, 14, 12, 10, 8, 5, 5, 2.2, 3];
-const SIDEWALK_W = [0, 0, 3.2, 2.8, 2.4, 1.9, 1.6];
+export const SIDEWALK_W = [0, 0, 3.2, 2.8, 2.4, 1.9, 1.6];
 const CURB_H = 0.15;
-const BLVD_W = 1.8;
-const PAVER_W = 0.9;
+export const BLVD_W = 1.8;
+export const PAVER_W = 0.9;
 // ground classes where roads get curbs + sidewalks when OSM doesn't say otherwise (old tiles)
 const URBAN = new Set([2, 4, 5, 6, 11, 12, 17, 18, 19, 21, 22]);
 
@@ -307,6 +307,8 @@ export interface StreetRoad {
   bridge?: boolean;
   /** per-vertex pavement half widths left / right (network-model tiles) */
   pl?: number[]; pr?: number[];
+  /** per-vertex sidewalk bits (SW_L, SW_R, BLVD_L, BLVD_R, PAVERS) */
+  sw?: number[];
   /** per-vertex road surface elevation */
   z?: number[];
 }
@@ -604,7 +606,7 @@ export function buildRoads(a: Record<string, TypedArray>, terr: Terrain, level: 
       const anyBridge = run.vf.some((v) => (v & V_BRIDGE) !== 0);
       streets.push({
         x: run.x, y: run.y, s: run.s, ox, oy, hw: hwAvg, cls: c, side: swAll & 3, ws, clear, urban: builtUp || swAll !== 0,
-        bridge: anyBridge, pl: run.pl, pr: run.pr, z: zc,
+        bridge: anyBridge, pl: run.pl, pr: run.pr, sw: run.sw, z: zc,
       });
     }
     if (level !== 0) continue;

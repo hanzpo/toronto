@@ -17,7 +17,7 @@
 // Output: VEG_STRIDE records (species.ts) sorted into 64 m cells × family so
 // the renderer can move whole cells between LOD pools.
 import type { TypedArray } from '../data/tbn';
-import { ROAD_W_DEFAULT, type StreetRoad, type Terrain } from './roads';
+import { BLVD_L, BLVD_R, BLVD_W, PAVER_W, PAVERS, ROAD_W_DEFAULT, SIDEWALK_W, SW_L, SW_R, type StreetRoad, type Terrain } from './roads';
 import { familyOf, GENUS, S, SPECIES, VEG_STRIDE } from '../layers/vegetation/species';
 
 export const VEG_CELLS = 16; // per tile side (64 m cells)
@@ -85,6 +85,8 @@ export interface VegEnv {
   lamps: number[];
   houses: { xy: Float32Array; angle: Float32Array; len: Float32Array; wid: Float32Array; type?: Uint8Array } | null;
   osm: { kind: Uint8Array; xy: Float32Array; v?: Uint8Array } | null;
+  /** exclusion index already built for this tile (street.ts shares it) */
+  ex?: Exclusion;
 }
 
 export interface VegBuf {
@@ -158,87 +160,151 @@ class Segs {
 // ---------------------------------------------------------------------------- exclusion index
 
 const EX_ROAD = 0, EX_HIGHWAY = 1, EX_BRIDGE = 2, EX_RAIL = 3, EX_DISC = 4;
-/** largest clearance a query adds beyond an item's half-width (crown radius + clear zone) */
-const EX_PAD = 16;
+/** largest clearance a query adds beyond an item's half-width (crown radius + clear zone + bands) */
+const EX_PAD = 22;
+const ST = 13; // item stride
 
 /**
- * Where plants may not stand, from the same geometry the road / rail meshing
- * uses: carriageways (true width, all classes incl. service roads, paths,
- * ramps and bridge decks), sidewalks, rail tracks (tunnels excluded), junction
- * boxes and marked crossings. Items are polylines with a half-width per side
- * (sidewalks widen one side) or discs, in a 16 m grid.
+ * Where plants and street furniture may not stand, from the geometry the
+ * road / rail meshing draws: carriageways with their per-vertex pavement edges
+ * (`r_pl` left / `r_pr` right: asymmetric one-way pairs, tapers, merges; all
+ * classes incl. service roads, paths, ramps and decks), the sidewalk band on
+ * each side (`r_sw`: behind a grass boulevard or a paver strip where drawn),
+ * the junction surfaces (`js_*` triangles), rail tracks (tunnels excluded),
+ * junction boxes and marked crossings. Roads of the neighbouring tiles within
+ * 40 m of the border (`xr_*`, width only) count with a safety margin.
  *
- * Clearances (trunk radius t, crown radius c):
- *   street / path       trunk off the carriageway and sidewalk: d ≥ edge + t
- *                       (commercial tree pits: carriageway only)
- *   motorway / trunk    no crown over the lanes or shoulder: d ≥ hw + max(t, c) + 2.5
- *   bridge deck         no crown under or through the deck: d ≥ hw + c + 1
+ * Clearances (trunk radius t, crown radius c; e = pavement edge on the point's side):
+ *   street / path       trunk off the pavement: d ≥ e + t, and off the sidewalk band
+ *                       [e + b, e + b + w] (b = boulevard / paver strip); tree pits and
+ *                       furniture (`pit`) may stand on the sidewalk
+ *   motorway / trunk    no crown over the lanes or shoulder: d ≥ e + max(t, c) + 2.5
+ *   bridge deck         no crown under or through the deck: d ≥ e + max(t, c) + 1
  *   rail track          d ≥ max(3.2 + t, c + 1)  (ballast shoulder, crown off the tracks)
- *   junction / crossing d ≥ r + t
+ *   junction surface    t clear of the triangle; junction box / crossing disc: d ≥ r + t
  */
 export class Exclusion {
   private cells = new Map<number, number[]>();
-  private it: number[] = []; // x0 y0 x1 y1 hwL hwR type
+  /** x0 y0 x1 y1 · pavement half-width left (start, end), right (start, end) · left band, left walk · right band, right walk · type */
+  private it: number[] = [];
+  private tris: number[] = [];
+  private tcells = new Map<number, number[]>();
   private size = 16;
   /** the tile carries its neighbours' border pieces (xr_* / xl_*) */
   hasBorder = false;
   private k(i: number, j: number) { return (i + 1024) * 8192 + (j + 1024); }
-  add(x0: number, y0: number, x1: number, y1: number, hwL: number, hwR: number, type: number) {
-    const id = this.it.length / 7;
-    this.it.push(x0, y0, x1, y1, hwL, hwR, type);
-    const m = Math.max(hwL, hwR) + EX_PAD, s = this.size;
-    for (let j = Math.floor((Math.min(y0, y1) - m) / s); j <= Math.floor((Math.max(y0, y1) + m) / s); j++) {
-      for (let i = Math.floor((Math.min(x0, x1) - m) / s); i <= Math.floor((Math.max(x0, x1) + m) / s); i++) {
+  private cover(map: Map<number, number[]>, x0: number, y0: number, x1: number, y1: number, id: number) {
+    const s = this.size;
+    for (let j = Math.floor(y0 / s); j <= Math.floor(y1 / s); j++) {
+      for (let i = Math.floor(x0 / s); i <= Math.floor(x1 / s); i++) {
         const key = this.k(i, j);
-        let c = this.cells.get(key);
-        if (!c) { c = []; this.cells.set(key, c); }
+        let c = map.get(key);
+        if (!c) { c = []; map.set(key, c); }
         c.push(id);
       }
     }
   }
+  seg(x0: number, y0: number, x1: number, y1: number, l0: number, l1: number, r0: number, r1: number,
+    bl: number, wl: number, br: number, wr: number, type: number) {
+    const id = this.it.length / ST;
+    this.it.push(x0, y0, x1, y1, l0, l1, r0, r1, bl, wl, br, wr, type);
+    const m = Math.max(l0, l1, r0, r1) + Math.max(bl + wl, br + wr) + EX_PAD;
+    this.cover(this.cells, Math.min(x0, x1) - m, Math.min(y0, y1) - m, Math.max(x0, x1) + m, Math.max(y0, y1) + m, id);
+  }
+  add(x0: number, y0: number, x1: number, y1: number, hwL: number, hwR: number, type: number) {
+    this.seg(x0, y0, x1, y1, hwL, hwL, hwR, hwR, 0, 0, 0, 0, type);
+  }
   disc(x: number, y: number, r: number) { this.add(x, y, x, y, r, r, EX_DISC); }
-  /** true when a plant (trunk radius t, crown radius c) at x, y violates any clearance */
-  blocked(x: number, y: number, t: number, c: number, pit = false): boolean {
-    const ids = this.cells.get(this.k(Math.floor(x / this.size), Math.floor(y / this.size)));
+  tri(ax: number, ay: number, bx: number, by: number, cx: number, cy: number) {
+    const id = this.tris.length / 6;
+    this.tris.push(ax, ay, bx, by, cx, cy);
+    const m = 4;
+    this.cover(this.tcells, Math.min(ax, bx, cx) - m, Math.min(ay, by, cy) - m, Math.max(ax, bx, cx) + m, Math.max(ay, by, cy) + m, id);
+  }
+  /** inside a junction surface, or within r of one */
+  onJunction(x: number, y: number, r: number): boolean {
+    const ids = this.tcells.get(this.k(Math.floor(x / this.size), Math.floor(y / this.size)));
     if (!ids) return false;
-    const it = this.it;
+    const T = this.tris;
     for (const id of ids) {
-      const q = id * 7;
-      const x0 = it[q], y0 = it[q + 1], dx = it[q + 2] - x0, dy = it[q + 3] - y0, type = it[q + 6];
-      const l2 = dx * dx + dy * dy;
-      const u = l2 > 0 ? Math.max(0, Math.min(1, ((x - x0) * dx + (y - y0) * dy) / l2)) : 0;
-      const d = Math.hypot(x - x0 - dx * u, y - y0 - dy * u);
-      const left = dx * (y - y0) - dy * (x - x0) > 0;
-      const hw = left ? it[q + 4] : it[q + 5];
-      let need: number;
-      switch (type) {
-        case EX_ROAD: need = (pit ? Math.min(it[q + 4], it[q + 5]) : hw) + t; break;
-        case EX_HIGHWAY: need = hw + Math.max(t, c) + 2.5; break;
-        case EX_BRIDGE: need = hw + Math.max(t, c) + 1; break;
-        case EX_RAIL: need = Math.max(3.2 + t, c + 1.0); break;
-        default: need = hw + t;
-      }
-      if (d < need) return true;
+      const q = id * 6;
+      const ax = T[q], ay = T[q + 1], bx = T[q + 2], by = T[q + 3], cx = T[q + 4], cy = T[q + 5];
+      const d1 = (x - bx) * (ay - by) - (ax - bx) * (y - by);
+      const d2 = (x - cx) * (by - cy) - (bx - cx) * (y - cy);
+      const d3 = (x - ax) * (cy - ay) - (cx - ax) * (y - ay);
+      const neg = d1 < 0 || d2 < 0 || d3 < 0, pos = d1 > 0 || d2 > 0 || d3 > 0;
+      if (!(neg && pos)) return true;
+      if (r > 0 && (sd(x, y, ax, ay, bx, by) < r || sd(x, y, bx, by, cx, cy) < r || sd(x, y, cx, cy, ax, ay) < r)) return true;
     }
     return false;
   }
+  /**
+   * Depth (m) of the point inside the nearest drawn pavement edge on its side,
+   * over all at-grade items (> 0 inside a carriageway; for furniture placement)
+   */
+  pavementDepth(x: number, y: number): number {
+    const ids = this.cells.get(this.k(Math.floor(x / this.size), Math.floor(y / this.size)));
+    let best = -Infinity;
+    if (!ids) return best;
+    const it = this.it;
+    for (const id of ids) {
+      const q = id * ST, type = it[q + 12];
+      if (type === EX_RAIL || type === EX_DISC) continue;
+      const g = this.geom(q, x, y);
+      best = Math.max(best, g.e - g.d);
+    }
+    return best;
+  }
+  private geom(q: number, x: number, y: number) {
+    const it = this.it;
+    const x0 = it[q], y0 = it[q + 1], dx = it[q + 2] - x0, dy = it[q + 3] - y0;
+    const l2 = dx * dx + dy * dy;
+    const u = l2 > 0 ? Math.max(0, Math.min(1, ((x - x0) * dx + (y - y0) * dy) / l2)) : 0;
+    const d = Math.hypot(x - x0 - dx * u, y - y0 - dy * u);
+    const left = dx * (y - y0) - dy * (x - x0) > 0;
+    const e = left ? it[q + 4] + (it[q + 5] - it[q + 4]) * u : it[q + 6] + (it[q + 7] - it[q + 6]) * u;
+    const b = left ? it[q + 8] : it[q + 10], w = left ? it[q + 9] : it[q + 11];
+    return { d, e, b, w };
+  }
+  /** true when a plant (trunk radius t, crown radius c) at x, y violates any clearance */
+  blocked(x: number, y: number, t: number, c: number, pit = false): boolean {
+    const ids = this.cells.get(this.k(Math.floor(x / this.size), Math.floor(y / this.size)));
+    if (ids) {
+      const it = this.it;
+      for (const id of ids) {
+        const q = id * ST, type = it[q + 12];
+        const { d, e, b, w } = this.geom(q, x, y);
+        switch (type) {
+          case EX_ROAD:
+            if (d < e + t) return true;
+            if (!pit && w > 0 && d > e + b - t && d < e + b + w + t) return true;
+            break;
+          case EX_HIGHWAY: if (d < e + Math.max(t, c) + 2.5) return true; break;
+          case EX_BRIDGE: if (d < e + Math.max(t, c) + 1) return true; break;
+          case EX_RAIL: if (d < Math.max(3.2 + t, c + 1.0)) return true; break;
+          default: if (d < e + t) return true;
+        }
+      }
+    }
+    return this.onJunction(x, y, t);
+  }
+}
+
+function sd(x: number, y: number, ax: number, ay: number, bx: number, by: number) {
+  const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
+  const u = l2 > 0 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)) : 0;
+  return Math.hypot(x - ax - dx * u, y - ay - dy * u);
 }
 
 /**
- * Exclusion index for a tile: raw road pieces (unclipped, so roads just
- * beyond the tile edge count), the clipped street runs with their sidewalks,
- * rail tracks, junction boxes and marked crossings. `widen` matches the
- * meshing's far-level road widening.
+ * Exclusion index for a tile from its raw arrays (unclipped pieces, so roads
+ * just beyond the tile edge count) plus the neighbours' border pieces. `widen`
+ * matches the meshing's far-level road widening.
  */
-export function buildExclusion(a: Record<string, TypedArray>, streets: StreetRoad[] | null, widen = 1, maxClass = 9): Exclusion {
+export function buildExclusion(a: Record<string, TypedArray>, _streets: StreetRoad[] | null, widen = 1, maxClass = 9): Exclusion {
   const ex = new Exclusion();
-  for (const p of ['r', 'xr']) addRoads(ex, a, p, widen, maxClass);
-  // street runs: sidewalks widen their side (left = +offset normal)
-  if (streets) for (const r of streets) {
-    if (!r.side) continue;
-    const hwL = r.hw + (r.side & 1 ? r.ws + 0.3 : 0), hwR = r.hw + (r.side & 2 ? r.ws + 0.3 : 0);
-    for (let k = 0; k < r.x.length - 1; k++) ex.add(r.x[k], r.y[k], r.x[k + 1], r.y[k + 1], hwL, hwR, r.bridge ? EX_BRIDGE : r.cls <= 1 ? EX_HIGHWAY : EX_ROAD);
-  }
+  addRoads(ex, a, 'r', widen, maxClass, 0);
+  addRoads(ex, a, 'xr', widen, maxClass, 1.2); // no per-vertex edges: symmetric width + margin
   for (const p of ['l', 'xl']) {
     const lo = a[`${p}_off`] as Uint32Array | undefined, lx = a[`${p}_xyz`] as Float32Array | undefined, lf = a[`${p}_flags`] as Uint8Array | undefined;
     if (!lo || !lx) continue;
@@ -256,24 +322,43 @@ export function buildExclusion(a: Record<string, TypedArray>, streets: StreetRoa
       ex.disc(jxy[i * 2], jxy[i * 2 + 1], r * widen + 1.5);
     }
   }
+  const js = a.js_xy as Float32Array | undefined, jt = a.js_tri as Uint32Array | undefined;
+  if (js && jt) for (let i = 0; i + 2 < jt.length; i += 3) {
+    const A = jt[i] * 2, B = jt[i + 1] * 2, C = jt[i + 2] * 2;
+    ex.tri(js[A], js[A + 1], js[B], js[B + 1], js[C], js[C + 1]);
+  }
   const pk = a.p_kind as Uint8Array | undefined, pxy = a.p_xy as Float32Array | undefined;
   if (pk && pxy) for (let i = 0; i < pk.length; i++) if (pk[i] === 2) ex.disc(pxy[i * 2], pxy[i * 2 + 1], 5);
   return ex;
 }
 
-function addRoads(ex: Exclusion, a: Record<string, TypedArray>, p: string, widen: number, maxClass: number) {
+function addRoads(ex: Exclusion, a: Record<string, TypedArray>, p: string, widen: number, maxClass: number, margin: number) {
   const off = a[`${p}_off`] as Uint32Array | undefined, xyz = a[`${p}_xyz`] as Float32Array | undefined;
   const cls = a[`${p}_class`] as Uint8Array | undefined, wid = a[`${p}_width`] as Float32Array | undefined, fl = a[`${p}_flags`] as Uint8Array | undefined;
-  if (off && xyz && cls) {
-    for (let i = 0; i < off.length - 1; i++) {
-      const f = fl ? fl[i] : 0;
-      const c = cls[i] ?? 5;
-      if (f & 4 || c > maxClass) continue; // tunnels: trees may grow above
-      let w = wid && wid[i] > 0 ? wid[i] : ROAD_W_DEFAULT[c] ?? 6;
-      w = Math.max(w, c <= 1 ? 10 : 2) * widen;
-      const hw = w / 2;
-      const type = f & 2 ? EX_BRIDGE : c <= 1 ? EX_HIGHWAY : EX_ROAD;
-      for (let k = off[i]; k < off[i + 1] - 1; k++) ex.add(xyz[k * 3], xyz[k * 3 + 1], xyz[k * 3 + 3], xyz[k * 3 + 4], hw, hw, type);
+  const pl = a[`${p}_pl`] as Float32Array | undefined, pr = a[`${p}_pr`] as Float32Array | undefined;
+  const sw = a[`${p}_sw`] as Uint8Array | undefined, vf = a[`${p}_vf`] as Uint8Array | undefined;
+  if (!off || !xyz || !cls) return;
+  for (let i = 0; i < off.length - 1; i++) {
+    const f = fl ? fl[i] : 0;
+    const c = cls[i] ?? 5;
+    if (f & 4 || c > maxClass) continue; // tunnels: trees may grow above
+    let w = wid && wid[i] > 0 ? wid[i] : ROAD_W_DEFAULT[c] ?? 6;
+    w = Math.max(w, c <= 1 ? 10 : 2) * widen;
+    const hw = w / 2 + margin;
+    const ws = SIDEWALK_W[c] ?? 0;
+    for (let k = off[i]; k < off[i + 1] - 1; k++) {
+      if (vf && ((vf[k] | vf[k + 1]) & 2)) continue; // tunnel section
+      const bridge = (f & 2) !== 0 || (vf ? ((vf[k] | vf[k + 1]) & 1) !== 0 : false);
+      const type = bridge ? EX_BRIDGE : c <= 1 ? EX_HIGHWAY : EX_ROAD;
+      const e = (A: Float32Array | undefined, j: number) => (A && A[j] > 0 && Number.isFinite(A[j]) ? A[j] * widen + margin : hw);
+      // sidewalk bands per side: [boulevard grass | pavers] then the walk (roads.ts sidewalk())
+      let bl = 0, wl = 0, br = 0, wr = 0;
+      if (ws > 0 && c >= 2 && c <= 6) {
+        const bits = sw ? (sw[k] | sw[k + 1]) : p === 'xr' ? SW_L | SW_R : 0;
+        if (bits & SW_L) { wl = ws; bl = bits & BLVD_L ? BLVD_W : bits & PAVERS ? PAVER_W : 0; }
+        if (bits & SW_R) { wr = ws; br = bits & BLVD_R ? BLVD_W : bits & PAVERS ? PAVER_W : 0; }
+      }
+      ex.seg(xyz[k * 3], xyz[k * 3 + 1], xyz[k * 3 + 3], xyz[k * 3 + 4], e(pl, k), e(pl, k + 1), e(pr, k), e(pr, k + 1), bl, wl, br, wr, type);
     }
   }
 }
@@ -298,7 +383,7 @@ export function placeVegetation(env: VegEnv): VegBuf {
   const suburb = distDT > SUBURB_R;
   const hp = Math.hypot(e0 + T / 2 - HIGH_PARK[0], n0 + T / 2 - HIGH_PARK[1]) < HIGH_PARK[2] + T;
   const inTile = (x: number, y: number) => x >= 0 && x < T && y >= 0 && y < T;
-  const ex = buildExclusion(env.a, env.streets);
+  const ex = env.ex ?? buildExclusion(env.a, env.streets);
   const trunks = new Points(8); // trees (trunk + crown clearance)
   const drives = new Segs(16);
   const lampPts = new Points(8);
@@ -475,25 +560,32 @@ export function placeVegetation(env: VegEnv): VegBuf {
   for (const r of env.streets) {
     ri++;
     if (!r.urban || r.cls < 2 || r.cls > 5) continue;
-    const at = (s: number) => {
+    /** centreline point, miter offset (as the meshing uses it), unit normal, pavement edge and sidewalk bits of side sd at s */
+    const at = (s: number, sd: number) => {
       let k = 0;
       while (k < r.s.length - 2 && r.s[k + 1] < s) k++;
       const t = Math.max(0, Math.min(1, (s - r.s[k]) / Math.max(1e-6, r.s[k + 1] - r.s[k])));
       const ox = r.ox[k] + (r.ox[k + 1] - r.ox[k]) * t, oy = r.oy[k] + (r.oy[k + 1] - r.oy[k]) * t;
       const l = Math.hypot(ox, oy) || 1;
-      return { x: r.x[k] + (r.x[k + 1] - r.x[k]) * t, y: r.y[k] + (r.y[k + 1] - r.y[k]) * t, nx: ox / l, ny: oy / l };
+      const E = sd > 0 ? r.pl : r.pr;
+      const e = E ? E[k] + (E[k + 1] - E[k]) * t : r.hw;
+      const sw = r.sw ? r.sw[t < 0.5 ? k : k + 1] : r.side;
+      const x = r.x[k] + (r.x[k + 1] - r.x[k]) * t, y = r.y[k] + (r.y[k + 1] - r.y[k]) * t;
+      // curb line point (edge along the miter offset), then outward along the unit normal
+      return { cx: x + sd * ox * e, cy: y + sd * oy * e, nx: ox / l, ny: oy / l, sw };
     };
     const rk = tx * 92821 + ty * 68917 + ri * 131;
     for (const sd of [1, -1]) {
-      const hasSW = (r.side & (sd === 1 ? 1 : 2)) !== 0;
+      const bit = sd === 1 ? SW_L : SW_R, blvdBit = sd === 1 ? BLVD_L : BLVD_R;
+      const hasSW = r.sw ? r.sw.some((v) => (v & bit) !== 0) : (r.side & bit) !== 0;
       const ws = hasSW ? r.ws : 0;
       let blk = 0;
       for (const [c0, c1] of r.clear) {
         blk++;
         const bk = rk + sd * 7 + blk * 1013;
         // frontage type from the land cover just behind the curb
-        const mid = at((c0 + c1) / 2);
-        const probe = gAt(mid.x + sd * mid.nx * (r.hw + ws + 3), mid.y + sd * mid.ny * (r.hw + ws + 3));
+        const mid = at((c0 + c1) / 2, sd);
+        const probe = gAt(mid.cx + sd * mid.nx * (ws + 3), mid.cy + sd * mid.ny * (ws + 3));
         const pit = hasSW && (probe === 5 || probe === 6 || probe === 11 || probe === 21);
         if (r.cls === 2 && !pit && probe !== 4 && probe !== 2 && probe !== 17) continue; // arterials: only pits / residential / park frontage
         const mix = pit ? STREET_PIT : suburb ? STREET_SUB : r.cls <= 3 ? STREET_ART : STREET_RES;
@@ -507,9 +599,12 @@ export function placeVegetation(env: VegEnv): VegBuf {
           const kk = bk * 97 + Math.round(s);
           if (rnd(kk, 1) > fill) continue;
           const js = s + (rnd(kk, 2) - 0.5) * 1.2;
-          const p = at(js);
-          const off = pit ? r.hw + 1.0 : r.hw + ws + (hasSW ? 1.4 : 2.6) + rnd(kk, 3) * 0.8;
-          const x = p.x + sd * p.nx * off, y = p.y + sd * p.ny * off;
+          const p = at(js, sd);
+          // pits: in the paver strip / sidewalk by the curb; boulevards: mid-boulevard;
+          // otherwise behind the sidewalk (or the road edge where there is none)
+          const onWalk = (p.sw & bit) !== 0;
+          const off = pit ? 1.0 : onWalk && p.sw & blvdBit ? BLVD_W / 2 : onWalk ? (p.sw & PAVERS ? PAVER_W : 0) + ws + 1.4 + rnd(kk, 3) * 0.8 : 2.6 + rnd(kk, 3) * 0.8;
+          const x = p.cx + sd * p.nx * off, y = p.cy + sd * p.ny * off;
           if (!inTile(x, y) || drives.near(x, y, 3) || lampPts.near(x, y, 1.8) || trunks.near(x, y, 2.5)) continue;
           const sp = rnd(kk, 4) < 0.7 ? main : pick(mix, rnd(kk, 5));
           tree(x, y, sp, (pit ? 0.75 : 1) * age * (0.85 + rnd(kk, 6) * 0.3), kk, { pit, plaza: pit });

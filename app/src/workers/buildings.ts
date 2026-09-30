@@ -13,6 +13,11 @@ import type { TypedArray } from '../data/tbn';
 import type { MeshBuf } from './meshing';
 import { parapetHeight, pitchedDetail, roofTop, type RoofIn } from './rooftops';
 import { SegIndex, alleyFront, alleySegs, rnd as urnd, towerInProgress } from './urban';
+import { HERITAGE_STONE } from '../render/tiles/heritage';
+
+/** OSM ids of heritage buildings drawn here instead of by their landmark (render/tiles/heritage.ts) */
+let heritage = new Set<number>();
+export function setHeritage(ids: number[]) { heritage = new Set(ids); }
 
 // facade styles (must match facadeMaterial.ts STYLE table)
 export const ST = {
@@ -493,6 +498,10 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
     count++;
     const base = BASE[i];
     let height = Math.max(H[i], 2.5);
+    // Victorian industrial heritage (the Distillery): storeys are ~4.3 m, not the 3.3 m the
+    // pipeline assumes for building:levels
+    const her = level === 0 && heritage.has(osm);
+    if (her && Math.abs(height / 3.3 - Math.round(height / 3.3)) < 0.02) height = Math.round(height / 3.3) * 4.3;
     const kind = KIND[i] ?? 0;
     const h = hash32(Math.abs(osm) || i);
     // building=construction: a concrete frame part-way up (+ crane) at level 0; a stub from afar
@@ -521,7 +530,8 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
     const dist = district(originE + cx0, originN + cy0);
     const old = r < dist.old * 1.15 - 0.05, core = r2 < dist.core;
     const gcls = ground ? ground[Math.min(255, Math.max(0, Math.floor((cy0 / S) * 256))) * 256 + Math.min(255, Math.max(0, Math.floor((cx0 / S) * 256)))] : 0;
-    const st = chooseStyle(kind, height, area, old, core, gcls, rnd(h, 3), rnd(h, 4));
+    const st = her ? (HERITAGE_STONE.has(osm) ? { style: ST.STONE, color: 0xb9ae98 } : { style: ST.LOFT, color: pick(BRICK_RED, rnd(h, 4)) })
+      : chooseStyle(kind, height, area, old, core, gcls, rnd(h, 3), rnd(h, 4));
     const vari = 0.93 + rnd(h, 5) * 0.12;
     const wallRGB = COL && COL[i] ? tame(COL[i]) : st.color;
     const wc = shade(wallRGB, vari);
@@ -533,6 +543,8 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
     const bottom = minH > 0.5 ? base + minH : base - 2.5;
     const top = base + height + (h & 15) * 0.004;
     if (roofType === 0 && level === 0 && kind === 1 && height < 14 && !hasHoles) roofType = 1;
+    // heritage blocks: slate hipped roofs on the narrow ranges (as built), flat on the deep ones
+    if (her && roofType === 0 && !hasHoles && minH < 0.5) { const o = obb(xy, va, vb); if (o.W < 24 && o.W > 5) roofType = 2; }
     const roofRGB = roofType === 0 || roofType === 5 ? pick(ROOF_FLAT, rnd(h, 6)) : pick(PITCHED_ROOF, rnd(h, 6));
     const rc = shade(roofRGB, 0.94 + rnd(h, 7) * 0.12);
     const roofCode = codeOf(ST.ROOF, 0);
@@ -544,6 +556,13 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
     const wantGarage = alleys && st.style === ST.BLANK && minH < 0.5 && height < 6 && area < 90;
     for (let k = va; k < vb; k++) {
       edgeFront.push(F_NONE); edgeUnit.push(0); edgeD.push(0); edgeCurb.push(-1);
+      if (her && minH < 0.5) {
+        // shops, galleries and restaurants open onto every lane side of the Distillery blocks
+        const k2 = k + 1 < vb ? k + 1 : va;
+        const L = Math.hypot(xy[k2 * 2] - xy[k * 2], xy[k2 * 2 + 1] - xy[k * 2 + 1]);
+        if (L >= 6) { edgeFront[k - va] = F_SHOP; edgeUnit[k - va] = L / Math.max(1, Math.round(L / (6 + rnd(h, 15) * 2))); }
+        continue;
+      }
       if (wantGarage) {
         const k2 = k + 1 < vb ? k + 1 : va;
         let x0 = xy[k * 2], y0 = xy[k * 2 + 1], x1 = xy[k2 * 2], y1 = xy[k2 * 2 + 1];
@@ -617,8 +636,12 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
         for (let k = 0; k < 4; k++) {
           const p = corners[k], q = corners[(k + 1) % 4];
           b.L = Math.hypot(q[0] - p[0], q[1] - p[1]);
+          const shop = her && b.L >= 6 && minH < 0.5;
+          b.code = codeOf(st.style, shop ? F_SHOP : F_NONE);
+          b.unit = shop ? b.L / Math.max(1, Math.round(b.L / (6 + rnd(h, 15) * 2))) : 0;
           wall(b, p[0], p[1], q[0], q[1], bottom, eave, bottom, eave, wc);
         }
+        b.unit = 0;
         const inset = roofType === 2 ? Math.min(hw, hl * 0.9) : 0;
         const ra = P(-1 + (inset / hl), 0), rb = P(1 - (inset / hl), 0);
         b.code = roofCode;
@@ -685,7 +708,7 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
         // sidewalk and the face is paved too (was bare land-use ground, a white band on Queen W)
         else if (fr === F_NONE && terr && rr === r0 && edgeCurb[k - s] > 0.6 && edgeCurb[k - s] < 6.5 && (old || core || gcls === 5 || kind === 4))
           apron(b, x0, n0, x1, n1, edgeCurb[k - s] - 0.2, terr, seed, F_NONE);
-        if (fr === F_SHOP && level === 0) shopFront(b, x0, n0, x1, n1, base, b.L, b.unit, h, st.style, old, kind, area, seed, shopDistrict(originE + cx0, originN + cy0) ? 0.65 : old ? 0.38 : 0.12);
+        if (fr === F_SHOP && level === 0) shopFront(b, x0, n0, x1, n1, base, b.L, b.unit, h, st.style, old || her, kind, area, seed, her ? 0.3 : shopDistrict(originE + cx0, originN + cy0) ? 0.65 : old ? 0.38 : 0.12);
       }
     }
     b.unit = 0;

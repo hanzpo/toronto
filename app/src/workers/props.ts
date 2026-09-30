@@ -146,7 +146,9 @@ export function buildProps(
       const dx = x - houses.xy[i * 2], dy = y - houses.xy[i * 2 + 1];
       const ca = Math.cos(houses.angle[i]), sa = Math.sin(houses.angle[i]);
       const u = dx * ca + dy * sa, v = dx * sa - dy * ca;
-      if (Math.abs(u) < houses.len[i] / 2 + m && Math.abs(v) < houses.wid[i] / 2 + m + 1.2) return true;
+      // porches, steps and bays project up to ~0.15 of the depth in front (+v; render/tiles/houses.ts)
+      const front = Math.max(1.2, houses.wid[i] * 0.16);
+      if (Math.abs(u) < houses.len[i] / 2 + m && v < houses.wid[i] / 2 + m + front && v > -(houses.wid[i] / 2 + m + 1.2)) return true;
     }
     return false;
   };
@@ -405,7 +407,10 @@ export function buildProps(
         if (setback > 6 && rnd(i, 33) < 0.7) {
           const px = hx + ca * ux * F + fx * (D / 2 + Math.min(setback - 3, 3.5)), py = hy + sa * ux * F + fy * (D / 2 + Math.min(setback - 3, 3.5));
           // home overnight, often away by day (rank vs. the home schedule, layers/parkingOcc.ts)
-          if (inTile(px, py)) push(K.CAR, px, py, Math.atan2(fy, fx) + (rnd(i, 34) < 0.5 ? 0 : Math.PI), carTag(LOT.HOME, rnd(i, 39)), (rnd(i, 35) * 4) | 0, (rnd(i, 36) * 16) | 0);
+          // keep the whole car (± 2.4 m along the drive) clear of the house and its porch (the house
+          // test pads the front by 1.2 m) — a centred drive on a porch house parks no car
+          const clear = ux !== 0 && !inBuilding(px - fx * 2.4, py - fy * 2.4, 0.4) && !inBuilding(px + fx * 2.4, py + fy * 2.4, 0.4);
+          if (inTile(px, py) && clear) push(K.CAR, px, py, Math.atan2(fy, fx) + (rnd(i, 34) < 0.5 ? 0 : Math.PI), carTag(LOT.HOME, rnd(i, 39)), (rnd(i, 35) * 4) | 0, (rnd(i, 36) * 16) | 0);
         }
       }
       // collection-day bins (blue recycling, green organics, grey garbage) at the curb
@@ -470,6 +475,26 @@ class GroundMesh {
  *  shows the car while rank < the type's occupancy at the sim time (layers/parkingOcc.ts). sx < 2
  *  (legacy records) = always shown. */
 export const carTag = (type: number, rank: number) => 2 + 2 * type + Math.min(0.999, Math.max(0, rank));
+
+/** Ramer–Douglas–Peucker: indices of the kept points */
+function rdp(p: [number, number][], tol: number): number[] {
+  if (p.length < 3) return p.map((_, i) => i);
+  const keep = new Uint8Array(p.length);
+  keep[0] = keep[p.length - 1] = 1;
+  const st: [number, number][] = [[0, p.length - 1]];
+  while (st.length) {
+    const [a, b] = st.pop()!;
+    let best = -1, bd = tol;
+    for (let i = a + 1; i < b; i++) {
+      const d = segDist({ x0: p[a][0], y0: p[a][1], x1: p[b][0], y1: p[b][1], hw: 0, cls: 0 }, p[i][0], p[i][1]);
+      if (d > bd) { bd = d; best = i; }
+    }
+    if (best >= 0) { keep[best] = 1; st.push([a, best], [best, b]); }
+  }
+  const out: number[] = [];
+  keep.forEach((k, i) => { if (k) out.push(i); });
+  return out;
+}
 
 interface LotInfo { id: number; area: number; cx: number; cy: number; ux: number; uy: number; u0: number; u1: number; v0: number; v1: number; type: number }
 
@@ -647,7 +672,35 @@ function parkingLots(a: Record<string, TypedArray>, ground: Uint8Array, S: numbe
   const SW = 2.7, SL = 5.5, AISLE = 7;
   const lights: [number, number][] = [];
   const nearLight = (x: number, y: number) => lights.some(([lx, ly]) => Math.hypot(lx - x, ly - y) < 30);
+  // mapped aisles (k_*, svc 1), simplified into straight runs (the pipeline densifies them, so a
+  // gently curving aisle arrived as many < 8 m pieces and got no stalls)
+  const kOff = a.k_off as Uint32Array | undefined, kXyz = a.k_xyz as Float32Array | undefined, kSvc = a.k_svc as Uint8Array | undefined;
+  const aisles: number[][] = []; // [x0, y0, x1, y1] runs
+  const aisleGrid = new Grid<number[]>(16);
+  if (kOff && kXyz && kOff.length > 1) {
+    for (let r = 0; r < kOff.length - 1; r++) {
+      if (kSvc && kSvc[r] !== 1) continue;
+      const pts: [number, number][] = [];
+      for (let k = kOff[r]; k < kOff[r + 1]; k++) pts.push([kXyz[k * 3], kXyz[k * 3 + 1]]);
+      const keep = rdp(pts, 0.8);
+      for (let i = 0; i < keep.length - 1; i++) {
+        const sg = [pts[keep[i]][0], pts[keep[i]][1], pts[keep[i + 1]][0], pts[keep[i + 1]][1]];
+        aisles.push(sg);
+        aisleGrid.add(Math.min(sg[0], sg[2]) - 4, Math.min(sg[1], sg[3]) - 4, Math.max(sg[0], sg[2]) + 4, Math.max(sg[1], sg[3]) + 4, sg);
+      }
+    }
+  }
+  const onAisle = (x: number, y: number) => {
+    const c = aisleGrid.at(x, y);
+    if (c) for (const sg of c) if (segDist({ x0: sg[0], y0: sg[1], x1: sg[2], y1: sg[3], hw: 0, cls: 6 }, x, y) < 3.4) return true;
+    return false;
+  };
+  // stalls already striped (no overlaps between aisle rows and fallback modules)
+  const taken = new Grid<[number, number]>(8);
+  const isTaken = (x: number, y: number) => { const c = taken.at(x, y); return !!c && c.some(([px, py]) => Math.hypot(px - x, py - y) < 2.3); };
+  const stallCount = new Map<number, number>();
   const stallOK = (x: number, y: number, ux: number, uy: number, vx: number, vy: number) => {
+    if (isTaken(x, y) || onAisle(x, y)) return false;
     for (const [du, dv] of [[0, 0], [0, 2.4], [0, -2.4], [1.2, 0], [-1.2, 0]]) {
       const qx = x + ux * du + vx * dv, qy = y + uy * du + vy * dv;
       if (!inLot(qx, qy) || inBuilding(qx, qy, 0.3) || onRoad(qx, qy, 0.2)) return false;
@@ -675,6 +728,8 @@ function parkingLots(a: Record<string, TypedArray>, ground: Uint8Array, S: numbe
       }
       first = false; lastU = u; cnt++;
       stripe(u + SW / 2);
+      taken.add(x - 1, y - 1, x + 1, y + 1, [x, y]);
+      stallCount.set(lot.id, (stallCount.get(lot.id) ?? 0) + 1);
       const k = key * 1000 + Math.round(u * 3);
       const along = (u - u0) / Math.max(1, u1 - u0);
       const rank = Math.min(0.999, rnd(seed0, k, 3) * 0.75 + (bias > 0 ? along : 1 - along) * 0.25);
@@ -683,31 +738,27 @@ function parkingLots(a: Record<string, TypedArray>, ground: Uint8Array, S: numbe
     }
   };
 
-  const kOff = a.k_off as Uint32Array | undefined, kXyz = a.k_xyz as Float32Array | undefined, kSvc = a.k_svc as Uint8Array | undefined;
   const aisleLots = new Set<number>();
-  if (kOff && kXyz && kOff.length > 1) {
-    // mapped aisles: stalls on both sides of every parking aisle segment inside a lot
-    for (let r = 0; r < kOff.length - 1; r++) {
-      if (kSvc && kSvc[r] !== 1) continue;
-      for (let k = kOff[r]; k < kOff[r + 1] - 1; k++) {
-        const x0 = kXyz[k * 3], y0 = kXyz[k * 3 + 1], x1 = kXyz[k * 3 + 3], y1 = kXyz[k * 3 + 4];
-        const L = Math.hypot(x1 - x0, y1 - y0);
-        if (L < SW * 3) continue;
-        const lab = labelAt((x0 + x1) / 2, (y0 + y1) / 2);
-        if (lab < 0) continue;
-        aisleLots.add(lab);
-        const ux = (x1 - x0) / L, uy = (y1 - y0) / L;
-        for (const side of [1, -1] as const) row(x0, y0, ux, uy, 2, L - 2, AISLE / 2 + SL / 2, side, lots[lab], r * 64 + (k - kOff[r]) * 2 + (side > 0 ? 0 : 1));
-        for (let u = 12; u < L - 6; u += 36) {
-          const lx = x0 + ux * u, ly = y0 + uy * u;
-          if (!nearLight(lx, ly) && !inBuilding(lx, ly, 0.5)) { push(K.LOTLIGHT, lx - uy * 0, ly, Math.atan2(uy, ux)); lights.push([lx, ly]); }
-        }
-      }
+  for (let r = 0; r < aisles.length; r++) {
+    // mapped aisles: stalls on both sides of every straight aisle run inside a lot
+    const [x0, y0, x1, y1] = aisles[r];
+    const L = Math.hypot(x1 - x0, y1 - y0);
+    if (L < SW * 3) continue;
+    const lab = labelAt((x0 + x1) / 2, (y0 + y1) / 2);
+    if (lab < 0) continue;
+    aisleLots.add(lab);
+    const ux = (x1 - x0) / L, uy = (y1 - y0) / L;
+    for (const side of [1, -1] as const) row(x0, y0, ux, uy, 2, L - 2, AISLE / 2 + SL / 2, side, lots[lab], r * 2 + (side > 0 ? 0 : 1));
+    for (let u = 12; u < L - 6; u += 36) {
+      const lx = x0 + ux * u, ly = y0 + uy * u;
+      if (!nearLight(lx, ly) && !inBuilding(lx, ly, 0.5)) { push(K.LOTLIGHT, lx, ly, Math.atan2(uy, ux)); lights.push([lx, ly]); }
     }
   }
   // unmapped lots: 18 m modules (stall · aisle · stall) along the long axis, centred across the lot
   for (const lot of lots) {
-    if (lot.area < 600 || aisleLots.has(lot.id)) continue;
+    // lots whose mapped aisles striped under ~40 % of the stalls the lot holds (one per ~28 m²) are
+    // filled in with modules too; the taken / on-aisle tests keep them off the mapped rows
+    if (lot.area < 600 || (aisleLots.has(lot.id) && (stallCount.get(lot.id) ?? 0) > lot.area / 28 * 0.4)) continue;
     const { ux, uy } = lot, vx = -uy, vy = ux;
     const MOD = SL * 2 + AISLE;
     const span = lot.v1 - lot.v0 - 2;

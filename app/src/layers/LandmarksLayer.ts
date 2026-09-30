@@ -13,6 +13,7 @@ import type { Engine } from '../engine/Engine';
 import type { FrameContext, Layer } from '../engine/types';
 import { LANDMARKS, createLandmarks, setNight, waterfalls, type LandmarkEntry } from '../landmarks';
 import { useApp } from '../state/store';
+import { OCC } from '../render/tiles/facadeMaterial';
 import { CULL, SHADOW_ONLY_LAYER } from '../engine/view';
 
 const CLUSTER_RADIUS = 2500;
@@ -157,6 +158,7 @@ export class LandmarksLayer implements Layer {
   readonly id = 'landmarks';
   private group = new THREE.Group();
   private lastNight = -1;
+  private lastOcc = -1;
   private clusters: Cluster[] = [];
 
   async init(engine: Engine) {
@@ -204,9 +206,12 @@ export class LandmarksLayer implements Layer {
       cl.low.visible = !near;
     }
     const night = Math.round((1 - ctx.daylight) * 50) / 50;
-    if (night !== this.lastNight) {
+    // office towers' lit windows also follow office occupancy (render/tiles/facadeMaterial OCC.y)
+    const occ = Math.round((OCC.value as THREE.Vector3).y * 50);
+    if (night !== this.lastNight || occ !== this.lastOcc) {
       setNight(night);
       this.lastNight = night;
+      this.lastOcc = occ;
     }
   }
 
