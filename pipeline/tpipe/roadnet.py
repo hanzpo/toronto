@@ -71,6 +71,10 @@ DEC_LEN, DEC_TAPER = 150.0, 75.0
 WEAVE_JOIN = 350.0          # merge aux lane runs on into the next diverge if the gap is shorter
 GORE_MAX = 4.5              # painted gore up to this gap between edge lines (m)
 BRANCH_DEFL = math.radians(40)
+# arterial ramps (OTM Book 11 / TAC GDG 9.17 at 60-70 km/h): shorter speed-change lanes
+ART_ACC_LEN, ART_ACC_TAPER = 90.0, 45.0
+ART_DEC_LEN, ART_DEC_TAPER = 60.0, 30.0
+ART_RAMP_MIN = 80.0          # m: a shorter one-way link is a channelized turn, not a ramp
 # vertical: clearances (Toronto ECS bridge design standard 2022; rail per Transport Canada / railway practice)
 # road under rail: Toronto's rail underpasses (Yonge, Bay, York St under the USRC) are signed ~4.3-4.5 m
 CLEAR = {"road": 5.0, "rail": 7.0, "path": 2.7, "ped_over_road": 5.3, "road_under_rail": 4.5}
@@ -327,6 +331,18 @@ def build_strokes(L: Lines, grp: np.ndarray, report: dict):
         fw = [x for x in A if grp[x[0]] == 0 and x[3] != 0 and (L.cls[x[0]] <= 1 or L.flags[x[0]] & F_LINK)]
         pt = [(i, v) for i, v in passthru.get(n, []) if grp[i] == 0 and L.flags[i] & F_ONEWAY
               and (L.cls[i] <= 1 or L.flags[i] & F_LINK)]
+        arterial = False
+        if len(fw) + 2 * len(pt) != 3:
+            # arterial interchange ramps (parclo loops, diamond ramps): a one-way ramp of real length
+            # joining / leaving one carriageway of a divided arterial is a merge / diverge too
+            fwa = [x for x in A if grp[x[0]] == 0 and x[3] != 0 and (L.cls[x[0]] <= 4 or L.flags[x[0]] & F_LINK)]
+            pta = [(i, v) for i, v in passthru.get(n, []) if grp[i] == 0 and L.flags[i] & F_ONEWAY and L.cls[i] <= 4
+                   and not L.flags[i] & F_LINK]
+            links = [x for x in fwa if L.flags[x[0]] & F_LINK]
+            if (len(fwa) + 2 * len(pta) == 3 and len(links) == 1 and L.len[links[0][0]] >= ART_RAMP_MIN
+                    and len(inc_arms := [x for x in A if not (L.flags[x[0]] & F_LINK)]) + 2 * len(pta) >= 2
+                    and all(L.flags[x[0]] & F_ONEWAY for x in inc_arms)):
+                fw, pt, arterial = fwa, pta, True
         if len(fw) + 2 * len(pt) == 3:
             left = [k for k in range(len(A)) if k not in used and A[k] in fw]
             if len(left) == 1:
@@ -349,7 +365,7 @@ def build_strokes(L: Lines, grp: np.ndarray, report: dict):
                 bh = h if typ == "diverge" else h + math.pi
                 dd = math.remainder(bh - mh, math.tau)
                 if abs(dd) < BRANCH_DEFL:
-                    events.append(dict(node=n, branch=i, bend=e, type=typ, side=1 if dd > 0 else -1))
+                    events.append(dict(node=n, branch=i, bend=e, type=typ, side=1 if dd > 0 else -1, arterial=arterial))
     report["merge_events"] = len(events)
 
     # walk
@@ -481,11 +497,13 @@ def way_section(L: Lines, i: int, nF: int, nB: int, base: int):
 
 class Stroke:
     __slots__ = ("ways", "xy", "s", "vway", "pinned_v", "kind", "cls", "group", "oneway", "nodes", "node_s", "attrs",
-                 "z", "g", "vf", "req_lo", "req_hi", "pins", "struct", "sw", "ev", "dense", "ws", "exact")
+                 "z", "g", "vf", "req_lo", "req_hi", "pins", "struct", "sw", "ev", "dense", "ws", "exact", "corridor", "cpins")
 
     def __init__(self):
         self.dense = False
         self.exact = False
+        self.corridor = -1
+        self.cpins = {}           # corridor bed pins (kept through node-consistency rounds)
         self.sw = None
         self.ws = None
         self.vf = None
@@ -603,12 +621,16 @@ def lateral_profile(L: Lines, S: Stroke, nF, nB, events_here):
         if ev.get("osm_aux"):
             continue
         s0 = ev["s"]
+        art = ev.get("arterial", False)
         if ev["type"] == "merge":
-            aux[ev["side"]].append((s0, s0 + ACC_LEN, 0.0, ACC_TAPER))
+            aux[ev["side"]].append((s0, s0 + (ART_ACC_LEN if art else ACC_LEN), 0.0, ART_ACC_TAPER if art else ACC_TAPER))
         else:
-            aux[ev["side"]].append((s0 - DEC_LEN, s0, DEC_TAPER, 0.0))
+            aux[ev["side"]].append((s0 - (ART_DEC_LEN if art else DEC_LEN), s0, ART_DEC_TAPER if art else DEC_TAPER, 0.0))
     auxbp = {}
+    S.ev = []                       # (s0, s1, side): merge / diverge stretches (no sidewalk there)
     for side, iv in aux.items():
+        for a_, b_, ta, tb in iv:
+            S.ev.append((a_ - ta, b_ + tb, side))
         iv = [(max(s[0], a), min(s[-1], b), ta, tb) for a, b, ta, tb in sorted(iv)]
         merged = []
         for a, b, ta, tb in iv:
@@ -687,6 +709,14 @@ def lateral_profile(L: Lines, S: Stroke, nF, nB, events_here):
                 m = (S_new >= s0 - 700) & (S_new <= s0)
             osmaux[m] = np.maximum(osmaux[m], ev["osm_aux"])
     nFt = f + fullR + fullL
+    # lane sanity: a short OSM way with a smaller lanes tag inside a wider carriageway (a split for
+    # turn lanes, a mistagged bridge way) keeps the width of its neighbours through the tapers --
+    # mark the lanes that width holds instead of one lane line pair on a 10 m pavement
+    if ow:
+        fit = np.floor((eL + eR) / np.maximum(lw, 2.5) + 0.35).astype(np.int64) - b - fullR - fullL
+        grow = fit > f
+        f = np.where(grow, np.minimum(fit, 8), f)
+        nFt = f + fullR + fullL
     mk = (np.minimum(nFt, 15) << MK_NF) | (np.minimum(b, 15) << MK_NB)
     mk |= (np.minimum(fullR + osmaux, 3) << MK_AUXR) | (np.minimum(fullL, 3) << MK_AUXL)
     mk |= (np.minimum(bR, 7) << MK_BIKER) | (np.minimum(bL, 7) << MK_BIKEL)
@@ -793,9 +823,14 @@ def apply_merges(strokes: list[Stroke], events, report):
                 bmk[v] |= MK_NOEDGEL if side < 0 else MK_NOEDGER
             elif gsel[j]:
                 B.attrs[inner_p][v] = B.attrs[inner_e][v] + gap[j]
-                bmk[v] |= MK_GOREL if side < 0 else MK_GORER
+                # the gore is bordered by the main's edge line: no own (yellow left) edge line on the
+                # ramp along it
+                bmk[v] |= (MK_GOREL | MK_NOEDGEL) if side < 0 else (MK_GORER | MK_NOEDGER)
         # main: no shoulder alongside glued + gore stretch; continuity edge along glued
         gs = ps[glued]
+        span = ps[glued | gsel]
+        if len(span):
+            M.ev.append((float(span.min()), float(span.max()), side))
         if len(gs):
             a, b = gs.min() - 2, gs.max() + 2
             m = (M.s >= a) & (M.s <= b)
@@ -879,6 +914,140 @@ def _ell_of(L: Lines, i: int) -> float:
     return ELL["path"]
 
 
+CORR_D = 8.0          # m: parallel tracks this close belong to one corridor cluster
+CORR_CELL = 6.0       # m: height-field cell
+CORR_SIGMA = 3.0      # cells: field smoothing (about 18 m) -- level across, smooth along
+
+
+def corridor_fields(strokes: list[Stroke], report) -> set:
+    """Lateral coherence of track levels (docs/ROADS.md "Source of truth"): heavy-rail tracks that
+    run parallel within CORR_D m form corridor clusters (union-find over close parallel vertex
+    pairs); each cluster gets one smooth height field (robust median per cell, normalised
+    Gaussian smoothing), curated exact levels dominating; every track vertex of the cluster is
+    pinned to the field, except bridge / tunnel runs and the approach ramps of tracks that leave
+    the field towards them (real flyovers and dives). Returns the strokes to re-solve."""
+    from scipy.ndimage import gaussian_filter
+    ids = [si for si, S in enumerate(strokes) if S.kind == 1 and S.cls <= 1 and len(S.s) >= 2 and S.z is not None]
+    if len(ids) < 2:
+        return set()
+    P, T, O, V = [], [], [], []
+    for si in ids:
+        S = strokes[si]
+        t = np.gradient(S.xy, axis=0)
+        t /= np.maximum(np.hypot(t[:, 0], t[:, 1]), 1e-9)[:, None]
+        ok = (S.vf & V_TUNNEL) == 0
+        P.append(S.xy[ok]); T.append(t[ok]); O.append(np.full(ok.sum(), si)); V.append(np.nonzero(ok)[0])
+    P, T, O, V = np.vstack(P), np.vstack(T), np.concatenate(O), np.concatenate(V)
+    if len(P) < 2:
+        return set()
+    tree = cKDTree(P)
+    pairs = tree.query_pairs(CORR_D, output_type="ndarray")
+    if not len(pairs):
+        return set()
+    a, b = pairs[:, 0], pairs[:, 1]
+    keep = (O[a] != O[b]) & (np.abs((T[a] * T[b]).sum(1)) > 0.85)
+    parent = {si: si for si in ids}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+    for i, j in zip(O[a[keep]], O[b[keep]]):
+        ri, rj = find(int(i)), find(int(j))
+        if ri != rj:
+            parent[ri] = rj
+    clusters = defaultdict(list)
+    for si in ids:
+        clusters[find(si)].append(si)
+    fixed = set()
+    n_cl = n_pin = 0
+    for root, members in clusters.items():
+        if len(members) < 2:
+            continue
+        n_cl += 1
+        for si in members:
+            strokes[si].corridor = root
+        # per-vertex data of the cluster
+        xs, zs, ws, own, vix, free = [], [], [], [], [], []
+        for si in members:
+            S = strokes[si]
+            ex = (S.vf >> V_STRUCT_SHIFT) == STRUCT["exact"]
+            st = (S.vf & (V_BRIDGE | V_TUNNEL)) != 0
+            xs.append(S.xy); zs.append(S.z); ws.append(np.where(ex, 50.0, 1.0)); own.append(np.full(len(S.s), si))
+            vix.append(np.arange(len(S.s))); free.append(~st)
+        X, Z, W, OW, VI, FR = np.vstack(xs), np.concatenate(zs), np.concatenate(ws), np.concatenate(own), \
+            np.concatenate(vix), np.concatenate(free)
+        x0, y0 = X.min(0) - 3 * CORR_CELL * CORR_SIGMA
+        nx = int((X[:, 0].max() - x0) / CORR_CELL) + 3 * int(CORR_SIGMA) + 3
+        ny = int((X[:, 1].max() - y0) / CORR_CELL) + 3 * int(CORR_SIGMA) + 3
+        if nx * ny > 4_000_000:
+            continue                                   # a region-sized cluster: leave it to the solve
+        ci = ((X[:, 0] - x0) / CORR_CELL).astype(np.int64)
+        cj = ((X[:, 1] - y0) / CORR_CELL).astype(np.int64)
+
+        def field(use):
+            # robust per-cell level (weighted median), then normalised Gaussian smoothing
+            num = np.zeros((ny, nx)); den = np.zeros((ny, nx))
+            cell = cj[use] * nx + ci[use]
+            order = np.lexsort((Z[use], cell))
+            cu, zu, wu = cell[order], Z[use][order], W[use][order]
+            starts = np.concatenate([[0], np.nonzero(np.diff(cu))[0] + 1, [len(cu)]])
+            for a_, b_ in zip(starts[:-1], starts[1:]):
+                if b_ <= a_:                        # no tracks in this pass (empty selection)
+                    continue
+                w_ = wu[a_:b_]
+                c = np.cumsum(w_)
+                med = zu[a_ + int(np.searchsorted(c, c[-1] / 2))]
+                k = cu[a_]
+                num.flat[k] = med * c[-1]
+                den.flat[k] = c[-1]
+            num = gaussian_filter(num, CORR_SIGMA, mode="constant")
+            den = gaussian_filter(den, CORR_SIGMA, mode="constant")
+            return np.where(den > 1e-9, num / np.maximum(den, 1e-12), np.nan)
+        F = field(FR)
+        fz = F[cj, ci]
+        # flyover / dive approaches: a track leaving the field by > 1.5 m with its own bridge or
+        # tunnel run within 300 m keeps its solved profile there
+        fly = np.zeros(len(Z), bool)
+        for si in members:
+            S = strokes[si]
+            m = OW == si
+            st = (S.vf & (V_BRIDGE | V_TUNNEL)) != 0
+            if not st.any():
+                continue
+            sb = S.s[st]
+            near = np.min(np.abs(S.s[:, None] - sb[None, :]), axis=1) < 300.0 if len(sb) < 4000 else np.ones(len(S.s), bool)
+            dev = np.abs(Z[m] - fz[m]) > 1.5
+            fly[np.nonzero(m)[0][near & dev]] = True
+        if fly.any():
+            F = field(FR & ~fly)
+            fz = F[cj, ci]
+        # tracks beside curated (exact) ones take the curated level (no step at the snap edge)
+        EXm = W > 1.0
+        if EXm.any() and (~EXm).any():
+            et = cKDTree(X[EXm])
+            d_, k_ = et.query(X[~EXm], distance_upper_bound=CORR_D + 2.0)
+            hit = np.isfinite(d_)
+            idx = np.nonzero(~EXm)[0][hit]
+            fz[idx] = Z[EXm][k_[hit]]
+        pin = FR & ~fly & np.isfinite(fz)
+        for si in members:
+            S = strokes[si]
+            m = np.nonzero((OW == si) & pin)[0]
+            if not len(m):
+                continue
+            ex = (S.vf >> V_STRUCT_SHIFT) == STRUCT["exact"]
+            pins = {int(VI[k]): float(fz[k]) for k in m if not ex[VI[k]]}
+            if pins:
+                S.pins = {**S.pins, **pins}
+                fixed.add(si)
+                n_pin += len(pins)
+    report["corridor_clusters"] = n_cl
+    report["corridor_pins"] = n_pin
+    return fixed
+
+
 def solve_profile(S: Stroke, L: Lines, curated=None):
     """Elevation per vertex: regularised least squares on the stroke,
 
@@ -933,13 +1102,16 @@ def solve_profile(S: Stroke, L: Lines, curated=None):
     lo[br] = np.maximum(lo[br], gs[br] + 1.2 * kb[br] - 0.15)
     hi[tu] = np.minimum(hi[tu], g[tu] - 0.6 * cover[tu] * kt[tu] + 0.3)
     # at-grade roads never dip into the ground (4th-order solutions overshoot slightly)
-    free = ~br & ~tu
+    free = ~br & ~tu & ((vf >> V_STRUCT_SHIFT) != STRUCT["exact"])   # curated levels are not floored
     # ... except where it must dip under a crossing (a street underpass below a rail corridor)
     for (sv, Z, hwid) in S.req_hi:
         free &= np.abs(s - sv) > hwid + 90.0
     lo[free] = np.maximum(lo[free], g[free] - 0.15)
     if S.pins:
+        exv = (vf >> V_STRUCT_SHIFT) == STRUCT["exact"]
         for vi, Z in S.pins.items():
+            if curated is not None and exv[int(vi)] and S.kind == 1:
+                continue          # a curated level is not moved by node / corridor pins
             eq[int(vi)] = Z
     if curated is not None:
         cm, cz = curated
@@ -1914,7 +2086,8 @@ def run_block(G, core, halo):
         changed = 0
         touched = set(new_pins) | set(si for si, S in enumerate(strokes) if S.pins)
         for si in touched:
-            strokes[si].pins = dict(new_pins.get(si, {}))
+            # node pins win over the corridor bed only at the node itself
+            strokes[si].pins = {**strokes[si].cpins, **new_pins.get(si, {})}
             changed += len(strokes[si].pins)
         if not touched:
             break
@@ -1959,6 +2132,32 @@ def run_block(G, core, halo):
         if extra:
             solve(set(extra))
         report["rail_touch_pins"] = sum(len(v) for v in extra.values())
+    # 2c. track corridors: parallel tracks (yards, multi-track main lines) share one bed level --
+    #     a smooth height field per corridor cluster, level across the tracks, varying along the
+    #     corridor; flyovers / dives (bridge / tunnel runs and their approach ramps) keep their own
+    fixed = corridor_fields(strokes, report)
+    if fixed:
+        solve(fixed)
+        # streets at level crossings (shared nodes) follow the corridor's new level
+        xpins = defaultdict(dict)
+        for n, lst in node_pos.items():
+            rs = [(si, v) for si, v in lst if strokes[si].kind == 1 and si in fixed]
+            if not rs:
+                continue
+            si_r, _ = rs[0]
+            R_ = strokes[si_r]
+            zr = float(R_.z[min(int(np.searchsorted(R_.s, R_.node_s[n] - 1e-6)), len(R_.s) - 1)])
+            for si, _v in lst:
+                T = strokes[si]
+                if T.kind == 0:
+                    k = min(int(np.searchsorted(T.s, T.node_s[n] - 1e-6)), len(T.s) - 1)
+                    if abs(T.z[k] - zr) > 0.05:
+                        xpins[si][k] = zr
+        for si, p_ in xpins.items():
+            strokes[si].pins = {**strokes[si].pins, **p_}
+        if xpins:
+            solve(set(xpins))
+        report["level_crossing_repins"] = sum(len(v) for v in xpins.values())
     # 3. one last clearance pass against the final lower lines (a street lifted by a pin at a
     #    junction next to an underpass must not end up under the rail deck), no more pins after
     requirements()
@@ -2384,6 +2583,47 @@ def sidewalks(L: Lines, strokes: list[Stroke], report, bd=None):
                     bits |= (BLVD_L if bits & SW_L else 0) | (BLVD_R if bits & SW_R else 0)
                 cnt["streets"] += 1
             S.sw[m] = bits
+        # merge / diverge stretches (arterial interchange ramps): the sidewalk on the ramp side stops
+        # 15 m before the gore and resumes after the speed-change lane -- it never lies between the
+        # carriageway and a ramp glued beside it (the outer edge of the combined section has none)
+        for a_, b_, side in (S.ev or []):
+            m = (S.s >= a_ - 15.0) & (S.s <= b_ + 15.0)
+            bit = SW_L if side > 0 else SW_R
+            if (S.sw[m] & bit).any():
+                cnt["merge_sidewalk_cut"] += 1
+            S.sw[m] &= ~(bit | (BLVD_L if side > 0 else BLVD_R))
+    # no sidewalk band on top of (or squeezed against) another carriageway running alongside at the
+    # same level: a twin carriageway across a narrow median, a frontage road, a glued ramp. The
+    # walk band (1.8 m + curb) needs pavement edge + 2.3 m clear of any other drivable pavement.
+    drv = [S for S in strokes if S.kind == 0 and S.group == 0 and S.cls <= 6 and S.attrs is not None]
+    if drv:
+        DP = np.vstack([S.xy for S in drv])
+        DT = np.vstack([np.gradient(S.xy, axis=0) if len(S.xy) > 1 else np.zeros((1, 2)) for S in drv])
+        DT /= np.maximum(np.hypot(DT[:, 0], DT[:, 1]), 1e-9)[:, None]
+        DH = np.concatenate([np.maximum(S.attrs["pL"], S.attrs["pR"]) for S in drv])
+        DO = np.concatenate([np.full(len(S.xy), k) for k, S in enumerate(drv)])
+        DZ = np.concatenate([(S.z if S.z is not None else S.g if S.g is not None else np.zeros(len(S.xy))) for S in drv])
+        dtree = cKDTree(DP)
+        for k_, S in enumerate(drv):
+            if S.sw is None or not (S.sw & (SW_L | SW_R)).any() or len(S.xy) < 2:
+                continue
+            T = np.gradient(S.xy, axis=0)
+            T /= np.maximum(np.hypot(T[:, 0], T[:, 1]), 1e-9)[:, None]
+            for v in np.nonzero(S.sw & (SW_L | SW_R))[0]:
+                for side, bit, e in ((1, SW_L, S.attrs["pL"][v]), (-1, SW_R, S.attrs["pR"][v])):
+                    if not S.sw[v] & bit:
+                        continue
+                    nrm = side * np.array([-T[v, 1], T[v, 0]])
+                    q = S.xy[v] + nrm * (e + 1.75)
+                    for j in dtree.query_ball_point(q, 20.0):
+                        zv = S.z[v] if S.z is not None else DZ[j]
+                        if DO[j] == k_ or abs(DT[j] @ T[v]) < 0.9 or abs(DZ[j] - zv) > 2.0:
+                            continue
+                        lat = float((DP[j] - S.xy[v]) @ nrm)
+                        if lat > 0 and lat - DH[j] < e + 2.3 and abs(float((DP[j] - S.xy[v]) @ T[v])) < 12.0:
+                            S.sw[v] &= ~(bit | (BLVD_L if side > 0 else BLVD_R))
+                            cnt["sidewalk_cut_alongside"] += 1
+                            break
     report["sidewalk_streets"] = dict(cnt)
 
 
@@ -2475,8 +2715,12 @@ def junction_clusters(L: Lines, strokes: list[Stroke], inc_of, report, nodes=Non
                 # walk to the next node on this stroke: internal if it is a member within CLUSTER_D
                 other = None
                 for m2, sv in S.node_s.items():
-                    if m2 in memset and m2 != n and 0 < d * (sv - S.s[k]) < CLUSTER_D + 1:
-                        other = m2
+                    # (any member further along this stroke, not only the adjacent one: a cluster chained
+                    # over several short pieces would otherwise mark a crosswalk ladder at each end
+                    # member's leg line -- two ladders on one line, the doubled crosswalks)
+                    if m2 in memset and m2 != n and 0 < d * (sv - S.s[k]) < 150.0:
+                        if other is None or abs(sv - S.s[k]) < abs(S.node_s[other] - S.s[k]):
+                            other = m2
                 j = k + d
                 while 0 <= j < len(S.s) and abs(S.s[j] - S.s[k]) < 3.0:
                     j += d
@@ -2967,6 +3211,10 @@ def _block(args):
     except Exception as e:  # noqa: BLE001
         import traceback
         print(f"  block {args} FAILED: {e!r}\n{traceback.format_exc()}", flush=True)
+        # a failed block would leave a silent hole in the network (downtown lost its roads
+        # once); fail the build unless explicitly allowed
+        if not __import__("os").environ.get("RN_ALLOW_BLOCK_FAIL"):
+            raise
         return None
 
 
@@ -3207,7 +3455,8 @@ def emit(L: Lines, strokes, clusters, jrec, surf, walks, curbs, pads, poles, med
                                       flags=int(np.bitwise_or.reduce(L.flags[sw_])) & ~(F_BRIDGE | F_TUNNEL) |
                                       (F_BRIDGE if (S.vf[a + 1:b] & V_BRIDGE).all() else 0) |
                                       (F_TUNNEL if (S.vf[a + 1:b] & V_TUNNEL).all() else 0),
-                                      osm=[float(L.id[i]) for i in sw_]))
+                                      osm=[float(L.id[i]) for i in sw_],
+                                      corr=float(L.id[strokes[S.corridor].ways[0][0]]) if S.corridor >= 0 else 0.0))
                 continue
             if S.group == 2:
                 O["lot"].append(dict(xyz=np.column_stack([S.xy[a:b], z[a:b]]), osm=float(L.id[ws[0]]), svc=int(L.svc[ws[0]])))
@@ -3442,7 +3691,8 @@ def stitch_rail(A: dict) -> int:
             order.append([i])
             done[i] = True
     new = {k: [] for k in ("xyz", "vf", "s")}
-    offs, oofs, osm_new, cls_new, fl_new = [0], [0], [], [], []
+    offs, oofs, osm_new, cls_new, fl_new, corr_new = [0], [0], [], [], [], []
+    corr = A.get("rail_corr", np.zeros(n))
     for chain in order:
         cnt = 0
         ids = []
@@ -3460,6 +3710,7 @@ def stitch_rail(A: dict) -> int:
         oofs.append(oofs[-1] + len(ids))
         cls_new.append(cls[chain[0]])
         fl_new.append(fl[chain[0]])
+        corr_new.append(corr[chain[0]])
     A["rail_off"] = np.array(offs, np.int64)
     A["rail_xyz"] = np.vstack(new["xyz"])
     A["rail_vf"] = np.concatenate(new["vf"])
@@ -3468,6 +3719,7 @@ def stitch_rail(A: dict) -> int:
     A["rail_flags"] = np.array(fl_new, fl.dtype)
     A["rail_osm_off"] = np.array(oofs, np.int64)
     A["rail_osm"] = np.array(osm_new, osm.dtype)
+    A["rail_corr"] = np.array(corr_new, np.float64)
     return n - len(order)
 
 
@@ -3563,6 +3815,8 @@ def merge_parts(parts) -> dict:
     A["rail_flags"] = np.array([r["flags"] for r in RL], np.uint8)
     A["rail_osm_off"] = offs([len(r["osm"]) for r in RL])
     A["rail_osm"] = np.array([x for r in RL for x in r["osm"]], np.float64)
+    # corridor cluster per piece (OSM id of a member way, 0 = none): tracks sharing one bed level
+    A["rail_corr"] = np.array([r.get("corr", 0.0) for r in RL], np.float64)
     W = items("way")
     A["way_id"] = np.array([w["id"] for w in W], np.float64)
     A["way_off"] = offs([len(w["xyz"]) for w in W])

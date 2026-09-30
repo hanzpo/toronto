@@ -175,3 +175,73 @@ fn terminal_turnbacks() {
         }
     }
 }
+
+/// Streetcar loop terminals over a weekday: distinct cars stopped > 3 min (not dwelling)
+/// within 300 m of each loop (the ends of the streetcar patterns).
+#[test]
+#[ignore]
+fn streetcar_loops() {
+    let Some(mut sim) = load() else { return };
+    sim.step(0.2, 5.0 * 3600.0);
+    let fi = sim.feeds.iter().position(|f| f.id == 0).unwrap();
+    // loop terminals: pattern ends of streetcar plans, clustered
+    let mut ends: Vec<(f64, f64, u32)> = Vec::new();
+    let np = sim.feeds[fi].pat_mode.len();
+    for p in 0..np {
+        let pl = &sim.plans[sim.feeds[fi].plan0 as usize + p];
+        if pl.mode != 2 || !pl.ok {
+            continue;
+        }
+        for r in [0.0, pl.length] {
+            let q = pl.point(&sim.net, r);
+            if !ends.iter().any(|e| (e.0 - q[0]).hypot(e.1 - q[1]) < 400.0) {
+                ends.push((q[0], q[1], 0));
+            }
+        }
+    }
+    // named loops the user reported (Spadina station loop, 510)
+    for (x, y) in [(-1330.0, 1880.0)] {
+        if !ends.iter().any(|e| (e.0 - x).hypot(e.1 - y) < 150.0) {
+            ends.insert(0, (x, y, 0));
+        }
+    }
+    sim.focus = (-120.0, -950.0);
+    sim.radius = 20000.0;
+    let mut t = 5.0 * 3600.0;
+    let mut seen = std::collections::HashSet::new();
+    let mut ex: Vec<String> = Vec::new();
+    while t < 24.0 * 3600.0 {
+        sim.step(0.5, t);
+        t += 0.5;
+        if (t as i64) % 60 != 0 {
+            continue;
+        }
+        for ti in 0..sim.trains.len() {
+            let tr = &sim.trains[ti];
+            let pl = &sim.plans[tr.plan as usize];
+            if tr.dead || pl.mode != 2 || tr.stopped_t < 180.0 || matches!(tr.state, TState::Dwell | TState::Terminal | TState::Parked) {
+                continue;
+            }
+            if !seen.insert(tr.id) {
+                continue;
+            }
+            let q = pl.point(&sim.net, tr.front);
+            if let Some(k) = (0..ends.len()).find(|&k| (ends[k].0 - q[0]).hypot(ends[k].1 - q[1]) < 300.0) {
+                ends[k].2 += 1;
+                if ex.len() < 40 && std::env::var("LOOP_EX").is_ok() {
+                    let w = sim.wait_for(ti);
+                    let w = if w == Some(0) { sim.dir_holders(ti).first().copied() } else { w };
+                    let wd = w.and_then(|id| sim.trains.iter().find(|o| o.id == id)).map(|o| { let oq = sim.plans[o.plan as usize].point(&sim.net, o.front); format!("{:?} dh {} v {:.1} stopped {:.0} front {:.0}/{:.0} at ({:.0},{:.0}) trip {}", o.state, o.dh, o.v, o.stopped_t, o.front, sim.plans[o.plan as usize].length, oq[0], oq[1], o.trip) }).unwrap_or("-".into());
+                    ex.push(format!("({:.0},{:.0}) id {} dh {} front {:.0}/{:.0} sight {:.1} waits {:?} [{}] | {} | {}", q[0], q[1], tr.id, tr.dh, tr.front, pl.length, tr.sight_gap, w, wd, sim.why(ti).chars().take(120).collect::<String>(), sim.spans_near(ti).chars().take(200).collect::<String>()));
+                }
+            }
+        }
+    }
+    ends.sort_by_key(|e| std::cmp::Reverse(e.2));
+    for e in &ends {
+        eprintln!("LOOP ({:.0},{:.0}): stuck cars {}", e.0, e.1, e.2);
+    }
+    for e in &ex {
+        eprintln!("  EX {e}");
+    }
+}

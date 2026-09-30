@@ -76,6 +76,8 @@ RDP_TOL = 0.2
 COVER = {0: 10.0, 1: 14.0, 2: 10.0, 3: 8.0}
 CLEARANCE = 6.0
 RAMP = 150.0
+# closed tunnel runs shorter than this are covered ways (road bridges / decks over a cut): no dive
+COVERED_WAY = 250.0
 # default speed limits (km/h) per class / service; lateral acceleration for curves (m/s2)
 V_DEFAULT = {0: 130.0, 1: 80.0, 2: 70.0, 3: 40.0}
 V_SERVICE = {1: 25.0, 2: 15.0, 3: 40.0}
@@ -663,7 +665,10 @@ class RailGraph:
             bri = (F & F_BRIDGE) > 0
             tun = (F & F_TUNNEL) > 0
             cov = max(cover_of(e) for e, _ in st)
-            z = grade_profile(P, g, bri, tun, clearance=CLEARANCE, cover=cov, ramp=RAMP, open_ends=True)
+            # short covered ways stay level with their approaches, except streetcar station loops
+            # (St Clair West, Bathurst …), which really do dip under the station
+            cw = 0.0 if any(int(self.e_kind[e]) == 3 for e, _ in st) else COVERED_WAY
+            z = grade_profile(P, g, bri, tun, clearance=CLEARANCE, cover=cov, ramp=RAMP, open_ends=True, covered_way=cw)
             cum = np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(P, axis=0).T))])
             # blend onto nodes already fixed by longer strokes
             corr = np.zeros(len(P))
@@ -817,9 +822,10 @@ class RailGraph:
                     e2 = S_e[j]
                     if e2 == e or grp[e2] != grp[e]:
                         continue
-                    # parallel tracks that meet each other (loop / siding / platform pairs)
-                    # are not the two directions of a double-track line
-                    if int(self.e_from[e2]) in mine or int(self.e_to[e2]) in mine:
+                    # short parallel tracks that meet each other (loop / siding / platform
+                    # pairs) are not the two directions of a double-track line; long ones are
+                    # (a double-track street line between two crossovers)
+                    if (int(self.e_from[e2]) in mine or int(self.e_to[e2]) in mine) and min(self.e_len[e], self.e_len[e2]) < 400.0:
                         continue
                     if abs(float(S_t[j] @ t)) < 0.95:
                         continue

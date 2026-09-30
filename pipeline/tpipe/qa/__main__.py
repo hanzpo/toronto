@@ -53,7 +53,7 @@ OWNER = {  # which workstream fixes each category (docs/QA.md)
     "raster_shore": "ground",
     # cross-layer merge gate against the network model (docs/ROADS.md "Source of truth")
     **{c: "model" for c in ("rail_above_bed", "duplicate_track", "underpass_drawn_at_grade", "drawn_rail_vs_train_path",
-                            "graph_vs_model")},
+                            "graph_vs_model", "sidewalk_between_carriageways", "lane_count_jump", "duplicate_crosswalk", "adjacent_track_z_step")},
 }
 
 

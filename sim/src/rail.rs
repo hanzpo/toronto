@@ -506,12 +506,15 @@ pub fn build_plan(net: &RailNet, feed: u32, local: u32, mode: u8, len: f32, ok: 
     for s in &spans {
         match s.kind {
             SP_BLOCK => cand.push(s.r1),
-            _ => cand.push(s.r1 + body),
+            SP_JUNCTION => cand.push(s.r1 + body),
+            _ => {}
         }
     }
     cand.extend(stop_front.iter().copied());
     cand.push(length);
-    let hard: Vec<(f32, f32)> = spans.iter().filter(|s| s.kind != SP_BLOCK).map(|s| (s.r0, s.r1)).collect();
+    // (a two-way stretch is entered with its direction lock for the whole run, so trains may
+    // follow each other block by block inside it: only junction zones are hard)
+    let hard: Vec<(f32, f32)> = spans.iter().filter(|s| s.kind == SP_JUNCTION).map(|s| (s.r0, s.r1)).collect();
     let mut ssp: Vec<f32> = cand
         .into_iter()
         .filter(|&f| f > 0.0 && f <= length + 0.01)

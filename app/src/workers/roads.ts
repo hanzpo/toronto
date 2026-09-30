@@ -318,7 +318,7 @@ export interface StreetRoad {
 
 export interface RoadOut { mesh: MeshBuf | null; count: number; streets: StreetRoad[]; junctions: Junction[] }
 
-interface Seg2 { x0: number; y0: number; x1: number; y1: number; hw: number; z: number }
+interface Seg2 { x0: number; y0: number; x1: number; y1: number; hw: number; z: number; id?: number }
 
 /** coarse spatial hash of at-grade carriageways / tracks (pier and prop placement) */
 class SegGrid {
@@ -330,6 +330,17 @@ class SegGrid {
     for (let i = x0; i <= x1; i++) for (let j = y0; j <= y1; j++) {
       const k = i * 100003 + j; let l = this.m.get(k); if (!l) this.m.set(k, (l = [])); l.push(s);
     }
+  }
+  /** segments registered in the cell of (x, y) (8.5 m neighbourhoods: cells are 32 m, padded by hw + 2) */
+  near(x: number, y: number): Seg2[] {
+    const out: Seg2[] = [];
+    const c = this.cell;
+    for (let i = Math.floor((x - 9) / c); i <= Math.floor((x + 9) / c); i++)
+      for (let j = Math.floor((y - 9) / c); j <= Math.floor((y + 9) / c); j++) {
+        const l = this.m.get(i * 100003 + j);
+        if (l) for (const sg of l) out.push(sg);
+      }
+    return out;
   }
   /** true if (x, y) lies within any segment's half width + margin, below height zTop */
   hit(x: number, y: number, margin: number, zTop: number): boolean {
@@ -351,6 +362,8 @@ interface Prep {
   zc: number[]; zl: number[]; zr: number[]; structZ: number[];
   /** per-vertex cross-section mode (0 draped · 1 flat · 2 structure), roads only */
   zm?: number[];
+  /** source piece index (rail corridor bed: skip the track itself) */
+  pid?: number;
   c: number; f: number; feats: Feat[]; lift: number;
   /** path sub-kind (osm_extract SUBKIND), surface code, cycleway bits */
   sub?: number; surf?: number; cyc?: number;
@@ -1186,6 +1199,15 @@ export function buildRail(a: Record<string, TypedArray>, terr: Terrain, level: n
       }
     }
   }
+  // heavy-rail centreline segments (level 0): corridor neighbours for the shared bed
+  const railIdx = new SegGrid();
+  if (level === 0) for (let i = 0; i < n; i++) {
+    if ((cls[i] ?? 0) > 2) continue;
+    for (let k = off[i]; k < off[i + 1] - 1; k++) {
+      if (vfA && (vfA[k] & V_TUNNEL)) continue;
+      railIdx.add({ x0: xyz[k * 3], y0: xyz[k * 3 + 1], x1: xyz[k * 3 + 3], y1: xyz[k * 3 + 4], hw: 0, z: xyz[k * 3 + 2], id: i });
+    }
+  }
   for (let i = 0; i < n; i++) {
     const f = flags ? flags[i] : 0;
     const c = cls[i] ?? 0;
@@ -1213,7 +1235,7 @@ export function buildRail(a: Record<string, TypedArray>, terr: Terrain, level: n
         z[k] = zDr + (run.z[k] - zDr) * wAbs;
       }
       count++;
-      const P: Prep = { run, ox, oy, tx, ty, zc: z, zl: z, zr: z, structZ: z, c: 8, f, feats: [], lift: 0.35 };
+      const P: Prep = { run, ox, oy, tx, ty, zc: z, zl: z, zr: z, structZ: z, c: 8, f, feats: [], lift: 0.35, pid: i };
       const vis = (k: number) => !((run.vf[k] & V_TUNNEL) && (k === 0 || run.vf[k - 1] & V_TUNNEL));
       const hwB = ((c === 1 ? 2.8 : 3.6) * widen) / 2;
       if (!tram) {
@@ -1222,12 +1244,10 @@ export function buildRail(a: Record<string, TypedArray>, terr: Terrain, level: n
           ballast(b, P, k0, k1, hwB, c, level);
         }
         if (level === 0) {
-          // raised approaches (graded above the ground off the span): grass fill slopes, so an
-          // abutment never stands in the air with the track floating behind it
-          for (let k = 0; k < nv; k++) if (!(run.vf[k] & V_BRIDGE)) {
-            run.pl[k] = run.pr[k] = hwB + 0.2; run.sw[k] = 0;
-          }
-          embankment(b, { ...P, lift: 0.03 }, 0, 0, terr);
+          // corridor bed: tracks of one corridor (the model gives parallel tracks one bed level)
+          // share a flat ballast bed out to half way to the neighbouring track; fill slopes (1:2)
+          // only on the corridor's outer edges where it is raised -- no per-track ribbons
+          if (c <= 2) corridorBed(b, P, hwB, railIdx, terr);
           for (const [k0, k1] of vRanges(run, (k) => (run.vf[k] & V_BRIDGE) !== 0)) {
             for (let k = k0; k <= k1; k++) { run.pl[k] = run.pr[k] = hwB + 0.6; run.sw[k] = 0; }
             const P2: Prep = { ...P, c: 9, lift: 0.35 };
@@ -1247,6 +1267,73 @@ export function buildRail(a: Record<string, TypedArray>, terr: Terrain, level: n
     }
   }
   return { mesh: b.finish(), count };
+}
+
+/** nearest parallel track on each side of vertex k (lateral distance, 0 = none) at about the same level */
+function railNeighbours(grid: SegGrid, run: Run, k: number, ox: number, oy: number, z: number, self: number): [number, number] {
+  const l = Math.hypot(ox, oy) || 1;
+  const nx = ox / l, ny = oy / l;
+  let dl = 0, dr = 0;
+  const x = run.x[k], y = run.y[k];
+  for (const sg of grid.near(x, y)) {
+    if (sg.id === self) continue;
+    const dx = sg.x1 - sg.x0, dy = sg.y1 - sg.y0, L2 = dx * dx + dy * dy;
+    if (L2 < 1e-6) continue;
+    const L = Math.sqrt(L2);
+    if (Math.abs((dx * -ny + dy * nx) / L) < 0.9) continue; // parallel only (tangent = (-ny, nx))
+    const t = Math.max(0, Math.min(1, ((x - sg.x0) * dx + (y - sg.y0) * dy) / L2));
+    const px = sg.x0 + dx * t - x, py = sg.y0 + dy * t - y;
+    const along = Math.abs(px * -ny + py * nx);
+    if (along > 2) continue;
+    if (Math.abs(sg.z - z) > 0.5) continue;
+    const lat = px * nx + py * ny;
+    if (lat > 0.5 && lat < 8.5 && (!dl || lat < dl)) dl = lat;
+    if (lat < -0.5 && lat > -8.5 && (!dr || -lat < dr)) dr = -lat;
+  }
+  return [dl, dr];
+}
+
+/** shared ballast bed between the tracks of a corridor + outer fill slopes where raised */
+function corridorBed(b: RoadBuilder, P: Prep, hwB: number, grid: SegGrid, terr: Terrain) {
+  const { run, ox, oy, zc } = P;
+  const nv = run.x.length;
+  const self = P.pid ?? -1;
+  const nb: [number, number][] = [];
+  for (let k = 0; k < nv; k++) nb.push(run.vf[k] & (V_BRIDGE | V_TUNNEL | V_EMBED) ? [0, 0] : railNeighbours(grid, run, k, ox[k], oy[k], zc[k], self));
+  for (const sd of [1, -1]) {
+    const bedTop: number[] = [], bedIn: number[] = [], top: number[] = [], foot: number[] = [];
+    let prevOk = false;
+    for (let k = 0; k < nv; k++) {
+      const vf = run.vf[k];
+      const ok = !(vf & (V_BRIDGE | V_TUNNEL | V_EMBED));
+      const l = Math.hypot(ox[k], oy[k]) || 1;
+      const nx = sd * ox[k] / l, ny = sd * oy[k] / l;
+      const d = sd > 0 ? nb[k][0] : nb[k][1];
+      const w = d ? d / 2 + 0.15 : hwB + 0.2;       // bed edge: half way to the neighbour, else the ballast shoulder
+      const x = run.x[k], y = run.y[k], z = zc[k] + 0.01;
+      if (ok) {
+        b.plain(SURF_BALLAST, RAIL_BALLAST, 0.45, 0);
+        b.n = [0, 1, 0];
+        bedIn.push(b.v(x + nx * hwB, z, -(y + ny * hwB), sd * hwB, run.s[k]));
+        bedTop.push(b.v(x + nx * w, z, -(y + ny * w), sd * w, run.s[k]));
+        // outer edge only: a 1:2 fill slope down to the ground where the bed is raised
+        const ex = x + nx * w, ey = y + ny * w;
+        const h = d ? 0 : Math.max(0, z - terr.at(ex, ey));
+        b.plain(SURF_GRASS, [255, 255, 255], 0.8);
+        const out = Math.min(2 * h, 30);
+        const fx = ex + nx * out, fy = ey + ny * out;
+        top.push(b.v(ex, z, -ey, sd * w, run.s[k]));
+        foot.push(b.v(fx, h > 0.05 ? terr.at(fx, fy) - 0.1 : z, -fy, sd * (w + out), run.s[k]));
+      }
+      if (ok && prevOk) {
+        const i = bedTop.length - 1;
+        if (sd > 0) { b.q(bedIn[i - 1], bedTop[i - 1], bedTop[i], bedIn[i]); b.q(foot[i - 1], top[i - 1], top[i], foot[i]); }
+        else { b.q(bedIn[i - 1], bedIn[i], bedTop[i], bedTop[i - 1]); b.q(foot[i - 1], foot[i], top[i], top[i - 1]); }
+      }
+      if (!ok) { bedTop.length = bedIn.length = top.length = foot.length = 0; }
+      prevOk = ok;
+    }
+  }
 }
 
 function ballast(b: RoadBuilder, P: Prep, k0: number, k1: number, hw: number, c: number, level: number) {

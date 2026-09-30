@@ -47,8 +47,14 @@ def profile(
     cover: float = 10.0,
     ramp: float = 80.0,
     open_ends: bool = False,
+    covered_way: float = 0.0,
 ) -> np.ndarray:
     """Elevation per vertex. `bridge`/`tunnel` are per-vertex bool masks.
+
+    With `covered_way` > 0, a closed tunnel run shorter than that (m) is a
+    covered way — a road bridge, bus deck or station over a cut, e.g. Lawrence
+    West under Lawrence Ave — and follows the line between its ends instead of
+    diving to `cover` (too short to reach it at the ramp grade anyway).
 
     With `open_ends`, a run touching the first/last vertex continues past the
     end of the line (e.g. a subway terminus underground) instead of ramping
@@ -70,6 +76,9 @@ def profile(
                 span = d[b] - d[a]
                 t = (seg - d[a]) / span if span > 0 else np.zeros(j - i + 1)
                 interp = ground[a] + (ground[b] - ground[a]) * t
+                if sign < 0 and covered_way > 0 and span < covered_way:
+                    z[i : j + 1] = interp
+                    continue
             else:  # an end is open: follow the terrain, ramping only at closed ends
                 interp = None
             edge = np.minimum(seg - d[a] if has_a else np.inf, d[b] - seg if has_b else np.inf)

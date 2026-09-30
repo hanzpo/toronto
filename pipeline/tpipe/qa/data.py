@@ -119,7 +119,7 @@ class Block:
         # per vertex (network-model tiles, docs/ROADS.md): pavement / edge-line offsets left and right
         # of the centreline and the lane marking bits
         self.roads = self._lines("r", ["class", "width", "lanes", "flags", "layer", "side", "osm", "v0", "name", "sw"],
-                                 ["pl", "pr", "el", "er", "mk", "vf", "dz"])
+                                 ["pl", "pr", "el", "er", "mk", "vf", "dz", "sw", "lw"])
         if self.roads.n:
             self.roads.attrs["w"] = render_width(self.roads.attrs["class"], self.roads.attrs["width"])
             if any("r_pl" in d for d in self.data):

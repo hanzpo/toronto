@@ -230,24 +230,29 @@
    "snap": 68.5,
    "profile": [
     [
+     -79.405393,
+     43.63919,
+     4.3
+    ],
+    [
      -79.401828,
      43.639957,
-     3.0
+     4.3
     ],
     [
      -79.398264,
      43.640725,
-     3.4
+     4.2
     ],
     [
      -79.394105,
      43.64162,
-     3.9
+     4.3
     ],
     [
      -79.391728,
      43.642131,
-     4.2
+     5.0
     ],
     [
      -79.388757,
@@ -300,7 +305,7 @@
      5.5
     ]
    ],
-   "note": "Union Station Rail Corridor: top-of-rail level (datum m) of every main / siding track within snap m of the control line, exact (drawn and driven at this z). The Union deck section (York St to Bay St, UP platform 1A west of York) is flat at 8.31 m; streets pass under in open underpasses (roadnet: short street tunnels below the track are opened and dipped under it). The union_station landmark deck and platforms read this level from the model (landmarks.json union_station.rail_z). West of Spadina the corridor falls to grade through the Bathurst yards (under the Bathurst St bridge).",
+   "note": "Union Station Rail Corridor: top-of-rail level (datum m) of every main / siding track within snap m of the control line, exact (drawn and driven at this z). The Union deck section (York St to Bay St, UP platform 1A west of York) is flat at 8.31 m; streets pass under in open underpasses (roadnet: short street tunnels below the track are opened and dipped under it). The union_station landmark deck and platforms read this level from the model (landmarks.json union_station.rail_z). West of Spadina the corridor falls to the level Bathurst yards (about 4.3 m datum, the DTM there) under the Bathurst St bridge.",
    "sources": [
     "Station deck level and approach hints: pipeline/curated/union_deck.json history (stations agent, from the Union landmark model and OSM platform ways)",
     "City of Toronto DSM along the corridor (berm / viaduct tops 6-8 m datum between Spadina and Cherry)",

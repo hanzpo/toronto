@@ -14,6 +14,19 @@ geometry and z; these checks catch consumers that disagree with it or with each 
                             z > 0.3 m off
   graph_vs_model            a sim graph edge (graph tiles) off its model way (work/roadnet.npz
                             way_xyz): plan > 1 m or z > 0.3 m
+  sidewalk_between_carriageways  a street's sidewalk (r_sw) whose walk band lies on another drivable
+                            carriageway at the same level (a ramp glued beside it, a twin roadway)
+  duplicate_crosswalk       two crosswalk ladders over the same carriageway within 8 m of each
+                            other from different junction nodes (the client draws a ladder at each
+                            signalized member node's arm radius; a junction not clustered with its
+                            twin draws a second set) -- the two halves of a divided crossing are on
+                            different carriageways and are not counted
+  adjacent_track_z_step     parallel main-line / siding tracks within 8 m whose drawn levels differ
+                            by more than 0.3 m (tracks in one corridor or yard share a bed level;
+                            bridge / tunnel vertices -- real flyovers and dives -- are excluded)
+  lane_count_jump           a carriageway's lane count (r_mk forward + backward) changing by 2 or
+                            more between consecutive vertices (a ramp stacked on the lanes instead
+                            of joining as an added lane)
 """
 from __future__ import annotations
 
@@ -26,7 +39,10 @@ from scipy.spatial import cKDTree
 from .. import geo, tbn
 from .core import finding
 
-MODEL_CATS = {"duplicate_track", "underpass_drawn_at_grade", "drawn_rail_vs_train_path", "graph_vs_model"}
+MODEL_CATS = {"duplicate_track", "underpass_drawn_at_grade", "drawn_rail_vs_train_path", "graph_vs_model",
+              "sidewalk_between_carriageways", "lane_count_jump", "duplicate_crosswalk",
+              "adjacent_track_z_step",
+              "surface_gap", "surface_overlap", "terrain_above_paving"}  # unified surface (qa/checks_surface.py)
 
 V_BRIDGE, V_TUNNEL, V_EMBED = 1, 2, 8
 ST_EXACT = 11
@@ -272,6 +288,206 @@ def check_graph_model(B, Gr) -> list[dict]:
     return out
 
 
+# ------------------------------------------------------------------ sidewalk_between_carriageways
+SW_L, SW_R = 1, 2
+
+
+def check_sidewalk_between(B) -> list[dict]:
+    R = B.roads
+    out = []
+    if not R.n or "sw" not in R.attrs:
+        return out
+    vp = R.vpiece()
+    sw = np.nan_to_num(R.vattrs.get("sw", np.zeros(len(R.X)))).astype(np.int64) if "sw" in R.vattrs else None
+    if sw is None:
+        return out
+    pl = np.nan_to_num(R.vattrs.get("pl", np.full(len(R.X), 3.0)))
+    pr = np.nan_to_num(R.vattrs.get("pr", np.full(len(R.X), 3.0)))
+    vf = np.nan_to_num(R.vattrs.get("vf", np.zeros(len(R.X)))).astype(np.int64)
+    cls = R.attrs["class"][vp]
+    z = R.ZD if R.ZD is not None else R.Z
+    drv = (cls <= 6) & ((vf & V_TUNNEL) == 0)
+    P = np.column_stack([R.X, R.Y])
+    tree = cKDTree(P[drv])
+    di = np.nonzero(drv)[0]
+    hw = np.maximum(pl, pr)
+    # direction per vertex (within its piece)
+    tx = np.zeros(len(R.X)); ty = np.zeros(len(R.X))
+    for i in range(R.n):
+        a, b = R.off[i], R.off[i + 1]
+        if b - a < 2:
+            continue
+        g = np.gradient(P[a:b], axis=0)
+        l = np.maximum(np.hypot(g[:, 0], g[:, 1]), 1e-9)
+        tx[a:b], ty[a:b] = g[:, 0] / l, g[:, 1] / l
+    bad = np.zeros(len(R.X), bool)
+    for k in np.nonzero(drv & (sw & (SW_L | SW_R) != 0) & B.in_core(R.X, R.Y))[0]:
+        for side, bit, w in ((1, SW_L, pl[k]), (-1, SW_R, pr[k])):
+            if not sw[k] & bit:
+                continue
+            q = P[k] + side * np.array([-ty[k], tx[k]]) * (w + 1.0)      # walk band centre
+            for j in tree.query_ball_point(q, 12.0):
+                o = di[j]
+                if vp[o] == vp[k] or R.attrs["osm"][vp[o]] == R.attrs["osm"][vp[k]] or abs(z[o] - z[k]) > 1.5:
+                    continue
+                # alongside, not a cross street at a junction
+                if abs(tx[o] * tx[k] + ty[o] * ty[k]) < 0.9:
+                    continue
+                if np.hypot(*(P[o] - q)) < hw[o] - 0.3:
+                    bad[k] = True
+                    break
+            if bad[k]:
+                break
+    for r in _runs(bad):
+        r = r[vp[r] == vp[r[0]]]
+        if len(r) < 2:
+            continue
+        k = r[len(r) // 2]
+        out.append(finding("sidewalk_between_carriageways", "walk_on_carriageway", 3, R.X[k], R.Y[k], float(z[k]),
+                           [R.attrs["osm"][vp[k]]], f"sidewalk of way {int(R.attrs['osm'][vp[k]])} lies on another carriageway "
+                           f"over {len(r)} vertices", key=("sidewalk_between", int(R.attrs["osm"][vp[k]]), round(float(R.X[k]) / 40), round(float(R.Y[k]) / 40))))
+    return out
+
+
+# ------------------------------------------------------------------ lane_count_jump
+def check_lane_jump(B) -> list[dict]:
+    """Lane lines that do not fit the carriageway: the marked lane count (forward + backward)
+    jumps by 2+ between adjacent vertices, or differs from what the lane edges hold (eL + eR
+    over the lane width) by more than one lane -- a ramp stacked on the lanes, a short way with
+    the wrong lanes tag drawn as one lane on a 10 m pavement."""
+    R = B.roads
+    out = []
+    mk = R.vattrs.get("mk")
+    if not R.n or mk is None:
+        return out
+    m = np.nan_to_num(mk).astype(np.int64)
+    lanes = (m & 15) + ((m >> 4) & 15)
+    el = np.nan_to_num(R.vattrs.get("el", np.zeros(len(R.X))))
+    er = np.nan_to_num(R.vattrs.get("er", np.zeros(len(R.X))))
+    lw = np.nan_to_num(R.vattrs.get("lw", np.full(len(R.X), 3.4)), nan=3.4)
+    lw = np.where(lw > 2.0, lw, 3.4)
+    fits = np.abs(lanes * lw - (el + er)) <= lw
+    vp = R.vpiece()
+    cls = R.attrs["class"]
+    for i in range(R.n):
+        a, b = R.off[i], R.off[i + 1]
+        if b - a < 2 or cls[i] > 6 or not (el[a:b] + er[a:b]).any():
+            continue
+        jump = np.zeros(b - a, bool)
+        d = np.abs(np.diff(lanes[a:b]))
+        jump[:-1] |= (d >= 2) & ~(fits[a:b - 1] & fits[a + 1:b])
+        bad = jump | ~fits[a:b]
+        for r in _runs(bad):
+            v = a + r[len(r) // 2]
+            if not B.in_core(R.X[v], R.Y[v]):
+                continue
+            w = float(el[v] + er[v])
+            out.append(finding("lane_count_jump", "step" if jump[r].any() else "marking_vs_width", 2 + abs(int(lanes[v]) - w / lw[v]),
+                               R.X[v], R.Y[v], float(R.Z[v]), [R.attrs["osm"][i]],
+                               f"way {int(R.attrs['osm'][i])}: {int(lanes[v])} lanes marked on {w:.1f} m of lanes over {len(r)} vertices",
+                               key=("lane_count_jump", int(R.attrs["osm"][i]), round(float(R.X[v]) / 20), round(float(R.Y[v]) / 20))))
+    return out
+
+
+# ------------------------------------------------------------------ duplicate_crosswalk
+def check_duplicate_crosswalk(B) -> list[dict]:
+    R = B.roads
+    J = B.junc
+    out = []
+    if not R.n or not len(J["x"]):
+        return out
+    jt = cKDTree(np.column_stack([J["x"], J["y"]]))
+    cls = R.attrs["class"]
+    for i in range(R.n):
+        a, b = R.off[i], R.off[i + 1]
+        if b - a < 2 or cls[i] > 7:
+            continue
+        X, Y = R.X[a:b], R.Y[a:b]
+        sv = np.concatenate([[0.0], np.cumsum(np.hypot(np.diff(X), np.diff(Y)))])
+        d, ji = jt.query(np.column_stack([X, Y]), distance_upper_bound=0.05)
+        xw = []                                   # (s, junction index)
+        for k in np.nonzero(np.isfinite(d))[0]:
+            j = int(ji[k])
+            if not (J["flags"][j] & 1):           # crosswalk ladders at signalized junctions
+                continue
+            for sd in (-1, 1):
+                kk = k + sd
+                while 0 <= kk < len(X) and np.hypot(X[kk] - X[k], Y[kk] - Y[k]) < 1e-3:
+                    kk += sd
+                if not 0 <= kk < len(X):
+                    continue
+                ang = math.atan2(Y[kk] - Y[k], X[kk] - X[k])
+                best, bd = None, 0.6
+                for arm in J["arms"][j]:
+                    dd = abs(math.atan2(math.sin(ang - arm[0]), math.cos(ang - arm[0])))
+                    if dd < bd:
+                        best, bd = arm, dd
+                if best is None or best[3] & 2:   # internal link of a clustered junction: no markings
+                    continue
+                s_ = sv[k] + sd * best[1]
+                if 0 <= s_ <= sv[-1]:
+                    xw.append((s_, j))
+        xw.sort()
+        for (s0, j0), (s1, j1) in zip(xw[:-1], xw[1:]):
+            if j0 != j1 and s1 - s0 < 8.0:
+                sm = (s0 + s1) / 2
+                x, y = np.interp(sm, sv, X), np.interp(sm, sv, Y)
+                if not B.in_core(x, y):
+                    continue
+                out.append(finding("duplicate_crosswalk", "two_nodes", 3, x, y, None, [R.attrs["osm"][i], J["osm"][j0], J["osm"][j1]],
+                                   f"two crosswalks {s1 - s0:.1f} m apart on way {int(R.attrs['osm'][i])} from junction nodes "
+                                   f"{int(J['osm'][j0])} and {int(J['osm'][j1])}",
+                                   key=("duplicate_crosswalk", round(float(x) / 10), round(float(y) / 10))))
+    return out
+
+
+# ------------------------------------------------------------------ adjacent_track_z_step
+def check_adjacent_track_z(B) -> list[dict]:
+    L = B.rails
+    out = []
+    if L.n < 2:
+        return out
+    vp = L.vpiece()
+    vf = np.nan_to_num(L.vattrs.get("vf", np.zeros(len(L.X)))).astype(np.int64)
+    cls = L.attrs["class"][vp]
+    z = L.ZD if L.ZD is not None else L.Z
+    ok = (cls <= 1) & ((vf & (V_BRIDGE | V_TUNNEL)) == 0) & np.isfinite(z)
+    P = np.column_stack([L.X, L.Y])
+    tx = np.zeros(len(L.X)); ty = np.zeros(len(L.X))
+    for i in range(L.n):
+        a, b = L.off[i], L.off[i + 1]
+        if b - a < 2:
+            continue
+        g = np.gradient(P[a:b], axis=0)
+        l_ = np.maximum(np.hypot(g[:, 0], g[:, 1]), 1e-9)
+        tx[a:b], ty[a:b] = g[:, 0] / l_, g[:, 1] / l_
+    oi = np.nonzero(ok)[0]
+    if len(oi) < 2:
+        return out
+    tree = cKDTree(P[oi])
+    osm = L.attrs["osm"]
+    bad = np.zeros(len(L.X), bool)
+    dmax = np.zeros(len(L.X))
+    for k in oi[B.in_core(L.X[oi], L.Y[oi])]:
+        for j in tree.query_ball_point(P[k], 8.0):
+            q = oi[j]
+            if vp[q] == vp[k] or osm[vp[q]] == osm[vp[k]] or abs(tx[q] * tx[k] + ty[q] * ty[k]) < 0.9:
+                continue
+            d = abs(float(z[q] - z[k]))
+            if d > 0.3:
+                bad[k] = True
+                dmax[k] = max(dmax[k], d)
+    for r in _runs(bad):
+        r = r[vp[r] == vp[r[0]]]
+        if len(r) < 2:
+            continue
+        k = r[int(np.argmax(dmax[r]))]
+        out.append(finding("adjacent_track_z_step", "step", 2 + min(dmax[k], 5), L.X[k], L.Y[k], float(z[k]), [osm[vp[k]]],
+                           f"track way {int(osm[vp[k]])} up to {dmax[k]:.1f} m off a parallel track within 8 m over {len(r)} vertices",
+                           key=("adjacent_track_z_step", int(osm[vp[k]]), round(float(L.X[k]) / 50), round(float(L.Y[k]) / 50))))
+    return out
+
+
 def run(B, cats: set) -> list[dict]:
     cats = cats & MODEL_CATS
     out = []
@@ -283,6 +499,21 @@ def run(B, cats: set) -> list[dict]:
         out += check_underpass(B)
     if "drawn_rail_vs_train_path" in cats:
         out += check_train_path(B)
+    if "sidewalk_between_carriageways" in cats:
+        out += check_sidewalk_between(B)
+    if "adjacent_track_z_step" in cats:
+        out += check_adjacent_track_z(B)
+    if "duplicate_crosswalk" in cats:
+        out += check_duplicate_crosswalk(B)
+    if "lane_count_jump" in cats:
+        out += check_lane_jump(B)
+    if cats & {"surface_gap", "surface_overlap", "terrain_above_paving"}:
+        try:
+            from .checks_surface import run as run_surface
+        except ImportError:        # unified surface not built yet (docs/SURFACE.md)
+            run_surface = None
+        if run_surface:
+            out += run_surface(B, cats)
     if "graph_vs_model" in cats:
         from .checks_graph import load_graph
         out += check_graph_model(B, load_graph(B.tiles))
