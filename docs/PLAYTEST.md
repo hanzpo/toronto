@@ -102,9 +102,9 @@ CIBC Square flicker → fixed in 3eda5f1.
   budget check after merges
 
 ### User screenshot 12 (Q400 at Billy Bishop)
-- [ ] Q400 nose: blunt dome instead of a long tapered nose; sticker windscreen;
-  boxy nose gear with a single wheel; flat door outline; no Porter livery;
-  flat plastic shading. → aircraft (Codex allowed for modelling help)
+- [x] Q400 nose, windscreen, twin nose wheels, Porter tail: rebuilt from
+  references (7599942). Still missing: fuselage titles ("porter" wordmark),
+  A350/Air Canada cockpit masks, door handles. → aircraft (later)
 
 ### Requested: railway level crossings (user)
 - [ ] Full crossings (panels, stop bars, crossbucks, flashers, gate arms,
