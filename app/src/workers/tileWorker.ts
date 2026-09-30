@@ -2,6 +2,7 @@
 import { decodeTbn } from '../data/tbn';
 
 import { buildBuildings, buildRail, buildRoads, buildTerrain, extractHouses, TerrainSampler, type MeshBuf, type TileMeshes } from './meshing';
+import { buildStreet } from './street';
 
 export type WorkerIn =
   | { type: 'config'; suppress: number[]; build: number }
@@ -66,6 +67,7 @@ function transfers(m: MeshBuf | null, out: Transferable[]) {
   if (!m) return;
   out.push(m.position.buffer, m.normal.buffer, m.index.buffer);
   if (m.color) out.push(m.color.buffer);
+  if (m.attrs) for (const k in m.attrs) out.push(m.attrs[k].array.buffer);
 }
 
 self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
@@ -99,17 +101,19 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     const terr = buildTerrain(a.terrain_h as Int16Array, G, size, level);
     const sampler = new TerrainSampler(terr.heights, G, size);
     const bld = buildBuildings(a, suppress, level);
-    const roads = buildRoads(a, sampler, level);
+    const ground = a.ground ? (a.ground as Uint8Array).slice() : new Uint8Array(256 * 256);
+    const roads = buildRoads(a, sampler, level, ground);
     const rail = buildRail(a, sampler, level);
     const houses = level === 0 ? extractHouses(a, suppress) : null;
-    const ground = a.ground ? (a.ground as Uint8Array).slice() : new Uint8Array(256 * 256);
+    const street = level === 0 ? buildStreet(a, roads.streets, roads.junctions, sampler, ground, msg.tx, msg.ty) : null;
     const result: TileMeshes = {
       terrain: terr.mesh, heights: terr.heights, grid: G, ground, minH: terr.minH, maxH: Math.max(terr.maxH, 0),
-      buildings: bld.mesh, roads: roads.mesh, rail: rail.mesh, houses,
+      buildings: bld.mesh, roads: roads.mesh, rail: rail.mesh, houses, street,
       counts: { buildings: bld.count, houses: houses?.count ?? 0, roads: roads.count, rails: rail.count },
     };
     const tr: Transferable[] = [terr.heights.buffer, ground.buffer];
     transfers(terr.mesh, tr); transfers(bld.mesh, tr); transfers(roads.mesh, tr); transfers(rail.mesh, tr);
+    if (street) tr.push(street.trees.buffer, street.lamps.buffer, street.signals.buffer, street.signalIds.buffer);
     if (houses) tr.push(houses.xy.buffer, houses.base.buffer, houses.angle.buffer, houses.len.buffer, houses.wid.buffer, houses.height.buffer, houses.type.buffer, houses.variant.buffer);
     post({ type: 'done', id, result, ms: { fetch: t1 - t0, mesh: performance.now() - t1 } }, tr);
   } catch (e) {

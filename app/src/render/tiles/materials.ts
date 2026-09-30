@@ -20,18 +20,18 @@ export const GROUND_PALETTE: Record<number, number> = {
   6: 0xd6d1cb, // industrial
   7: 0xe4dfb8, // farmland
   8: 0xeadfbd, // sand / beach
-  9: 0xbdb8b0, // road
+  9: 0x6f6e6b, // road (asphalt: matches the textured road ribbons)
   10: 0xc6bdb2, // rail
   11: 0xcfcbc4, // parking
   12: 0xc3d2b2, // cemetery
   13: 0xbcd7a0, // golf
   14: 0xdad6d0, // aeroway
-  15: 0xc9bca5, // major road
+  15: 0x666562, // major road
   16: 0xa9c2a8, // wetland
   17: 0xe2d7c9, // institutional
   18: 0xd9cfbd, // construction
   19: 0xa9cf93, // sports pitch
-  20: 0xbab7b2, // runway / taxiway
+  20: 0x8a8985, // runway / taxiway
   21: 0xd8d2c8, // platform / plaza
   22: 0xcbc6be, // building footprint (L1/L2 far-view raster)
   255: 0xd4d3c8, // outside region
@@ -54,6 +54,17 @@ function paletteTexture(): THREE.DataTexture {
   t.needsUpdate = true;
   return t;
 }
+
+let _grass: THREE.Texture | null = null, _conc: THREE.Texture | null = null;
+function detailTex(name: string) {
+  const t = new THREE.TextureLoader().load(`${import.meta.env.BASE_URL}textures/${name}`);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  return t;
+}
+const grassTex = () => (_grass ??= detailTex('grass_color.webp'));
+const concreteTex = () => (_conc ??= detailTex('concrete_color.webp'));
 
 let _palette: THREE.DataTexture | null = null;
 export const palette = () => (_palette ??= paletteTexture());
@@ -144,10 +155,19 @@ function terrainMaterial(groundTex: THREE.DataArrayTexture): THREE.MeshStandardN
   const dist = length(toCam);
   const viewDir = toCam.div(dist);
   const fres = pow(float(1).sub(max(viewDir.y, 0)), 4);
-  const waterCol = mix(vec3(0.33, 0.5, 0.64), U.skyHorizon, fres.mul(0.55));
+  const waterCol = mix(vec3(0.33, 0.5, 0.64), U.skyHorizon, fres.mul(0.3));
   const col = mix(c2, waterCol, wet);
 
-  m.colorNode = baseTone(col);
+  // close-range micro texture: grass blades on green classes, concrete grain elsewhere
+  // (luminance-only modulation, keeps the land-cover hue; world-space, 4 m / 2.5 m periods divide the tile size)
+  const gp = vec2(positionLocal.x, positionLocal.z.negate());
+  const closeK = smoothstep(450, 40, dist).mul(float(1).sub(wet));
+  const greenK = smoothstep(0.01, 0.05, sampled.g.sub(sampled.r.add(sampled.b).mul(0.5)));
+  const grassL = luminance(texture(grassTex(), gp.div(4)).rgb).div(0.12);
+  const concL = luminance(texture(concreteTex(), gp.div(2.5)).rgb).div(0.46);
+  const detail = mix(concL.mul(0.35).add(0.65), grassL.mul(0.6).add(0.4), greenK);
+  const colD = col.mul(mix(float(1), clamp(detail, 0.4, 1.6), closeK));
+  m.colorNode = baseTone(colD);
 
   // tile-periodic waves (all wavelengths divide 1024 m, so patterns are seamless across tiles)
   const TAU = Math.PI * 2;
@@ -159,11 +179,12 @@ function terrainMaterial(groundTex: THREE.DataArrayTexture): THREE.MeshStandardN
   const dz = cos(x.mul(k1).add(z.mul(k1 * 0.5)).add(t.mul(0.9))).mul(k1 * 0.5)
     .sub(cos(x.mul(k2 * 0.3).sub(z.mul(k2)).add(t.mul(1.3))).mul(k2))
     .add(cos(x.mul(k3).add(z.mul(k3)).sub(t.mul(1.7))).mul(k3));
-  const amp = float(0.035).mul(float(1).sub(smoothstep(200, 2500, dist))).mul(wet);
+  // fade out well before the ripples get sub-pixel (otherwise distant water shows moiré rings)
+  const amp = float(0.03).mul(float(1).sub(smoothstep(120, 1100, dist))).mul(wet);
   const wn = normalize(vec3(dx.mul(amp).negate(), 1, dz.mul(amp).negate()));
   const baseN = normalize(mix(normalLocal, wn, wet));
   m.normalNode = transformNormalToView(baseN);
-  m.roughnessNode = mix(float(0.97), float(0.16), wet);
+  m.roughnessNode = mix(float(0.97), float(0.28), wet);
   m.metalness = 0;
   void sin;
   return m;

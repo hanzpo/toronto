@@ -90,6 +90,29 @@ Roads (level 0: all; higher levels: filtered + simplified)
 - `r_width` f32 m · `r_lanes` u8 · `r_flags` u8 (`1 oneway · 2 bridge ·
   4 tunnel · 8 link/ramp · 16 roundabout`) · `r_layer` i8 ·
   `r_name` u16 (index into header `names`, 0xFFFF = none) · `r_osm` f64.
+- `r_side` u8 — sidewalk tagging: `0 untagged · 1 none · 2 left · 3 right ·
+  4 both · 5 separate · 6 this way is footway=sidewalk · 7 footway=crossing`.
+  The client draws curbs + raised sidewalks on classes 2–5 for 2/3/4 and, in
+  built-up areas, for 0/5.
+- `r_v0` f32 — distance along the OSM way (m) at the piece's first vertex, so
+  lane-dash phase is continuous across tile borders.
+
+Junctions (level 0; ≥ 3 arms of road classes 0–5, tunnels excluded; duplicated
+into every tile within 80 m)
+- `j_xy` f32 [2n] (tile-local; equals the shared road vertex exactly) ·
+  `j_osm` f64 (OSM node id, same ids as the road graph `n_id`) ·
+  `j_flags` u8 (`1 signalized`: signal node at or within 20 m).
+- `j_arm_off` u32 [n+1] · `j_arm_ang` f32 (rad, CCW from +E, pointing away from
+  the junction along the arm) · `j_arm_r` f32 (junction box radius along that
+  arm: half-width of the widest crossing road ÷ sin angle, + 0.5 m) ·
+  `j_arm_hw` f32 (arm half-width) · `j_arm_flags` u8 (`1 stop sign on this
+  approach`).
+
+Street points (level 0)
+- `p_xy` f32 [2n] · `p_kind` u8 (`0 traffic signals · 1 stop sign · 2 marked
+  crossing · 3 tree (incl. natural=tree_row sampled every 8 m) · 4 street
+  lamp`) · `p_var` u8 (crossing: `1 zebra/ladder · 2 lines`; tree: `0 broadleaf
+  · 1 conifer`) · `p_osm` f64 (0 for tree-row samples).
 
 Rail
 - `l_off` u32 · `l_xyz` f32 · `l_class` u8 (`0 main rail · 1 siding/yard/spur ·

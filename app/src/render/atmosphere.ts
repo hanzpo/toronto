@@ -52,7 +52,10 @@ export class Atmosphere {
       return vec4(mix(output.rgb, U.fogColor, f), output.a);
     })();
 
-    // Lake Ontario / outside-region water plane under all tiles (slightly below datum)
+    // Water plane beyond the tile pyramid. It sits far below every terrain
+    // surface (lake-class terrain is at -1.5 m, DSM quays dip to ~-7 m) so it is
+    // never coplanar with tile water/shoreline: it only shows where no tile
+    // exists (outside the bbox, or briefly through a loading hole).
     const wm = new THREE.MeshStandardNodeMaterial({ roughness: 0.25, metalness: 0 });
     wm.colorNode = Fn(() => {
       const c = vec3(0.33, 0.5, 0.64);
@@ -61,7 +64,7 @@ export class Atmosphere {
     })();
     wm.name = 'lake';
     this.water = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), wm);
-    this.water.position.y = -0.8;
+    this.water.position.y = -60;
     this.water.scale.set(600000, 1, 600000);
     this.water.receiveShadow = false;
     this.water.renderOrder = -1;

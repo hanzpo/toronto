@@ -28,6 +28,7 @@ export default function App() {
         if (cancelled) { engine.dispose(); return; }
         await engine.addLayer(new LabelsLayer());
         await engine.addLayer(new LandmarksLayer());
+        await engine.addLayer(new (await import('./layers/StreetLayer')).StreetLayer());
         const transit = new TransitLayer(engine.dataRoot);
         await engine.addLayer(transit);
         Object.assign(window as object, { __transit: transit });

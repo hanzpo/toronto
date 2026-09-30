@@ -174,6 +174,7 @@ class Collector:
         self.l_flags = array("B")
         self.l_layer = array("b")
         self.l_name = []
+        self.l_side = array("B")  # sidewalk code (SIDEWALK below)
         # landcover areas
         self.a_class = array("B")
         self.a_id = array("d")
@@ -181,11 +182,16 @@ class Collector:
         self.a_ringlen = array("I")
         self.a_lon = array("d")
         self.a_lat = array("d")
-        # nodes of interest (traffic signals, stations)
-        self.n_kind = array("B")  # 0 signals, 1 stop sign, 2 crossing
+        # nodes of interest: 0 signals, 1 stop sign, 2 crossing, 3 tree, 4 street lamp
+        self.n_kind = array("B")
+        self.n_var = array("B")  # crossing: 0 unmarked, 1 zebra/ladder, 2 lines · tree: 0 broadleaf, 1 conifer
         self.n_id = array("q")
         self.n_lon = array("d")
         self.n_lat = array("d")
+        # natural=tree_row ways (sampled into tree points after projection)
+        self.tr_len = array("I")
+        self.tr_lon = array("d")
+        self.tr_lat = array("d")
 
     # ---- helpers
     def _rings(self, a, lon, lat, ringlen) -> int:
@@ -269,6 +275,14 @@ class Collector:
 
     def way(self, w) -> None:
         t = w.tags
+        if t.get("natural") == "tree_row":
+            pts = [(n.lon, n.lat) for n in w.nodes if n.location.valid()]
+            if len(pts) >= 2:
+                for x, y in pts:
+                    self.tr_lon.append(x)
+                    self.tr_lat.append(y)
+                self.tr_len.append(len(pts))
+            return
         hw = t.get("highway")
         rw = t.get("railway")
         ww = t.get("waterway")
@@ -343,6 +357,7 @@ class Collector:
         self.l_flags.append(flags)
         self.l_layer.append(int(max(-5, min(5, layer))) if layer == layer else 0)
         self.l_name.append(t.get("name") or t.get("ref") or "")
+        self.l_side.append(_sidewalk(t) if kind == 0 else 0)
         sp = _metres(t.get("maxspeed"))
         if sp == sp and "mph" in (t.get("maxspeed") or ""):
             sp *= 1.609
@@ -351,13 +366,63 @@ class Collector:
     def node(self, n) -> None:
         t = n.tags
         hw = t.get("highway")
-        k = {"traffic_signals": 0, "stop": 1, "crossing": 2}.get(hw)
+        k = {"traffic_signals": 0, "stop": 1, "crossing": 2, "street_lamp": 4}.get(hw)
+        var = 0
+        if k is None and t.get("natural") == "tree":
+            k = 3
+            var = 1 if t.get("leaf_type") == "needleleaved" else 0
         if k is None:
             return
+        if k == 2:
+            var = _crossing_markings(t)
         self.n_kind.append(k)
+        self.n_var.append(var)
         self.n_id.append(n.id)
         self.n_lon.append(n.location.lon)
         self.n_lat.append(n.location.lat)
+
+
+# r_side codes (docs/SPEC.md): 0 untagged, 1 none, 2 left, 3 right, 4 both, 5 separate,
+# 6 footway=sidewalk, 7 footway=crossing
+SIDEWALK = {"no": 1, "none": 1, "left": 2, "right": 3, "both": 4, "yes": 4, "separate": 5}
+
+
+def _sidewalk(t) -> int:
+    fw = t.get("footway")
+    if fw == "sidewalk" or t.get("path") == "sidewalk" or t.get("cycleway") == "sidewalk":
+        return 6
+    if fw == "crossing" or t.get("cycleway") == "crossing" or t.get("path") == "crossing":
+        return 7
+    v = t.get("sidewalk") or t.get("sidewalk:both")
+    if v in SIDEWALK:
+        return SIDEWALK[v]
+    left = t.get("sidewalk:left") in ("yes", "separate")
+    right = t.get("sidewalk:right") in ("yes", "separate")
+    if t.get("sidewalk:left") == "separate" and t.get("sidewalk:right") == "separate":
+        return 5
+    if left and right:
+        return 4
+    if left:
+        return 2
+    if right:
+        return 3
+    if t.get("sidewalk:left") == "no" and t.get("sidewalk:right") == "no":
+        return 1
+    return 0
+
+
+def _crossing_markings(t) -> int:
+    """0 unmarked, 1 zebra/ladder (continental bars), 2 two transverse lines."""
+    m = t.get("crossing:markings")
+    c = t.get("crossing")
+    ref = t.get("crossing_ref")
+    if m in ("no", "surface"):
+        return 0
+    if m in ("zebra", "ladder", "ladder:skewed", "zebra:double", "dashes") or c == "zebra" or ref == "zebra":
+        return 1
+    if m in ("lines", "lines:paired", "dots", "yes") or c in ("marked", "traffic_signals", "uncontrolled"):
+        return 2
+    return 0
 
 
 KEYS = ("building", "building:part", "highway", "railway", "waterway", "natural", "landuse",
@@ -409,6 +474,7 @@ def run(path: str) -> None:
         len=arr(c.l_len, np.uint32), xy=proj(c.l_lon, c.l_lat), width=arr(c.l_width, np.float32),
         lanes=arr(c.l_lanes, np.uint8), flags=arr(c.l_flags, np.uint8), layer=arr(c.l_layer, np.int8),
         name=np.array(c.l_name, dtype=object), nid=arr(c.l_nid, np.int64), speed=arr(c.l_speed, np.float32),
+        side=arr(c.l_side, np.uint8),
     )
     np.savez(
         geo.WORK / "osm_areas.npz",
@@ -417,8 +483,31 @@ def run(path: str) -> None:
     )
     nx, ny = geo.project(np.frombuffer(c.n_lon, dtype=np.float64), np.frombuffer(c.n_lat, dtype=np.float64)) \
         if len(c.n_lon) else (np.zeros(0), np.zeros(0))
-    np.savez(geo.WORK / "osm_nodes.npz", kind=arr(c.n_kind, np.uint8), id=arr(c.n_id, np.int64),
-             xy=np.stack([nx, ny], axis=1))
+    kind, var, nid = arr(c.n_kind, np.uint8), arr(c.n_var, np.uint8), arr(c.n_id, np.int64)
+    nxy = np.stack([nx, ny], axis=1)
+    # tree rows -> one tree every ~8 m along each row
+    if len(c.tr_len):
+        tx, ty = geo.project(np.frombuffer(c.tr_lon, dtype=np.float64), np.frombuffer(c.tr_lat, dtype=np.float64))
+        toff = np.concatenate([[0], np.cumsum(np.frombuffer(c.tr_len, dtype=np.uint32))]).astype(np.int64)
+        rows = []
+        for i in range(len(toff) - 1):
+            p = np.stack([tx[toff[i]:toff[i + 1]], ty[toff[i]:toff[i + 1]]], 1)
+            seg = np.hypot(*np.diff(p, axis=0).T)
+            cum = np.concatenate([[0], np.cumsum(seg)])
+            if cum[-1] < 1:
+                continue
+            k = max(1, int(round(cum[-1] / 8.0)))
+            s = (np.arange(k) + 0.5) * cum[-1] / k
+            rows.append(np.stack([np.interp(s, cum, p[:, 0]), np.interp(s, cum, p[:, 1])], 1))
+        if rows:
+            R = np.vstack(rows)
+            nxy = np.vstack([nxy, R])
+            kind = np.concatenate([kind, np.full(len(R), 3, np.uint8)])
+            var = np.concatenate([var, np.zeros(len(R), np.uint8)])
+            nid = np.concatenate([nid, np.zeros(len(R), np.int64)])
+        print(f"tree rows: {len(toff) - 1:,} -> {sum(len(r) for r in rows):,} trees")
+    print("nodes by kind:", np.bincount(kind, minlength=5).tolist())
+    np.savez(geo.WORK / "osm_nodes.npz", kind=kind, var=var, id=nid, xy=nxy)
     print(f"done in {time.time() - t0:.0f}s")
 
 

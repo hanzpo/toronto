@@ -10,6 +10,8 @@ export interface MeshBuf {
   /** unorm8 RGBA vertex colours (optional) */
   color?: Uint8Array;
   index: Uint32Array | Uint16Array;
+  /** extra float attributes (e.g. road marking data) */
+  attrs?: Record<string, { array: Float32Array; size: number }>;
 }
 
 export interface HouseBuf {
@@ -35,6 +37,7 @@ export interface TileMeshes {
   roads: MeshBuf | null;
   rail: MeshBuf | null;
   houses: HouseBuf | null;
+  street: import('./street').StreetBuf | null;
   counts: { buildings: number; houses: number; roads: number; rails: number };
 }
 
@@ -167,6 +170,35 @@ export function buildTerrain(hdm: Int16Array, G: number, S: number, level: numbe
 
 // --------------------------------------------------------------------------- buildings
 
+function insetOuterRings(xy: Float32Array, ringOff: Uint32Array, vertOff: Uint32Array, H: Float32Array, OSM: Float64Array | undefined): Float32Array {
+  const out = xy.slice();
+  const nB = ringOff.length - 1;
+  for (let i = 0; i < nB; i++) {
+    const r0 = ringOff[i];
+    if (ringOff[i + 1] <= r0) continue;
+    const s = vertOff[r0], e = vertOff[r0 + 1], n = e - s;
+    if (n < 3) continue;
+    const h = hash32(Math.abs(OSM ? OSM[i] : i) || i);
+    const d = 0.02 + Math.min(H[i], 300) * 0.0008 + (h & 7) * 0.004;
+    const sign = ringArea(xy, s, e) > 0 ? 1 : -1; // CCW: inward = left of travel
+    for (let k = 0; k < n; k++) {
+      const ip = s + ((k + n - 1) % n), ic = s + k, inx = s + ((k + 1) % n);
+      let e1x = xy[ic * 2] - xy[ip * 2], e1y = xy[ic * 2 + 1] - xy[ip * 2 + 1];
+      let e2x = xy[inx * 2] - xy[ic * 2], e2y = xy[inx * 2 + 1] - xy[ic * 2 + 1];
+      const l1 = Math.hypot(e1x, e1y) || 1, l2 = Math.hypot(e2x, e2y) || 1;
+      e1x /= l1; e1y /= l1; e2x /= l2; e2y /= l2;
+      const n1x = -e1y * sign, n1y = e1x * sign, n2x = -e2y * sign, n2y = e2x * sign;
+      let mx = n1x + n2x, my = n1y + n2y;
+      const ml = Math.hypot(mx, my);
+      if (ml < 1e-6) continue;
+      mx /= ml; my /= ml;
+      const k2 = d / Math.max(0.35, mx * n1x + my * n1y);
+      out[ic * 2] += mx * k2; out[ic * 2 + 1] += my * k2;
+    }
+  }
+  return out;
+}
+
 // wall / roof palettes per b_kind (slightly desaturated, cartographic)
 const WALL: number[] = [
   0xd9d4cb, // 0 generic
@@ -290,7 +322,12 @@ function tri(b: Builder, p: number[][], c: RGB) {
 export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<number>, level: number): { mesh: MeshBuf | null; count: number } {
   const ringOff = a.b_ring_off as Uint32Array | undefined;
   if (!ringOff || ringOff.length < 2) return { mesh: null, count: 0 };
-  const vertOff = a.b_vert_off as Uint32Array, xy = a.b_xy as Float32Array;
+  const vertOff = a.b_vert_off as Uint32Array, xy0 = a.b_xy as Float32Array;
+  // Anti z-fighting: OSM outlines, massing parts and duplicates often share wall
+  // planes and roof heights. Every outer ring is inset by a tiny, height-ranked
+  // amount (taller parts sit further back, so a podium wall wins over the tower
+  // wall above it) plus a per-building hash term that breaks exact ties.
+  const xy = insetOuterRings(xy0, a.b_ring_off as Uint32Array, vertOff, a.b_height as Float32Array, a.b_osm as Float64Array);
   const H = a.b_height as Float32Array, MIN = a.b_min as Float32Array, BASE = a.b_base as Float32Array;
   const KIND = a.b_kind as Uint8Array, ROOFT = a.b_roof as Uint8Array, COL = a.b_color as Uint32Array;
   const OSM = a.b_osm as Float64Array;
@@ -315,8 +352,10 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
     const wallRGB = COL && COL[i] ? tame(COL[i]) : WALL[kind] ?? WALL[0];
     const wc = shade(wallRGB, vari);
     let roofType = ROOFT ? ROOFT[i] : 0;
-    const bottom = base + minH;
-    const top = base + height;
+    // walls start below the base (min terrain under the footprint), so no
+    // building floats where the rendered 32 m terrain dips below the DSM minimum
+    const bottom = minH > 0.5 ? base + minH : base - 2.5;
+    const top = base + height + (h & 15) * 0.004;
     const va = vertOff[r0], vb = vertOff[r0 + 1];
     const nOuter = vb - va;
     if (nOuter < 3) continue;
@@ -448,168 +487,7 @@ export function buildBuildings(a: Record<string, TypedArray>, suppress: Set<numb
   return { mesh: b.finish(), count };
 }
 
-// --------------------------------------------------------------------------- ribbons (roads/rail)
-
-const ROAD_RGB: number[] = [
-  0xc4955f, // 0 motorway
-  0xc9a570, // 1 trunk
-  0xb7ab98, // 2 primary
-  0xaca69c, // 3 secondary
-  0xa6a29b, // 4 tertiary
-  0x9f9c97, // 5 residential
-  0xa9a6a1, // 6 service
-  0xc4bcae, // 7 pedestrian
-  0xc2b497, // 8 footway/cycle/path
-  0xa8997c, // 9 track
-];
-const ROAD_W_DEFAULT = [24, 18, 14, 12, 10, 8, 5, 5, 2.2, 3];
-
-function ribbon(b: Builder, pts: number[], halfW: number, lift: number, c: RGB, side = 0, sideDepth = 0, sideC?: RGB) {
-  // pts: flat [x, n, y] per vertex (local E, N, elevation)
-  const n = pts.length / 3;
-  if (n < 2) return;
-  const L: number[] = [], R: number[] = [];
-  const nx: number[] = [], ny: number[] = [];
-  for (let i = 0; i < n; i++) {
-    const i0 = Math.max(i - 1, 0), i1 = Math.min(i + 1, n - 1);
-    let d0x = pts[i * 3] - pts[i0 * 3], d0y = pts[i * 3 + 1] - pts[i0 * 3 + 1];
-    let d1x = pts[i1 * 3] - pts[i * 3], d1y = pts[i1 * 3 + 1] - pts[i * 3 + 1];
-    const l0 = Math.hypot(d0x, d0y), l1 = Math.hypot(d1x, d1y);
-    if (l0 > 1e-6) { d0x /= l0; d0y /= l0; } else { d0x = d1x / (l1 || 1); d0y = d1y / (l1 || 1); }
-    if (l1 > 1e-6) { d1x /= l1; d1y /= l1; } else { d1x = d0x; d1y = d0y; }
-    let tx = d0x + d1x, ty = d0y + d1y;
-    const tl = Math.hypot(tx, ty);
-    if (tl < 1e-6) { tx = d1x; ty = d1y; } else { tx /= tl; ty /= tl; }
-    // left normal of tangent
-    const px = -ty, py = tx;
-    const dot = px * -d1y + py * d1x;
-    const m = halfW / Math.max(0.5, Math.abs(dot) || 1);
-    nx.push(px * m); ny.push(py * m);
-  }
-  for (let i = 0; i < n; i++) {
-    const x = pts[i * 3], y = pts[i * 3 + 1], z = pts[i * 3 + 2] + lift;
-    L.push(b.v(x + nx[i], z, -(y + ny[i]), 0, 1, 0, c[0], c[1], c[2]));
-    R.push(b.v(x - nx[i], z, -(y - ny[i]), 0, 1, 0, c[0], c[1], c[2]));
-  }
-  for (let i = 0; i < n - 1; i++) {
-    b.t(R[i], R[i + 1], L[i + 1]);
-    b.t(R[i], L[i + 1], L[i]);
-  }
-  if (side && sideC) {
-    // bridge deck sides: vertical strips hanging below both edges
-    for (const s of [1, -1]) {
-      const top: number[] = [], bot: number[] = [];
-      for (let i = 0; i < n; i++) {
-        const x = pts[i * 3] + s * nx[i], y = pts[i * 3 + 1] + s * ny[i], z = pts[i * 3 + 2] + lift;
-        const l = Math.hypot(nx[i], ny[i]) || 1;
-        const onx = (s * nx[i]) / l, ony = (s * ny[i]) / l;
-        top.push(b.v(x, z + 0.4, -y, onx, 0, -ony, sideC[0], sideC[1], sideC[2]));
-        bot.push(b.v(x, z - sideDepth, -y, onx, 0, -ony, sideC[0] * 0.8, sideC[1] * 0.8, sideC[2] * 0.8));
-      }
-      for (let i = 0; i < n - 1; i++) {
-        if (s === 1) { b.t(bot[i], top[i + 1], bot[i + 1]); b.t(bot[i], top[i], top[i + 1]); } else { b.t(bot[i], bot[i + 1], top[i + 1]); b.t(bot[i], top[i + 1], top[i]); }
-      }
-    }
-  }
-}
-
-/** densify a polyline to `step` and drape non-bridge vertices onto the terrain mesh */
-function prepLine(xyz: Float32Array, a: number, b: number, step: number, terr: TerrainSampler, drape: boolean): number[] {
-  const out: number[] = [];
-  for (let i = a; i < b; i++) {
-    const x0 = xyz[i * 3], y0 = xyz[i * 3 + 1], z0 = xyz[i * 3 + 2];
-    if (i === b - 1) { out.push(x0, y0, drape ? terr.at(x0, y0) : z0); break; }
-    const x1 = xyz[i * 3 + 3], y1 = xyz[i * 3 + 4], z1 = xyz[i * 3 + 5];
-    const l = Math.hypot(x1 - x0, y1 - y0);
-    const k = Math.max(1, Math.ceil(l / step));
-    for (let s = 0; s < k; s++) {
-      const t = s / k;
-      const x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t;
-      out.push(x, y, drape ? terr.at(x, y) : z0 + (z1 - z0) * t);
-    }
-  }
-  return out;
-}
-
-export function buildRoads(a: Record<string, TypedArray>, terr: TerrainSampler, level: number): { mesh: MeshBuf | null; count: number } {
-  const off = a.r_off as Uint32Array | undefined;
-  if (!off || off.length < 2) return { mesh: null, count: 0 };
-  const xyz = a.r_xyz as Float32Array, cls = a.r_class as Uint8Array, wid = a.r_width as Float32Array, flags = a.r_flags as Uint8Array;
-  const n = off.length - 1;
-  const b = new Builder(xyz.length / 3 * 4, xyz.length / 3 * 8);
-  const step = terr.cell * 0.5;
-  const widen = [1, 1.6, 3.2][level] ?? 1;
-  let count = 0;
-  // draw minor classes first so majors win index order (same depth → later wins with LessEqual)
-  const order = Array.from({ length: n }, (_, i) => i).sort((p, q) => cls[q] - cls[p]);
-  for (const i of order) {
-    const f = flags ? flags[i] : 0;
-    if (f & 4) continue; // tunnel
-    const c = cls[i] ?? 5;
-    const bridge = (f & 2) !== 0;
-    let w = wid && wid[i] > 0 ? wid[i] : ROAD_W_DEFAULT[c] ?? 6;
-    w = Math.max(w, c <= 1 ? 10 : 2) * widen;
-    const pts = prepLine(xyz, off[i], off[i + 1], step, terr, !bridge);
-    const col = ROAD_RGB[c] ?? ROAD_RGB[5];
-    const rgb = shade(col, 1);
-    const lift = bridge ? 0.6 : 0.12 + (9 - c) * 0.025;
-    ribbon(b, pts, w / 2, lift, rgb, bridge ? 1 : 0, 1.4, [178, 172, 164]);
-    count++;
-  }
-  return { mesh: b.finish(), count };
-}
-
-const RAIL_BALLAST: RGB = [148, 136, 124];
-const RAIL_STEEL: RGB = [92, 88, 86];
-
-export function buildRail(a: Record<string, TypedArray>, terr: TerrainSampler, level: number): { mesh: MeshBuf | null; count: number } {
-  const off = a.l_off as Uint32Array | undefined;
-  if (!off || off.length < 2) return { mesh: null, count: 0 };
-  const xyz = a.l_xyz as Float32Array, cls = a.l_class as Uint8Array, flags = a.l_flags as Uint8Array;
-  const n = off.length - 1;
-  const b = new Builder(xyz.length / 3 * 8, xyz.length / 3 * 16);
-  const widen = [1, 2, 4][level] ?? 1;
-  let count = 0;
-  for (let i = 0; i < n; i++) {
-    const f = flags ? flags[i] : 0;
-    if (f & 4) continue; // tunnels (most subway) hidden in normal view
-    const c = cls[i] ?? 0;
-    const bridge = (f & 2) !== 0;
-    const pts = prepLine(xyz, off[i], off[i + 1], terr.cell * 0.5, terr, !bridge);
-    const tram = c === 4;
-    if (!tram) {
-      const ballastW = (c === 1 ? 2.8 : 3.6) * widen;
-      const bc: RGB = c === 2 ? [140, 132, 128] : c === 3 ? [138, 140, 128] : RAIL_BALLAST;
-      ribbon(b, pts, ballastW / 2, bridge ? 0.7 : 0.45, bc, bridge ? 1 : 0, 1.6, [170, 164, 156]);
-    }
-    if (level === 0) {
-      // two rails, standard gauge 1.435 m (TTC streetcar ~1.495 m; same look)
-      for (const s of [-0.7175, 0.7175]) {
-        const shifted = offsetLine(pts, s);
-        ribbon(b, shifted, 0.07, (bridge ? 0.7 : 0.45) + 0.12, RAIL_STEEL);
-      }
-    } else if (tram) {
-      ribbon(b, pts, 1.2 * widen, 0.5, RAIL_STEEL);
-    }
-    count++;
-  }
-  return { mesh: b.finish(), count };
-}
-
-function offsetLine(pts: number[], d: number): number[] {
-  const n = pts.length / 3;
-  const out = new Array<number>(pts.length);
-  for (let i = 0; i < n; i++) {
-    const i0 = Math.max(i - 1, 0), i1 = Math.min(i + 1, n - 1);
-    let tx = pts[i1 * 3] - pts[i0 * 3], ty = pts[i1 * 3 + 1] - pts[i0 * 3 + 1];
-    const l = Math.hypot(tx, ty) || 1;
-    tx /= l; ty /= l;
-    out[i * 3] = pts[i * 3] - ty * d;
-    out[i * 3 + 1] = pts[i * 3 + 1] + tx * d;
-    out[i * 3 + 2] = pts[i * 3 + 2];
-  }
-  return out;
-}
+export { buildRoads, buildRail } from './roads';
 
 // --------------------------------------------------------------------------- houses
 

@@ -105,7 +105,7 @@ export class InteractLayer implements Layer {
 
     this.pin = new MarkerOverlay(engine, { name: 'sel-pin', capacity: 1, shape: 'diamond', size: [5, 7, 5], minPixels: 13, depthMode: 'onTop', lift: 14 });
     const discGeo = new THREE.CylinderGeometry(0.5, 0.5, 1, 16).translate(0, 0.5, 0);
-    this.stopMarks = new MarkerOverlay(engine, { name: 'stops', capacity: 4000, shape: discGeo, size: [8, 1.2, 8], minPixels: 5, lift: 0.3 });
+    this.stopMarks = new MarkerOverlay(engine, { name: 'stops', capacity: 4000, shape: discGeo, size: [3, 0.4, 3], minPixels: 5, lift: 0.3 });
     this.routeHiUnder = new LineOverlay(engine, { name: 'route-hi-under', width: 11, depthMode: 'onTop', lift: 6, order: 128 });
     this.routeHi = new LineOverlay(engine, { name: 'route-hi', width: 6, depthMode: 'onTop', lift: 6, order: 129 });
 
@@ -887,7 +887,8 @@ export class InteractLayer implements Layer {
       this.stopMarks.setCount(vis.length);
       this.stopMarks.commit();
     }
-    this.stopMarks.setVisible(this.mode === 'free' || this.mode === 'follow' || this.mode === 'walk');
+    // stop discs are a bird's-eye picking aid; at street level they read as giant blobs
+    this.stopMarks.setVisible(((this.mode === 'free' || this.mode === 'follow') && ctx.altitude > 350) || this.mode === 'walk');
     this.stopMarks.update(ctx);
   }
 

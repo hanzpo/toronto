@@ -233,10 +233,18 @@ def prepare_lines(terrain):
             tu = np.full(n, bool(flags[j] & 4))
             cover = 14.0 if (kind[ids[j]] == 1 and d["cls"][ids[j]] == 2) else 9.0
             z[a:b] = grade.profile(P[a:b], z[a:b], br, tu, clearance=6.0 * lay, cover=cover * lay, ramp=60.0)
-        out[level] = dict(ids=ids, xy=P, z=z.astype(np.float32), off=loff)
+        # distance along each line at every vertex (pieces carry their start offset
+        # so lane-dash phase is continuous across tile borders)
+        seg = np.zeros(len(P))
+        seg[1:] = np.hypot(*np.diff(P, axis=0).T)
+        seg[loff[:-1]] = 0.0
+        cum = np.cumsum(seg)
+        cum -= np.repeat(cum[loff[:-1]], np.diff(loff))
+        out[level] = dict(ids=ids, xy=P, z=z.astype(np.float32), off=loff, cum=cum.astype(np.float32))
         print(f"  L{level}: {len(ids):,} lines, {len(P):,} verts")
     out["attr"] = dict(kind=kind, cls=d["cls"], width=d["width"], lanes=d["lanes"], flags=d["flags"],
-                       layer=d["layer"], id=d["id"], name=names)
+                       layer=d["layer"], id=d["id"], name=names,
+                       side=d["side"] if "side" in d.files else np.zeros(len(kind), np.uint8))
     # water/coast/runway lines for rasterisation
     wl = np.nonzero(kind >= 2)[0]
     out["raster_lines"] = dict(ids=wl, geoms=_linestrings([xy[off[i]:off[i + 1]] for i in wl]))
@@ -298,6 +306,110 @@ def prepare_areas():
     order = np.lexsort((-shapely.area(polys), np.array([PRIORITY.get(int(c), 5) for c in cls])))
     print(f"areas: {len(polys):,}")
     return dict(geoms=polys[order], cls=cls[order], tree=STRtree(polys[order]))
+
+
+def prepare_junctions():
+    """Road junctions (>= 3 arms of class <= 5) with per-arm box radius, for
+    junction-aware road markings, crosswalks, stop bars and signal heads.
+
+    An arm's box radius is how far along that arm the junction surface reaches:
+    the half-width of the widest road crossing it (divided by sin of the angle).
+    """
+    from scipy.spatial import cKDTree
+
+    d = np.load(geo.WORK / "osm_lines.npz", allow_pickle=True)
+    kind, cls, flags, width = d["kind"], d["cls"], d["flags"], d["width"]
+    off = _reduce_offsets(d["len"].astype(np.int64))
+    xy, nid = d["xy"], d["nid"]
+    ways = np.nonzero((kind == 0) & (cls <= 5) & ((flags & 4) == 0))[0]
+    lens = off[ways + 1] - off[ways]
+    vi = np.concatenate([np.arange(off[w], off[w + 1]) for w in ways])
+    wv = np.repeat(ways, lens)
+    first = np.zeros(len(vi), bool)
+    first[_reduce_offsets(lens)[:-1]] = True
+    last = np.zeros(len(vi), bool)
+    last[_reduce_offsets(lens)[1:] - 1] = True
+    # arms: towards the previous and the next vertex of the same way
+    a_v = np.concatenate([vi[~first], vi[~last]])
+    a_n = np.concatenate([vi[~first] - 1, vi[~last] + 1])
+    a_w = np.concatenate([wv[~first], wv[~last]])
+    dv = xy[a_n] - xy[a_v]
+    ang = np.arctan2(dv[:, 1], dv[:, 0])
+    hw = np.maximum(width[a_w], 2.0) / 2
+    uniq, inv, cnt = np.unique(nid[a_v], return_inverse=True, return_counts=True)
+    jmask = cnt >= 3
+    order = np.argsort(inv, kind="stable")
+    grp = _reduce_offsets(cnt)
+    sig_nodes = np.load(geo.WORK / "osm_nodes.npz")
+    nk, nxy, nnid = sig_nodes["kind"], sig_nodes["xy"], sig_nodes["id"]
+    sig_ids = set(nnid[nk == 0].tolist())
+    sig_tree = cKDTree(nxy[nk == 0]) if (nk == 0).any() else None
+    stop_xy = nxy[nk == 1]
+    stop_tree = cKDTree(stop_xy) if len(stop_xy) else None
+    J = dict(xy=[], osm=[], flags=[], arm_off=[0], arm_ang=[], arm_r=[], arm_hw=[], arm_flags=[])
+    for j in np.nonzero(jmask)[0]:
+        arms = order[grp[j]:grp[j + 1]]
+        p = xy[a_v[arms[0]]]
+        A, H = ang[arms], hw[arms]
+        f = 0
+        if int(uniq[j]) in sig_ids or (sig_tree is not None and sig_tree.query_ball_point(p, 20.0)):
+            f |= 1
+        stops = stop_tree.query_ball_point(p, 30.0) if stop_tree is not None else []
+        J["xy"].append(p)
+        J["osm"].append(float(uniq[j]))
+        J["flags"].append(f)
+        for k in range(len(arms)):
+            s = np.abs(np.sin(A - A[k]))
+            cross = (s > 0.35) & (np.arange(len(arms)) != k)
+            if cross.any():
+                r = float(np.max(np.minimum(H[cross] / s[cross], H[cross] * 2.5))) + 0.5
+            else:
+                others = np.arange(len(arms)) != k
+                r = float(H[others].max()) if others.any() else 0.0
+            af = 0
+            for si in stops:
+                q = stop_xy[si] - p
+                dist = math.hypot(q[0], q[1])
+                if dist > 2 and abs(math.remainder(math.atan2(q[1], q[0]) - A[k], math.tau)) < 0.5:
+                    af |= 1
+            J["arm_ang"].append(float(A[k]))
+            J["arm_r"].append(r)
+            J["arm_hw"].append(float(H[k]))
+            J["arm_flags"].append(af)
+        J["arm_off"].append(len(J["arm_ang"]))
+    out = dict(xy=np.array(J["xy"]).reshape(-1, 2), osm=np.array(J["osm"]), flags=np.array(J["flags"], np.uint8),
+               arm_off=np.array(J["arm_off"], np.int64), arm_ang=np.array(J["arm_ang"], np.float32),
+               arm_r=np.array(J["arm_r"], np.float32), arm_hw=np.array(J["arm_hw"], np.float32),
+               arm_flags=np.array(J["arm_flags"], np.uint8))
+    # group by level-0 tile, duplicating junctions within 80 m of a neighbour tile
+    groups: dict[tuple[int, int], list[int]] = {}
+    pad = 80.0
+    for i, (x, y) in enumerate(out["xy"]):
+        for tx in {math.floor((x - pad) / S0), math.floor((x + pad) / S0)}:
+            for ty in {math.floor((y - pad) / S0), math.floor((y + pad) / S0)}:
+                groups.setdefault((tx, ty), []).append(i)
+    print(f"junctions: {len(out['osm']):,} ({int((out['flags'] & 1).sum()):,} signalized)")
+    return out, {k: np.array(v, np.int64) for k, v in groups.items()}
+
+
+def prepare_points():
+    """Street points grouped by level-0 tile. Unmarked crossings are dropped."""
+    d = np.load(geo.WORK / "osm_nodes.npz")
+    kind = d["kind"]
+    var = d["var"] if "var" in d.files else np.zeros(len(kind), np.uint8)
+    keep = (kind != 2) | (var > 0)
+    nodes = dict(kind=kind[keep], var=var[keep], id=d["id"][keep].astype(np.float64), xy=d["xy"][keep])
+    tx = np.floor(nodes["xy"][:, 0] / S0).astype(np.int64)
+    ty = np.floor(nodes["xy"][:, 1] / S0).astype(np.int64)
+    order = np.lexsort((ty, tx))
+    k2 = np.stack([tx[order], ty[order]], 1)
+    groups = {}
+    if len(order):
+        brk = np.nonzero(np.any(np.diff(k2, axis=0) != 0, axis=1))[0] + 1
+        for chunk in np.split(np.arange(len(order)), brk):
+            groups[(int(k2[chunk[0], 0]), int(k2[chunk[0], 1]))] = order[chunk]
+    print(f"points: {len(order):,} by kind {np.bincount(nodes['kind'], minlength=5).tolist()}")
+    return nodes, groups
 
 
 def great_lakes():
@@ -481,6 +593,8 @@ def build_tile(level, tx, ty):
             arrays["r_width"] = attr["width"][gids].astype(np.float32)
             arrays["r_lanes"] = attr["lanes"][gids].astype(np.uint8)
             arrays["r_layer"] = attr["layer"][gids].astype(np.int8)
+            arrays["r_side"] = attr["side"][gids].astype(np.uint8)
+            arrays["r_v0"] = np.array([L["cum"][a] for _, a, _ in sel], dtype=np.float32)
             ni = []
             for g in gids:
                 nm = attr["name"][g]
@@ -492,6 +606,28 @@ def build_tile(level, tx, ty):
                     names.append(nm)
                 ni.append(name_idx.get(nm, 0xFFFF))
             arrays["r_name"] = np.array(ni, dtype=np.uint16)
+    # ---- street points (level 0): signals, stop signs, marked crossings, trees, lamps
+    if level == 0:
+        pi = G["points"].get((tx, ty))
+        if pi is not None and len(pi):
+            NP = G["nodes"]
+            arrays["p_xy"] = (NP["xy"][pi] - [x0, y0]).astype(np.float32).ravel()
+            arrays["p_kind"] = NP["kind"][pi].astype(np.uint8)
+            arrays["p_var"] = NP["var"][pi].astype(np.uint8)
+            arrays["p_osm"] = NP["id"][pi].astype(np.float64)
+        ji = G["jtiles"].get((tx, ty))
+        if ji is not None and len(ji):
+            J = G["junc"]
+            ao = J["arm_off"]
+            arms = np.concatenate([np.arange(ao[i], ao[i + 1]) for i in ji])
+            arrays["j_xy"] = (J["xy"][ji] - [x0, y0]).astype(np.float32).ravel()
+            arrays["j_osm"] = J["osm"][ji].astype(np.float64)
+            arrays["j_flags"] = J["flags"][ji]
+            arrays["j_arm_off"] = _reduce_offsets(ao[ji + 1] - ao[ji]).astype(np.uint32)
+            arrays["j_arm_ang"] = J["arm_ang"][arms]
+            arrays["j_arm_r"] = J["arm_r"][arms]
+            arrays["j_arm_hw"] = J["arm_hw"][arms]
+            arrays["j_arm_flags"] = J["arm_flags"][arms]
     path = geo.OUT / "tiles" / str(level) / f"{tx}_{ty}.bin.gz"
     size = tbn.write(path, arrays, level=level, tx=tx, ty=ty, names=names)
     return size
@@ -561,6 +697,9 @@ def main():
     G["lines"] = lines
     G["pieces"] = {lv: split_by_tile(lines[lv], lv) for lv in (0, 1, 2)}
     print(f"prepared lines in {time.time() - t0:.0f}s")
+    G["nodes"], G["points"] = prepare_points()
+    G["junc"], G["jtiles"] = prepare_junctions()
+    print(f"prepared junctions in {time.time() - t0:.0f}s")
     G["areas"] = prepare_areas()
     G["coast_water"] = great_lakes()
     print(f"prepared areas in {time.time() - t0:.0f}s")

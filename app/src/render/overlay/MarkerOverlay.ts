@@ -78,7 +78,6 @@ export class MarkerOverlay {
     const hasVC = !!base.attributes.color, hasLiv = !!base.attributes.livery;
     if (hasVC) g.setAttribute('color', base.attributes.color);
     if (hasLiv) g.setAttribute('livery', base.attributes.livery);
-    for (const k of ['lamp', 'sign', 'glass']) if (base.attributes[k]) g.setAttribute(k, base.attributes[k]);
     this.world = new Float64Array(this.capacity * 3);
     this.iPos = new THREE.InstancedBufferAttribute(new Float32Array(this.capacity * 4), 4);
     this.iCol = new THREE.InstancedBufferAttribute(new Float32Array(this.capacity * 3), 3);
@@ -114,7 +113,8 @@ export class MarkerOverlay {
       // vehicle models: proper sun/sky shading, glass, lamps (models/material.ts)
       const n = normalLocal, c = cos(iPos.w), s = sin(iPos.w);
       const nW = vec3(n.x.mul(c).add(n.z.mul(s)), n.y, n.x.mul(s).negate().add(n.z.mul(c)));
-      m.colorNode = vehicleShade(nW, { tint: iCol, tagged: !!base.attributes.lamp });
+      // far markers skip lamp/sign/glass: WebGPU allows at most 8 vertex buffers
+      m.colorNode = vehicleShade(nW, { tint: iCol, tagged: false });
     } else {
       m.colorNode = vec4(vc.mul(tint).mul(mix(float(0.62), float(1.08), normalLocal.y.mul(0.5).add(0.5))), 1);
     }

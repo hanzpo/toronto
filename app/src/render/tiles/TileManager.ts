@@ -4,6 +4,8 @@ import * as THREE from 'three/webgpu';
 import type { WorkerIn, WorkerOut } from '../../workers/tileWorker';
 import type { MeshBuf, TileMeshes } from '../../workers/meshing';
 import { GroundPage, GROUND_LAYERS, vertexColorMaterial } from './materials';
+import { roadMaterial } from './roadMaterial';
+import type { StreetBuf } from '../../workers/street';
 import { HousePools } from './houses';
 import type { FrameContext } from '../../engine/types';
 import { useApp } from '../../state/store';
@@ -43,6 +45,8 @@ export interface Tile {
   maxH: number;
   houses: TileMeshes['houses'];
   housesShown: boolean;
+  /** street furniture placements (level 0), consumed by StreetLayer */
+  street: StreetBuf | null;
   page: GroundPage | null;
   layer: number;
   bytes: number;
@@ -59,10 +63,16 @@ export interface Tile {
 
 const key = (L: number, tx: number, ty: number) => `${L}/${tx}/${ty}`;
 
+function attrBytes(m: MeshBuf): number {
+  let b = 0;
+  if (m.attrs) for (const k in m.attrs) b += m.attrs[k].array.byteLength;
+  return b;
+}
+
 function meshBytes(r: TileMeshes): number {
   let b = 0;
   for (const m of [r.terrain, r.buildings, r.roads, r.rail]) {
-    if (m) b += m.position.byteLength + m.normal.byteLength + m.index.byteLength + (m.color?.byteLength ?? 0);
+    if (m) b += m.position.byteLength + m.normal.byteLength + m.index.byteLength + (m.color?.byteLength ?? 0) + attrBytes(m);
   }
   return b;
 }
@@ -101,8 +111,9 @@ export class TileManager {
   private vel = { e: 0, n: 0, h: 0, lastE: NaN, lastN: NaN, lastH: NaN };
   private pfList: { t: Tile; d: number }[] = [];
   readonly buildingMat = vertexColorMaterial('buildings', { emissiveWindows: true });
-  readonly roadMat = vertexColorMaterial('roads', { pull: 0.0009, pullConst: 0.25 });
-  readonly railMat = vertexColorMaterial('rail', { pull: 0.0011, pullConst: 0.35 });
+  /** one street material for roads, sidewalks and rail (shared shader) */
+  readonly roadMat = roadMaterial('roads');
+  readonly railMat = this.roadMat;
   bytes = 0;
   readyCount = 0;
   loadMs: number[] = [];
@@ -131,7 +142,7 @@ export class TileManager {
         const t: Tile = {
           key: key(l, tx, ty), L: l, tx, ty, S, state: 'none', jobId: 0, group: null, terrain: null,
           buildings: null, roads: null, rail: null, heights: null, grid: 0, minH: 0, maxH: 120,
-          houses: null, housesShown: false, page: null, layer: -1, bytes: 0, lastUsed: 0, drawn: false,
+          houses: null, housesShown: false, street: null, page: null, layer: -1, bytes: 0, lastUsed: 0, drawn: false,
           requestedAt: 0, priority: 0, kids: null, counts: null, retryAt: 0, refined: false,
         };
         this.tiles.set(t.key, t);
@@ -449,6 +460,7 @@ export class TileManager {
     const nb = new THREE.InterleavedBuffer(m.normal, 4);
     g.setAttribute('normal', new THREE.InterleavedBufferAttribute(nb, 3, 0, true));
     if (m.color) g.setAttribute('color', new THREE.BufferAttribute(m.color, 4, true));
+    if (m.attrs) for (const k in m.attrs) g.setAttribute(k, new THREE.BufferAttribute(m.attrs[k].array, m.attrs[k].size));
     g.setIndex(new THREE.BufferAttribute(m.index, 1));
     g.boundingSphere = sphere.clone();
     const b = new THREE.Box3();
@@ -471,7 +483,7 @@ export class TileManager {
     const sphere = new THREE.Sphere(new THREE.Vector3(S / 2, (r.minH + top) / 2, -S / 2), Math.hypot(S / 2, S / 2, (top - r.minH) / 2));
     let bytes = 0;
     const count = (m: MeshBuf | null) => {
-      if (m) bytes += m.position.byteLength + m.normal.byteLength + m.index.byteLength + (m.color?.byteLength ?? 0);
+      if (m) bytes += m.position.byteLength + m.normal.byteLength + m.index.byteLength + (m.color?.byteLength ?? 0) + attrBytes(m);
     };
 
     // terrain
@@ -509,6 +521,7 @@ export class TileManager {
     t.heights = r.heights;
     t.grid = r.grid;
     t.houses = r.houses;
+    t.street = r.street;
     t.counts = r.counts;
     if (r.houses) bytes += r.houses.count * 76;
     t.bytes = bytes;
@@ -530,7 +543,7 @@ export class TileManager {
     if (t.page && t.layer >= 0) t.page.release(t.layer);
     this.bytes -= t.bytes;
     Object.assign(t, {
-      group: null, terrain: null, buildings: null, roads: null, rail: null, heights: null, houses: null,
+      group: null, terrain: null, buildings: null, roads: null, rail: null, heights: null, houses: null, street: null,
       page: null, layer: -1, bytes: 0, state: 'none', counts: null,
     });
     this.readyCount--;

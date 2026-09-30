@@ -48,8 +48,9 @@ function walls(g: GeoBuilder, eave: number, x0 = -0.5, x1 = 0.5, z0 = -0.5, z1 =
   for (let i = 0; i < 4; i++) {
     const p = b[i], q = b[(i + 1) % 4];
     // outward faces: CCW seen from outside
-    g.tri([p[0], 0, p[2]], [q[0], 0, q[2]], [q[0], eave, q[2]], WALL_LO);
-    g.tri([p[0], 0, p[2]], [q[0], eave, q[2]], [p[0], eave, p[2]], WALL);
+    // walls reach 0.25 (×height) below the base so houses never float on slopes
+    g.tri([p[0], -0.25, p[2]], [q[0], -0.25, q[2]], [q[0], eave, q[2]], WALL_LO);
+    g.tri([p[0], -0.25, p[2]], [q[0], eave, q[2]], [p[0], eave, p[2]], WALL);
   }
 }
 
