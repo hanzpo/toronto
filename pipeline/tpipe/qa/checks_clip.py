@@ -322,10 +322,5 @@ def run(B: Block, cats: set) -> list[dict]:
 
 
 def ribbon_quads_cw(cw: Carriageway):
-    dx, dy = cw.x1 - cw.x0, cw.y1 - cw.y0
-    ln = np.hypot(dx, dy) + 1e-9
-    nx, ny = -dy / ln * cw.hw, dx / ln * cw.hw
-    q = np.stack([np.stack([cw.x0 + nx, cw.y0 + ny], 1), np.stack([cw.x1 + nx, cw.y1 + ny], 1),
-                  np.stack([cw.x1 - nx, cw.y1 - ny], 1), np.stack([cw.x0 - nx, cw.y0 - ny], 1)], 1)
-    return shapely.polygons(q)
-
+    """Drawn pavement quads of the carriageway segments (per-vertex r_pl / r_pr on network-model tiles)."""
+    return cw.quads()

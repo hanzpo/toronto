@@ -314,8 +314,16 @@ reproduced from OSM with `fillet` and the class radii.
 Several checks were adapted to the network-model tiles:
 
 - Sidewalks are read from `r_sw`.
-- Elevations are the drawn ones: `r_xyz` z, not terrain draping.
-- `r_width` is the true pavement width.
+- Elevations are the drawn ones: terrain + `r_dz` on graded vertices, blending to
+  the solved `r_xyz` z on decks and embankments (as roads.ts draws them).
+- `r_width` is the true pavement width. The carriageway footprint (props in
+  lanes, trees on roads, buildings / houses / landmarks over roads) uses the
+  per-vertex edges `r_pl` / `r_pr` and the junction surfaces `js_*`.
+- Pieces of one OSM way that meet end to end (split at a bridge, tunnel or
+  class change) are each other's neighbours: a deck joined only by its own
+  approach piece is not dangling.
+- Bridge lanes are measured between the edge lines (`r_el + r_er`) over
+  nF + nB + aux lanes from `r_mk`.
 
 Some findings are expected:
 

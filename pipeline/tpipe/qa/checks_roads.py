@@ -148,8 +148,20 @@ class RoadCtx:
         for k, lst in enumerate(lists):
             p = E["p"][k]
             o = self.osm[p]
-            vs = np.array([v for v in lst if self.osm[self.vp[v]] != o], dtype=np.int64)
-            self.end_others.append(vs)
+            v0 = int(E["v"][k])
+            d0 = self.dir_at_end(v0)
+            vs = []
+            for v in lst:
+                if self.osm[self.vp[v]] != o:
+                    vs.append(v)
+                elif self.is_end[v] and self.vp[v] != p:
+                    # network-model tiles split one OSM way into pieces where class / bridge / tunnel
+                    # status changes: the next piece of the same way continues from this end (a copy of
+                    # this piece in a neighbouring tile points the same way and is not a neighbour)
+                    d1 = self.dir_at_end(int(v))
+                    if d0[0] * d1[0] + d0[1] * d1[1] < 0:
+                        vs.append(v)
+            self.end_others.append(np.array(vs, dtype=np.int64))
 
     def continuation(self):
         """Degree-2 continuations: (end index k, own piece, other piece, other vertex)."""
@@ -173,6 +185,33 @@ class RoadCtx:
         dx, dy = R.X[nb] - R.X[v], R.Y[nb] - R.Y[v]
         ln = math.hypot(dx, dy) or 1.0
         return dx / ln, dy / ln
+
+    def width_at(self, v: int, p: int) -> float:
+        """Drawn pavement width at vertex v of piece p: r_pl + r_pr on network-model tiles (tapers
+        are per vertex, so a piece's median width says little about its ends), else the piece width."""
+        R = self.R
+        pl, pr = R.vattrs.get("pl"), R.vattrs.get("pr")
+        if pl is not None and len(pl) and np.isfinite(pl[v]) and np.isfinite(pr[v]) and pl[v] + pr[v] > 0:
+            return float(pl[v] + pr[v])
+        return float(self.w[p])
+
+    def lane_width(self, p: int, w: float, lanes: int) -> tuple[float, int]:
+        """(width, lane count) the lanes occupy on piece p. Network-model tiles: the edge lines
+        (r_el + r_er) and nF + nB + auxiliary lanes from r_mk, so shoulders, bike lanes and gores
+        (part of the pavement width r_width) don't count as lane width; older tiles: (w, lanes)."""
+        R = self.R
+        el, er, mk = R.vattrs.get("el"), R.vattrs.get("er"), R.vattrs.get("mk")
+        if el is None or er is None or mk is None or not len(el):
+            return w, lanes
+        a, b = R.off[p], R.off[p + 1]
+        e = el[a:b] + er[a:b]
+        m = mk[a:b]
+        ok = np.isfinite(e) & np.isfinite(m)
+        if not ok.any():
+            return w, lanes
+        m = m[ok].astype(np.int64)
+        n = (m & 15) + ((m >> 4) & 15) + ((m >> 8) & 3) + ((m >> 10) & 3)
+        return float(np.median(e[ok])), int(np.median(n)) if np.median(n) > 0 else lanes
 
     def name(self, p: int) -> str:
         B = self.B
@@ -214,7 +253,7 @@ def check_connections(ctx: RoadCtx, cats: set) -> list[dict]:
         oa, ob = ctx.osm[pa], ctx.osm[pb]
         if oa > ob:  # handle each pair once (from the lower id's end)
             continue
-        wa, wb = ctx.w[pa], ctx.w[pb]
+        wa, wb = ctx.width_at(va, pa), ctx.width_at(vb, pb)
         bearing = math.atan2(-da[1], -da[0])
         z = float(B.terrain(x, y))
         pair = (min(oa, ob), max(oa, ob))
@@ -259,7 +298,7 @@ def check_connections(ctx: RoadCtx, cats: set) -> list[dict]:
                 else:
                     # the joining road's own elevation at the shared node (approach embankments
                     # carry solved elevations; for draped roads this is the terrain)
-                    zr = float(np.median(R.Z[others]))
+                    zr = float(np.median(R.ZD[others]))
                     what = "the road it joins"
                 dz = zb - zr
                 if abs(dz) > DECK_STEP:
@@ -299,10 +338,11 @@ def check_connections(ctx: RoadCtx, cats: set) -> list[dict]:
                                        f"bridge {_lbl(ctx, p)} is {wb:.1f} m wide vs {wa:.1f} m approaches ({r:.2f}x)",
                                        key=("bridge_width_anomaly", o), bearing=bearing))
                     continue
-            if lanes > 0 and wb / lanes > BRIDGE_PER_LANE:
-                out.append(finding("bridge_width_anomaly", "wide_per_lane", (wb / lanes - BRIDGE_PER_LANE) * _cls_w(ctx.cls[p]) / 2,
+            wl, lanes = ctx.lane_width(p, wb, lanes)
+            if lanes > 0 and wl / lanes > BRIDGE_PER_LANE:
+                out.append(finding("bridge_width_anomaly", "wide_per_lane", (wl / lanes - BRIDGE_PER_LANE) * _cls_w(ctx.cls[p]) / 2,
                                    x, y, R.Z[mid], [o],
-                                   f"bridge {_lbl(ctx, p)}: {wb:.1f} m for {lanes} lanes = {wb / lanes:.1f} m/lane",
+                                   f"bridge {_lbl(ctx, p)}: {wl:.1f} m for {lanes} lanes = {wl / lanes:.1f} m/lane",
                                    key=("bridge_width_anomaly", o), bearing=bearing))
     return out
 
@@ -480,10 +520,10 @@ def check_crossings(ctx: RoadCtx, cats: set) -> list[dict]:
     src = {"r": R, "l": L}
     X0 = np.concatenate([src[t].X[s] for t, s, _ in segs])
     Y0 = np.concatenate([src[t].Y[s] for t, s, _ in segs])
-    Z0 = np.concatenate([src[t].Z[s] for t, s, _ in segs])
+    Z0 = np.concatenate([src[t].ZD[s] for t, s, _ in segs])
     X1 = np.concatenate([src[t].X[s + 1] for t, s, _ in segs])
     Y1 = np.concatenate([src[t].Y[s + 1] for t, s, _ in segs])
-    Z1 = np.concatenate([src[t].Z[s + 1] for t, s, _ in segs])
+    Z1 = np.concatenate([src[t].ZD[s + 1] for t, s, _ in segs])
     P = np.concatenate([p for _, _, p in segs])
     osm = np.where(kind == 0, ctx.osm[np.where(kind == 0, P, 0)] if R.n else 0,
                    L.attrs["osm"][np.where(kind == 1, P, 0)] if L.n else 0)
@@ -517,12 +557,8 @@ def check_crossings(ctx: RoadCtx, cats: set) -> list[dict]:
     px, py = X0[i] + dxa * ta, Y0[i] + dya * ta
     za = Z0[i] + (Z1[i] - Z0[i]) * ta
     zb = Z0[j] + (Z1[j] - Z0[j]) * tb
-    # drawn elevation: old tiles drape non-bridges on the terrain; network-model tiles
-    # (tpipe.roadnet, r_pl present) draw every vertex at its solved elevation (embankments too)
-    if not any("r_pl" in d for d in B.data):
-        tz = B.terrain(px, py)
-        za = np.where(flg[i] & F_BRIDGE, za, np.where(np.isfinite(tz), tz, za))
-        zb = np.where(flg[j] & F_BRIDGE, zb, np.where(np.isfinite(tz), tz, zb))
+    # drawn elevation (Lines.ZD): old tiles drape non-bridges on the terrain; network-model tiles drape
+    # on the terrain + dz where graded and blend to the solved z on decks and high embankments
     # shared node near the crossing -> real junction / level crossing
     allv = [np.column_stack([R.X, R.Y])] if R.n else []
     allo = [ctx.osm[ctx.vp]] if R.n else []

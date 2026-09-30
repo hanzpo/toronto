@@ -43,6 +43,27 @@ def _world(L: dict, ring) -> Polygon | None:
 
 
 ROAD_MIN_AREA = 5.0  # m2 of carriageway under a landmark footprint
+ROAD_CLEAR = 4.5  # m: a model part whose underside is this far over the road surface passes over it
+# landmarks whose client builder draws the OSM building parts (landmarks/kit2.ts addHeritage: culture.ts,
+# uoft.ts, waterfront.ts): the model is those parts at their min_height, so archways and cantilevers
+# (Legislature carriage arches, the AGO Galleria over Dundas) stand clear of the road under them
+PARTS_BUILT = {"ago", "hamilton_city_hall", "meridian_hall", "reference_library", "st_lawrence_market",
+               "convocation_hall", "knox_college", "ontario_legislature", "robarts_library", "rom_heritage",
+               "university_college", "coliseum"}
+
+
+def _drawn_parts(L: dict) -> list:
+    """(world polygon, underside above the landmark base) of the OSM parts the builder draws."""
+    out = []
+    for p in L.get("osmParts") or []:
+        if p.get("outline"):
+            continue  # addHeritage skips outlines (the parts inside draw the building)
+        g = _world(L, p.get("poly"))
+        if g is None:
+            continue
+        minh = p.get("minH") or ((p.get("minLevel") or 0) * 4.0)
+        out.append((g, float(p.get("z") or 0.0) + float(minh)))
+    return out
 
 
 def run_global(cats: set, bbox=None) -> list[dict]:
@@ -84,7 +105,8 @@ def run_global(cats: set, bbox=None) -> list[dict]:
             blocks[bk] = (B.buildings(), B.houses(), Carriageway(B))
         (polys, A), (hp, H), cw = blocks[bk]
         if "landmark_road_overlap" in cats and cw.ok and "span" not in L:
-            out += _roads(L, ground_of.get(L["id"], geom), cw)
+            parts = _drawn_parts(L) if L["id"] in PARTS_BUILT and L["id"] not in ground_of else None
+            out += _roads(L, ground_of.get(L["id"], geom), cw, parts or None)
         if "landmark_overlap" not in cats:
             continue
         sup = {int(o) for o in L.get("suppress", [])}
@@ -119,17 +141,27 @@ def run_global(cats: set, bbox=None) -> list[dict]:
     return out
 
 
-def _roads(L: dict, geom, cw) -> list[dict]:
+def _roads(L: dict, geom, cw, parts: list | None = None) -> list[dict]:
     """Carriageway ribbons drawn at grade inside the landmark model footprint (the model
-    stands in the road). Bridge decks higher than the landmark's base + 4.5 m pass over."""
+    stands in the road). Bridge decks higher than the landmark's base + 4.5 m pass over.
+    With `parts` (the drawn OSM parts, PARTS_BUILT) only the parts whose underside is less than
+    ROAD_CLEAR over the road surface count."""
     out = []
     q = ribbon_quads_cw(cw)
-    hit = np.nonzero(shapely.intersects(q, geom))[0]
     base = float(L.get("base", 0.0))
+    if parts:
+        geom = shapely.union_all([g for g, _ in parts])
+    hit = np.nonzero(shapely.intersects(q, geom))[0]
     hit = hit[~(cw.bridge[hit] & (cw.z[hit] - base > 4.5))]
     if len(hit) == 0:
         return out
-    ar = shapely.area(shapely.intersection(q[hit], geom))
+    if parts:
+        pg = np.array([g for g, _ in parts], dtype=object)
+        under = np.array([b for _, b in parts])
+        low = [shapely.union_all(pg[(base + under - cw.z[s] < ROAD_CLEAR) & shapely.intersects(pg, q[s])]) for s in hit]
+        ar = shapely.area(shapely.intersection(q[hit], np.array(low, dtype=object)))
+    else:
+        ar = shapely.area(shapely.intersection(q[hit], geom))
     per: dict = {}
     for k, s in enumerate(hit):
         t = per.setdefault(int(cw.osm[s]), [0.0, s, 0.0])
@@ -140,6 +172,8 @@ def _roads(L: dict, geom, cw) -> list[dict]:
         if area < ROAD_MIN_AREA:
             continue
         c = shapely.intersection(q[s], geom).centroid
+        if c.is_empty:
+            c = q[s].centroid
         out.append(finding("landmark_road_overlap", "carriageway", area / 5, c.x, c.y, base, [o],
                            f"{L['name']} model footprint covers {area:.0f} m2 of carriageway (way {o}, class {int(cw.cls[s])})",
                            key=("landmark_road_overlap", L["id"], o),

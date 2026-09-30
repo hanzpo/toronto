@@ -236,7 +236,11 @@ const RANGE: Record<number, number> = {
   [UK.UMBRELLA]: 600, [UK.CHIMNEY]: 700, [UK.DORMER]: 700, [UK.HOARD]: 650, [UK.DUMPSTER]: 500, [UK.TRAILER]: 800,
   [UK.EXCAVATOR]: 800, [UK.GARAGE]: 650, [UK.POLE]: 650, [UK.WIRE]: 450,
   [UK.RTU]: 1000, [UK.COOLING]: 1600, [UK.WATERTANK]: 1800,
-  [UK.MAST_H]: 520, [UK.JIB_H]: 520, [UK.MAST_L]: 520, [UK.JIB_L]: 520, [UK.CORE]: 4000, [UK.SLAB]: 550, [UK.FORMWORK]: 4000,
+  // lattice cranes hand over to the far silhouettes at CRANE_NEAR *horizontal* distance, but the
+  // material collapses per instance by 3D distance: at 520 a jib 150+ m up (farther than its mast
+  // base) shrank toward its pivot while the mast shrank less, leaving jib + counterweights floating
+  // in the sky. Keep the near window beyond any 3D distance a near crane can have.
+  [UK.MAST_H]: 900, [UK.JIB_H]: 900, [UK.MAST_L]: 900, [UK.JIB_L]: 900, [UK.CORE]: 4000, [UK.SLAB]: 550, [UK.FORMWORK]: 4000,
 };
 /** rooftop kit: drawn over shorter ranges near the ground, and not at all on roofs above the eye (behind the parapet) */
 const ROOFTOP = new Set<number>([UK.RTU, UK.FAN, UK.HATCH, UK.VENT, UK.UMBRELLA, UK.PLANTER, UK.COOLING, UK.WATERTANK, UK.CHIMNEY, UK.DORMER]);

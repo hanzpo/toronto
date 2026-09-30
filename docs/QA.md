@@ -66,13 +66,13 @@ Thresholds are constants at the top of each module.
 
 | category | sub-types | rule |
 |---|---|---|
-| road_width_step | no_taper | Two ways meet end to end (degree-2 node, continuing within 45°), and the drawn width jumps ≥ 1.0 m and ≥ 15 % (`WIDTH_STEP_*`). The renderer has no taper, so every such step is a hard notch (screenshot 1). |
-| bridge_width_anomaly | wider/narrower_than_approach, wide_per_lane | The deck is ≥ 1.3× (or ≤ 1/1.3×) the median approach width and ≥ 2 m different, or wider than 5.5 m per lane (screenshot 3). |
+| road_width_step | no_taper | Two ways meet end to end (degree-2 node, continuing within 45°), and the drawn width jumps ≥ 1.0 m and ≥ 15 % (`WIDTH_STEP_*`). The renderer has no taper, so every such step is a hard notch (screenshot 1). Network-model tiles: the width is `r_pl + r_pr` at the joint vertex (tapers are per vertex), and pieces of one OSM way that meet end to end count too. |
+| bridge_width_anomaly | wider/narrower_than_approach, wide_per_lane | The deck is ≥ 1.3× (or ≤ 1/1.3×) the median approach width and ≥ 2 m different, or wider than 5.5 m per lane (screenshot 3). Approaches include the next piece of the same OSM way (network-model tiles split ways at bridge ends). Per lane uses the edge-line width (`r_el + r_er`) over nF + nB + aux lanes (`r_mk`), so shoulders and bike lanes don't count. |
 | road_overlap_nonjunction | ramp_merge, parallel_ways, crossing_ribbons | Flat-capped ribbon quads of different ways overlap by ≥ 12 m² per way pair, within 3 m vertically, outside every junction box (`j_arm_r` + 2 m) and every shared-node disc (1.5× the widest half-width + 2 m). Lane markings then cross lanes (screenshot 2). |
-| flat_crossing | road_road, road_rail, rail_rail, path_highway | Centrelines cross with no shared node within 1 m, and neither side is a bridge. The drawn vertical separation is < 4.5 m (road) or < 5.5 m (rail). Tunnels and tram tracks are skipped, and footways count only when they cross a motorway or trunk (screenshot 5). |
+| flat_crossing | road_road, road_rail, rail_rail, path_highway | Centrelines cross with no shared node within 1 m, and neither side is a bridge. The drawn vertical separation is < 4.5 m (road) or < 5.5 m (rail). Drawn z is what roads.ts draws: terrain + `dz` on graded vertices, blending to the solved z on decks and embankments over 1.5 m. Tunnels and tram tracks are skipped, and footways count only when they cross a motorway or trunk (screenshot 5). |
 | deck_below_clearance | road, rail | As above, but one side is a bridge whose deck is too low (tracks or roads cut through the deck). |
 | junction_hardware_on_grade_sep | junction_on_motorway, junction_on_bridge, node_on_motorway | A junction box (stop lines and crosswalks), or a signal, crossing or stop node, sits on a non-link motorway or a bridge deck. |
-| elevation_jump | deck_floats, deck_dives, dangling_deck, steep_deck, steep_deck_rail | A deck end differs from the draped road or deck it joins by > 0.6 m, an unconnected deck end is > 1.5 m up, or a deck segment ≥ 3 m long is steeper than 12 %. This covers Gardiner ramps that float or dive. |
+| elevation_jump | deck_floats, deck_dives, dangling_deck, steep_deck, steep_deck_rail | A deck end differs from the drawn road or deck it joins by > 0.6 m, an unconnected deck end is > 1.5 m up, or a deck segment ≥ 3 m long is steeper than 12 %. This covers Gardiner ramps that float or dive. A deck end joined only by the next piece of its own OSM way (the approach embankment) is connected, not dangling. |
 | road_below_terrain | deck, rail_deck | A bridge deck, sampled every 4 m, is more than 0.5 m under the terrain. Non-bridge roads are draped, so they can't be under it. |
 | duplicate_footway | sidewalk_footway, parallel_path | At least 25 m and at least 50 % of a footway lies within half-width + sidewalk + 2 m of a road that already draws a sidewalk, parallel within 20°. |
 | footway_as_road | too_wide, thin_footbridge | A path is drawn wider than 3 m, or a footbridge deck narrower than 2.5 m (screenshot 7). |
@@ -83,7 +83,7 @@ Thresholds are constants at the top of each module.
 
 | category | sub-types | rule |
 |---|---|---|
-| prop_in_lane | signal_pole, lamp | The client-placed pole or lamp is more than 0.3 m inside a carriageway (classes 0–6) at its own level (screenshot 4). |
+| prop_in_lane | signal_pole, lamp | The client-placed pole or lamp is more than 0.3 m inside the drawn carriageway (classes 0–6) at its own level (screenshot 4): the segment pavement between the per-vertex edges `r_pl` / `r_pr` (flat caps), or a junction surface (`js_*`). Props on a raised corner sidewalk (`jw_*`) or a curbed median (`md_*`) are fine. |
 | tree_on_road | trunk_in_carriageway, crown_through_deck, crown_over_highway | The trunk is more than 0.2 m inside a ribbon, including ramps and decks; the crown pokes through a deck lower than the tree; or the crown reaches ≥ 1.5 m over motorway or trunk lanes. |
 | tree_on_rail | trunk_on_track | The trunk is within 3 m of a track centreline. Crowns over tracks are `tree_over_track`. |
 | tree_on_airfield / tree_on_water | trunk | The land cover under the trunk is aeroway, runway or airfield grass, or water. |
@@ -135,7 +135,7 @@ b_min`) is at least 5 m above the rail, or 4.5 m above the road, passes over it
 | house_overlap | building, road, house | A house instance overlaps a building, a carriageway ribbon or another house by at least 6 m². |
 | vehicle_path_through_building | bus, streetcar, train | More than 16 m of bus, streetcar or LRT shape samples, or rail pattern shape samples (at 8 m spacing, surface only), lie more than 0.5 m inside a footprint the vehicle doesn't pass under. |
 | lot_over_building | building | A parking lot polygon (`gp_class 11`, which gets stalls, parked cars and lamps) covers at least 20 m² of a building. Parking structures and roofs are exempt. |
-| landmark_road_overlap | carriageway | A landmark model footprint covers at least 5 m² of carriageway drawn at grade. Bridge landmarks (with `span`) are skipped. |
+| landmark_road_overlap | carriageway | A landmark model footprint covers at least 5 m² of carriageway drawn at grade. Bridge landmarks (with `span`) are skipped. For landmarks whose builder draws the OSM parts (`PARTS_BUILT`, `addHeritage`), only the parts whose underside is less than 4.5 m over the road count, so archways and cantilevers pass. Covered roadways count only their ground masses and posts. |
 
 ### Near stations and owners
 

@@ -1085,8 +1085,10 @@ export class InteractLayer implements Layer {
       this.stopMarks.setCount(vis.length);
       this.stopMarks.commit();
     }
-    // stop discs are a bird's-eye picking aid; at street level they read as giant blobs
-    this.stopMarks.setVisible(((this.mode === 'free' || this.mode === 'follow') && ctx.altitude > 350) || this.mode === 'walk');
+    // stop discs are an analytics / bird's-eye picking aid: at street level they read as giant
+    // blobs, and in normal mode the min-pixel discs speckle the city with red and yellow dots
+    // (stops stay pickable without them)
+    this.stopMarks.setVisible(((this.mode === 'free' || this.mode === 'follow') && ctx.altitude > 350 && ctx.analyticsMode) || this.mode === 'walk');
     this.stopMarks.update(ctx);
   }
 

@@ -142,7 +142,12 @@ def _signal_poles(B: Block):
 
 
 class Carriageway:
-    """Owned road segments (classes 0-6, no tunnels) with ribbon half-width and drawn z."""
+    """Owned road segments (classes 0-6, no tunnels) as drawn by workers/roads.ts: network-model tiles
+    offset the pavement edges per vertex, `r_pl` left and `r_pr` right of the centreline (asymmetric on
+    one-way pairs, tapers, merges); older tiles draw the symmetric piece width. `hw` is the reference
+    half-width of a segment (the larger side); `near` returns an *equivalent* centreline distance
+    d = hw - depth, where depth is how far the point is inside the drawn edge on its own side (flat caps:
+    a point past a segment end is never inside it; the next segment covers it)."""
 
     def __init__(self, B: Block, max_cls: int = 6):
         R = B.roads
@@ -152,10 +157,25 @@ class Carriageway:
         c, f = R.attrs["class"], R.attrs["flags"]
         sp = R.seg_piece
         m = (c[sp] <= max_cls) & ((f[sp] & F_TUNNEL) == 0)
-        self.seg, self.sp = R.seg[m], sp[m]
+        s = R.seg[m]
+        sp = sp[m]
+        # zero-length segments (duplicated lane-change vertices) draw nothing
+        s_ok = np.hypot(R.X[s + 1] - R.X[s], R.Y[s + 1] - R.Y[s]) > 1e-3
+        self.seg, self.sp = s[s_ok], sp[s_ok]
         s = self.seg
         self.x0, self.y0, self.x1, self.y1 = R.X[s], R.Y[s], R.X[s + 1], R.Y[s + 1]
-        self.hw = R.attrs["w"][self.sp] / 2
+        hw_piece = R.attrs["w"][self.sp] / 2
+        pl, pr = R.vattrs.get("pl"), R.vattrs.get("pr")
+
+        def side(a, k):
+            if a is None or not len(a):
+                return hw_piece
+            v = a[k]
+            return np.where(np.isfinite(v) & (v > 0), v, hw_piece)
+
+        self.pl0, self.pl1 = side(pl, s), side(pl, s + 1)
+        self.pr0, self.pr1 = side(pr, s), side(pr, s + 1)
+        self.hw = np.maximum.reduce([self.pl0, self.pl1, self.pr0, self.pr1])
         self.cls = c[self.sp]
         self.flags = f[self.sp]
         self.osm = R.attrs["osm"][self.sp]
@@ -169,15 +189,42 @@ class Carriageway:
                 np.stack([np.stack([self.x0, self.y0], 1), np.stack([self.x1, self.y1], 1)], 1)))
             self.hwmax = float(self.hw.max())
 
+    def depth(self, px, py, b):
+        """Depth (m) of points inside the drawn pavement of segments b (negative = outside)."""
+        dx, dy = self.x1[b] - self.x0[b], self.y1[b] - self.y0[b]
+        ln = np.hypot(dx, dy)
+        ux, uy = dx / ln, dy / ln
+        rx, ry = px - self.x0[b], py - self.y0[b]
+        along = rx * ux + ry * uy
+        lat = ux * ry - uy * rx  # > 0: left of the direction of travel
+        t = np.clip(along / ln, 0, 1)
+        hl = self.pl0[b] + (self.pl1[b] - self.pl0[b]) * t
+        hr = self.pr0[b] + (self.pr1[b] - self.pr0[b]) * t
+        ex = np.abs(lat) - np.where(lat > 0, hl, hr)  # lateral distance outside the edge
+        over = np.maximum(np.maximum(-along, along - ln), 0)  # past a segment end
+        return np.where(over > 0, -np.hypot(np.maximum(ex, 0), over), -ex)
+
     def near(self, px, py, extra):
-        """(point idx, seg idx, distance) for points within hw+extra of a segment."""
+        """(point idx, seg idx, equivalent distance hw - depth) for points reaching within `extra` m
+        of a segment's drawn pavement (extra < 0: at least -extra m inside it)."""
         if not self.ok or len(px) == 0:
             return np.zeros(0, np.int64), np.zeros(0, np.int64), np.zeros(0)
-        a, b = self.tree.query(shapely.points(px, py), predicate="dwithin", distance=self.hwmax + float(np.max(extra)))
-        d, _ = seg_point_dist(px[a], py[a], self.x0[b], self.y0[b], self.x1[b], self.y1[b])
+        a, b = self.tree.query(shapely.points(px, py), predicate="dwithin", distance=self.hwmax + max(float(np.max(extra)), 0.0))
+        dep = self.depth(px[a], py[a], b)
         ex = extra[a] if np.ndim(extra) else extra
-        k = d < self.hw[b] + ex
-        return a[k], b[k], d[k]
+        k = dep > -ex
+        return a[k], b[k], self.hw[b[k]] - dep[k]
+
+    def quads(self):
+        """The drawn pavement of each segment (shapely quads, per-vertex left / right offsets)."""
+        dx, dy = self.x1 - self.x0, self.y1 - self.y0
+        ln = np.hypot(dx, dy) + 1e-9
+        nx, ny = -dy / ln, dx / ln
+        q = np.stack([np.stack([self.x0 + nx * self.pl0, self.y0 + ny * self.pl0], 1),
+                      np.stack([self.x1 + nx * self.pl1, self.y1 + ny * self.pl1], 1),
+                      np.stack([self.x1 - nx * self.pr1, self.y1 - ny * self.pr1], 1),
+                      np.stack([self.x0 - nx * self.pr0, self.y0 - ny * self.pr0], 1)], 1)
+        return shapely.polygons(q)
 
 
 def _best_per_point(a, score):
@@ -206,22 +253,43 @@ def check_props(B: Block, cats: set) -> list[dict]:
     out: list[dict] = []
     cw = Carriageway(B)
     src = "client placement" if P["have"].any() else "OSM/derived"
-    # ---- poles and lamps in lanes
+    # ---- poles and lamps in lanes: the drawn carriageway = segment pavements (r_pl / r_pr) plus the
+    # junction surfaces (js_*); a prop on a raised corner sidewalk (jw_*) or a curbed median (md_*) is fine
     if "prop_in_lane" in cats and cw.ok:
+        js = B.street_polys("js")
+        raised = np.concatenate([B.street_polys("jw"), B.street_polys("md")])
+        js_tree = shapely.STRtree(js) if len(js) else None
+        raised_tree = shapely.STRtree(raised) if len(raised) else None
         for kind, D, w in (("signal_pole", P["signals"], 3.0), ("lamp", P["lamps"], 2.0)):
             px, py, pz = D["x"], D["y"], D["z"]
-            core = B.in_core(px, py)
-            idx = np.nonzero(core)[0]
+            idx = np.nonzero(B.in_core(px, py))[0]
+            if raised_tree is not None and len(idx):
+                on, _ = raised_tree.query(shapely.points(px[idx], py[idx]), predicate="intersects")
+                idx = np.delete(idx, np.unique(on))
             a, b, d = cw.near(px[idx], py[idx], -PROP_MARGIN)
             a = idx[a]
             k = np.abs(cw.z[b] - pz[a]) < DECK_ABOVE
             a, b, d = a[k], b[k], d[k]
             depth = cw.hw[b] - d
+            hit: dict = {}
             for q in _best_per_point(a, depth):
                 i, s = a[q], b[q]
-                out.append(finding("prop_in_lane", kind, w * (1 + depth[q] / max(cw.hw[s], 0.5)), px[i], py[i], pz[i], [cw.osm[s]],
-                                   f"{kind.replace('_', ' ')} stands {depth[q]:.1f} m inside the carriageway of {_road_lbl(cw, s)} ({src})",
-                                   bearing=math.atan2(cw.y1[s] - cw.y0[s], cw.x1[s] - cw.x0[s])))
+                hit[i] = (float(depth[q]), float(cw.hw[s]), f"the carriageway of {_road_lbl(cw, s)}", [cw.osm[s]],
+                          math.atan2(cw.y1[s] - cw.y0[s], cw.x1[s] - cw.x0[s]))
+            if js_tree is not None and len(idx):
+                pts = shapely.points(px[idx], py[idx])
+                qa_, qb = js_tree.query(pts, predicate="within")
+                if len(qa_):
+                    dj = shapely.distance(pts[qa_], shapely.boundary(js[qb]))
+                    tz = B.terrain(px[idx][qa_], py[idx][qa_])
+                    for q in np.nonzero((dj > PROP_MARGIN) & ~(np.abs(tz - pz[idx][qa_]) >= DECK_ABOVE))[0]:
+                        i = idx[qa_[q]]
+                        if i not in hit or hit[i][0] < dj[q]:
+                            hit[i] = (float(dj[q]), 6.0, "a junction surface", [], None)
+            for i in sorted(hit):
+                dep, hw, what, osm, bearing = hit[i]
+                out.append(finding("prop_in_lane", kind, w * (1 + dep / max(hw, 0.5)), px[i], py[i], pz[i], osm,
+                                   f"{kind.replace('_', ' ')} stands {dep:.1f} m inside {what} ({src})", bearing=bearing))
     T = P["trees"]
     tx, ty, tz, th, tw, tsp = T["x"], T["y"], T["z"], T["h"], T["w"], T["sp"].astype(np.int64)
     core = B.in_core(tx, ty)

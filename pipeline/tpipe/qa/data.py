@@ -64,7 +64,9 @@ class Lines:
     Z: np.ndarray
     attrs: dict[str, np.ndarray]  # per piece
     tile: np.ndarray  # per piece: index into Block.tiles
+    vattrs: dict[str, np.ndarray] = field(default_factory=dict)  # per vertex (NaN where a tile lacks the array)
     # derived
+    ZD: np.ndarray = field(default=None)  # per vertex: elevation as drawn (Block._drawn_z)
     seg: np.ndarray = field(default=None)  # vertex index of owned segment starts
     seg_piece: np.ndarray = field(default=None)
 
@@ -76,9 +78,9 @@ class Lines:
         return np.repeat(np.arange(self.n), np.diff(self.off))
 
 
-def _empty_lines(names) -> Lines:
+def _empty_lines(names, vnames=()) -> Lines:
     return Lines(np.zeros(1, np.int64), np.zeros(0), np.zeros(0), np.zeros(0),
-                 {k: np.zeros(0) for k in names}, np.zeros(0, np.int64))
+                 {k: np.zeros(0) for k in names}, np.zeros(0, np.int64), vattrs={k: np.zeros(0) for k in vnames})
 
 
 @functools.lru_cache(maxsize=48)
@@ -114,15 +116,40 @@ class Block:
         self._ground()
         self.nbuilt = np.array([
             (len(d.get("b_ring_off", [0])) - 1) + len(d.get("h_xy", [])) // 2 for d in self.data], dtype=np.int64)
-        self.roads = self._lines("r", ["class", "width", "lanes", "flags", "layer", "side", "osm", "v0", "name", "sw"])
+        # per vertex (network-model tiles, docs/ROADS.md): pavement / edge-line offsets left and right
+        # of the centreline and the lane marking bits
+        self.roads = self._lines("r", ["class", "width", "lanes", "flags", "layer", "side", "osm", "v0", "name", "sw"],
+                                 ["pl", "pr", "el", "er", "mk", "vf", "dz"])
         if self.roads.n:
             self.roads.attrs["w"] = render_width(self.roads.attrs["class"], self.roads.attrs["width"])
             if any("r_pl" in d for d in self.data):
                 # network-model tiles (tpipe.roadnet): r_width is the drawn pavement width (no class minimum)
                 self.roads.attrs["w"] = np.where(self.roads.attrs["width"] > 0, self.roads.attrs["width"], self.roads.attrs["w"])
-        self.rails = self._lines("l", ["class", "flags", "osm"])
+        self.rails = self._lines("l", ["class", "flags", "osm"], ["vf", "dz"])
+        for L in (self.roads, self.rails):
+            L.ZD = self._drawn_z(L)
         self._points()
         self._junctions()
+
+    def _drawn_z(self, L: Lines) -> np.ndarray:
+        """Per-vertex elevation as the client draws it (workers/roads.ts): network-model tiles drape
+        on the terrain plus `dz` where the vertex is graded, blending to the solved absolute z on
+        decks (weight 1) and high embankments ((dz - 1.5) / 3); old tiles: z on bridges, else terrain."""
+        if not len(L.X):
+            return np.zeros(0)
+        t = self.terrain(L.X, L.Y)
+        vf, dz = L.vattrs.get("vf"), L.vattrs.get("dz")
+        if vf is None or not len(vf) or not np.isfinite(vf).any():
+            br = (L.attrs["flags"][L.vpiece()] & F_BRIDGE) != 0 if "flags" in L.attrs else np.zeros(len(L.X), bool)
+            return np.where(br | ~np.isfinite(t), L.Z, t)
+        net = np.isfinite(vf)
+        v = np.nan_to_num(vf).astype(np.int64)
+        d = np.nan_to_num(dz)
+        br, graded = (v & 1) != 0, (v & 4) != 0
+        w = np.where(br, 1.0, np.where(graded, np.clip((d - 1.5) / 3, 0, 1), 0.0))
+        zdr = t + np.where(graded, d, 0.0)
+        zd = zdr + (L.Z - zdr) * w
+        return np.where(net & np.isfinite(t), zd, L.Z)
 
     # ------------------------------------------------------------------ helpers
     def in_core(self, x, y) -> np.ndarray:
@@ -194,9 +221,10 @@ class Block:
         return np.where(ok, lut[np.clip(j, 0, self.nt - 1), np.clip(i, 0, self.nt - 1)], -1)
 
     # ------------------------------------------------------------------ polylines
-    def _lines(self, p: str, names: list[str]) -> Lines:
+    def _lines(self, p: str, names: list[str], vnames: list[str] = ()) -> Lines:
         offs, xs, ys, zs, tiles = [np.zeros(1, np.int64)], [], [], [], []
         attrs: dict[str, list] = {k: [] for k in names}
+        vattrs: dict[str, list] = {k: [] for k in vnames}
         base = 0
         for ti, d in enumerate(self.data):
             off = d.get(f"{p}_off")
@@ -212,6 +240,10 @@ class Block:
             offs.append(off[1:].astype(np.int64) + base)
             base += int(off[-1])
             tiles.append(np.full(npc, ti, np.int64))
+            for k in vnames:
+                arr = d.get(f"{p}_{k}")
+                ok = arr is not None and len(arr) == len(v)
+                vattrs[k].append(arr.astype(np.float64) if ok else np.full(len(v), np.nan))
             for k in names:
                 arr = d.get(f"{p}_{k}")
                 if k == "sw" and arr is not None and len(arr) == len(v) and npc:
@@ -220,9 +252,10 @@ class Block:
                     continue
                 attrs[k].append(arr[:npc].astype(np.float64) if arr is not None and len(arr) >= npc else np.zeros(npc))
         if len(offs) == 1:
-            return _empty_lines(names)
+            return _empty_lines(names, vnames)
         L = Lines(np.concatenate(offs), np.concatenate(xs), np.concatenate(ys), np.concatenate(zs),
-                  {k: np.concatenate(v) for k, v in attrs.items()}, np.concatenate(tiles))
+                  {k: np.concatenate(v) for k, v in attrs.items()}, np.concatenate(tiles),
+                  vattrs={k: np.concatenate(v) for k, v in vattrs.items()})
         for k in ("class", "flags", "lanes", "side", "layer"):
             if k in L.attrs:
                 L.attrs[k] = L.attrs[k].astype(np.int64)
@@ -260,9 +293,13 @@ class Block:
         eps = 0.05
         real = (lx >= -eps) & (lx <= S0 + eps) & (ly >= -eps) & (ly <= S0 + eps)
         vs, ps, end, nb = vs[real], ps[real], end[real], nb[real]
-        # dedupe (osm, rounded position)
+        # dedupe (osm, rounded position, start/end, bridge/tunnel, class): the same piece is repeated in
+        # every tile it crosses, but network-model tiles also split one OSM way into pieces where its
+        # class, bridge or tunnel status changes, and those pieces meet end to end at a real node
         osm = L.attrs["osm"][ps]
-        key = np.stack([osm, np.round(L.X[vs] * 10), np.round(L.Y[vs] * 10)], 1)
+        fl = L.attrs["flags"][ps] & (F_BRIDGE | F_TUNNEL) if "flags" in L.attrs else np.zeros(len(ps))
+        cl = L.attrs["class"][ps] if "class" in L.attrs else np.zeros(len(ps))
+        key = np.stack([osm, np.round(L.X[vs] * 10), np.round(L.Y[vs] * 10), end, fl, cl], 1)
         _, first_i = np.unique(key, axis=0, return_index=True)
         first_i = np.sort(first_i)
         vs, ps, end, nb = vs[first_i], ps[first_i], end[first_i], nb[first_i]
@@ -319,6 +356,54 @@ class Block:
             self.junc["x"] = np.zeros(0)
             self.junc["y"] = np.zeros(0)
         self.junc["r"] = np.array([max([a[1] for a in arms], default=5.0) for arms in J["arms"]], dtype=np.float64)
+
+    # ------------------------------------------------------------------ street surfaces
+    def street_polys(self, kind: str):
+        """Drawn street surface polygons (shapely, world, block + halo; cached):
+        `js` junction pavement (roadnet intersection surfaces, js_xy / js_tri), `jw` raised corner
+        sidewalks (jw_xy / jw_tri), `md` curbed medians (md_off / md_xyz / md_w). Triangle meshes are
+        merged per tile, so a point's distance to the boundary is its depth inside the surface."""
+        cache = self.__dict__.setdefault("_spcache", {})
+        if kind not in cache:
+            cache[kind] = self._street_polys(kind)
+        return cache[kind]
+
+    def _street_polys(self, kind: str):
+        import shapely
+
+        out = []
+        for ti, d in enumerate(self.data):
+            ox, oy = self.origin(ti)
+            if kind in ("js", "jw"):
+                xy, tri = d.get(f"{kind}_xy"), d.get(f"{kind}_tri")
+                if xy is None or tri is None or len(tri) < 3:
+                    continue
+                P = xy.reshape(-1, 2).astype(np.float64) + (ox, oy)
+                t = tri.reshape(-1, 3).astype(np.int64)
+                g = shapely.union_all(shapely.polygons(P[t]), grid_size=0.01)
+            else:
+                mo, mx, mw = d.get("md_off"), d.get("md_xyz"), d.get("md_w")
+                if mo is None or mx is None or mw is None or len(mo) < 2:
+                    continue
+                V = mx.reshape(-1, 3).astype(np.float64)
+                quads = []
+                for i in range(len(mo) - 1):
+                    a, b = int(mo[i]), int(mo[i + 1])
+                    if b - a < 2:
+                        continue
+                    x, y, w = V[a:b, 0] + ox, V[a:b, 1] + oy, mw[a:b].astype(np.float64) / 2
+                    dx, dy = np.diff(x), np.diff(y)
+                    ln = np.hypot(dx, dy) + 1e-9
+                    nx, ny = -dy / ln, dx / ln
+                    quads.append(np.stack([np.stack([x[:-1] + nx * w[:-1], y[:-1] + ny * w[:-1]], 1),
+                                           np.stack([x[1:] + nx * w[1:], y[1:] + ny * w[1:]], 1),
+                                           np.stack([x[1:] - nx * w[1:], y[1:] - ny * w[1:]], 1),
+                                           np.stack([x[:-1] - nx * w[:-1], y[:-1] - ny * w[:-1]], 1)], 1))
+                if not quads:
+                    continue
+                g = shapely.union_all(shapely.polygons(np.concatenate(quads)), grid_size=0.01)
+            out.extend(shapely.get_parts(g))
+        return np.array([g for g in out if not g.is_empty], dtype=object)
 
     # ------------------------------------------------------------------ buildings
     def buildings(self, holes: bool = False, keep_suppressed: bool = False):

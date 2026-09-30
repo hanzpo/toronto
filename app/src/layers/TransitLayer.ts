@@ -8,7 +8,8 @@
 // the rail radius are agents of the rail sim (sim/src/rail.rs) and buses near
 // the focus agents of the road sim (sim/src/bus.rs): they are drawn from the
 // sims' published paths instead of the timetable. Far away each vehicle is one
-// min-pixel-size marker.
+// marker: true size in normal mode, min-pixel size in analytics mode (where the
+// route lines show too).
 import * as THREE from 'three/webgpu';
 import type { Engine } from '../engine/Engine';
 import type { FrameContext, Layer } from '../engine/types';
@@ -43,10 +44,6 @@ const NEAR = 2600;
 const LOW_DETAIL = 450;
 /** m from the focus within which surface vehicles are held behind obstacles */
 const HOLD_RADIUS = 1400;
-/** altitude (m) range over which route lines fade in outside analytics mode */
-const LINES_FADE: [number, number] = [600, 1500];
-/** altitude (m) range over which far markers grow to their min-pixel size */
-const MARKER_PX_FADE: [number, number] = [150, 1200];
 const SURFACE = (1 << MODE_ID.bus) | (1 << MODE_ID.streetcar) | (1 << MODE_ID.lrt);
 
 interface ModeStyle {
@@ -71,11 +68,6 @@ const STYLE: Record<Mode, ModeStyle> = {
 const MODE_LIST = Object.keys(STYLE) as Mode[];
 /** transit MODE_ID (index into MODES) -> Mode */
 const MODE_LIST_BY_ID: readonly Mode[] = MODES;
-
-function smoothstep(a: number, b: number, x: number): number {
-  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
-  return t * t * (3 - 2 * t);
-}
 
 function hex(c: string): number {
   return parseInt(c.replace('#', ''), 16) || 0x888888;
@@ -242,9 +234,9 @@ export class TransitLayer implements Layer {
     if (!this.loading && this.currentProfile() !== this.profile) void this.ensureProfile();
     const st = useApp.getState();
     const an = st.analytics;
-    // route lines per analytics toggle; outside analytics mode they fade in with altitude
-    // (never painted over the tracks at street level)
-    const lineFade = ctx.analyticsMode ? 1 : smoothstep(LINES_FADE[0], LINES_FADE[1], ctx.altitude);
+    // route lines per analytics toggle, in analytics mode only: in normal mode the coloured
+    // overlays read as paint over the city (the vehicles themselves stay visible as models)
+    const lineFade = ctx.analyticsMode ? 1 : 0;
     for (const m of MODE_LIST) {
       const on = an[STYLE[m].key] && lineFade > 0.01;
       const ov = this.lines.get(m)!;
@@ -253,8 +245,9 @@ export class TransitLayer implements Layer {
       ov.setOpacity(lineFade);
       ov.update(ctx);
     }
-    // min-pixel markers only from altitude (true size at street level)
-    const markerPx = ctx.analyticsMode ? 1 : smoothstep(MARKER_PX_FADE[0], MARKER_PX_FADE[1], ctx.altitude);
+    // min-pixel markers in analytics mode only; in normal mode far vehicles keep their true size
+    // (enlarged markers read as coloured dots scattered over the city)
+    const markerPx = ctx.analyticsMode ? 1 : 0;
     for (const m of MODE_LIST) this.markers.get(m)!.setMinPixels(STYLE[m].minPixels * markerPx);
     // vehicles
     const counts = new Map<Mode, number>();
