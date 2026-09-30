@@ -85,6 +85,8 @@ pub struct Crossing {
 
 /// s of ATP overspeed warning before the penalty brake (player)
 const ATP_WARN: f32 = 3.0;
+/// layovers longer than this (s) are spent in the depot
+const LONG_LAYOVER: f64 = 1200.0;
 const SP_BLOCK: u8 = 0;
 const SP_JUNCTION: u8 = 1;
 const SP_DIR: u8 = 2;
@@ -409,7 +411,9 @@ pub fn build_plan(net: &RailNet, feed: u32, local: u32, mode: u8, len: f32, ok: 
         // use it (an empty-stock move running wrong-road): every train on it takes the
         // direction lock, and routes are set across it as a whole
         let ub = bidir.get(e).copied().unwrap_or(0);
-        let two_way = ub == 3 || (ub != 0 && ub & if it.dir > 0 { 1 } else { 2 } == 0);
+        // (streetcars run on sight: an empty car running a street track the wrong way is
+        // handled by sight, it does not make the street a single line)
+        let two_way = ub == 3 || (sig && ub != 0 && ub & if it.dir > 0 { 1 } else { 2 } == 0);
         if sig || two_way {
             for k in b0..b1 {
                 let (sa, sb) = ((k - b0) as f32 * l / nb, (k - b0 + 1) as f32 * l / nb);
@@ -738,6 +742,8 @@ pub struct RailSim {
     pub stuck_removed: u32,
     /// empty-stock moves removed to break a head-on lock with a waiting train
     pub dh_yield: u32,
+    /// trip plans extended back to where a train stands (chain onto a trip starting just ahead)
+    ext_cache: std::collections::HashMap<(u32, u32), u32>,
     /// deadlock cycles broken (back-offs and empty trains taken out)
     pub locks_broken: u32,
     pub stuck_log: Vec<String>,
@@ -804,6 +810,7 @@ impl Default for RailSim {
             overlaps: 0,
             stuck_removed: 0,
             dh_yield: 0,
+            ext_cache: std::collections::HashMap::new(),
             locks_broken: 0,
             stuck_log: Vec::new(),
             overruns: 0,
@@ -999,6 +1006,7 @@ impl RailSim {
         let bidir: Vec<u8> = used.clone();
         self.bidir = bidir.clone();
         self.dh_cache.clear();
+        self.ext_cache.clear();
         self.stable_cache.clear();
         self.park_cache.clear();
         self.pullout_tried.clear();
@@ -1425,7 +1433,7 @@ impl RailSim {
             };
             for trip in lo..hi {
                 let f = &self.feeds[fi];
-                if f.trip_prev[trip] >= 0 || !matches!(self.trip_state[fi][trip], TripState::None) {
+                if !self.block_start(fi, trip) || !matches!(self.trip_state[fi][trip], TripState::None) {
                     continue;
                 }
                 let pb = (f.plan0 + f.trip_pattern[trip]) as usize;
@@ -1476,6 +1484,7 @@ impl RailSim {
                         continue;
                     }
                     let (pv, tstart) = (f.trip_prev[trip], f.trip_start[trip] as f64);
+                    let pv = if self.block_start(fi, trip) { -1 } else { pv };
                     if pv < 0 && !self.depots.is_empty() && tt < tstart + 60.0 {
                         // first trip of a block, due now: it comes out of the depot (pull_out)
                         let key = (fi as u32, trip as u32);
@@ -1790,6 +1799,19 @@ impl RailSim {
         }
     }
 
+    /// trip `trip` ends with a long layover before the next trip of its block
+    fn long_layover(&self, fi: usize, trip: usize) -> bool {
+        let f = &self.feeds[fi];
+        let nx = f.trip_next[trip];
+        nx >= 0 && (f.trip_start[nx as usize] - f.trip_end[trip]) as f64 > LONG_LAYOVER
+    }
+
+    /// trip `trip` starts a vehicle block (or follows a long layover spent in the depot)
+    fn block_start(&self, fi: usize, trip: usize) -> bool {
+        let pv = self.feeds[fi].trip_prev[trip];
+        pv < 0 || self.long_layover(fi, pv as usize)
+    }
+
     /// trains at the end of their trip: continue as the next trip of their block, or leave
     fn terminals(&mut self, t0: f64) {
         let n = self.trains.len();
@@ -1842,7 +1864,7 @@ impl RailSim {
                         continue;
                     }
                     // could not change ends (the way back is occupied): give up after a while
-                    if t > self.trains[ti].since + 120.0 {
+                    if t > self.trains[ti].since + 120.0 && !self.train_seen(ti) {
                         self.remove_unless_kept(ti);
                     }
                 }
@@ -1860,13 +1882,18 @@ impl RailSim {
                 } else if t >= self.trains[ti].since + 10.0 {
                     let tr = &self.trains[ti];
                     let pos = self.plans[tr.plan as usize].point(&self.net, tr.front);
-                    if !self.in_view(pos[0], pos[1]) || t > tr.since + 600.0 {
+                    if !self.in_view(pos[0], pos[1]) {
                         self.remove_unless_kept(ti);
                     }
                 }
                 continue;
             }
-            let nx = self.feeds[fi].trip_next[tr.trip as usize];
+            let mut nx = self.feeds[fi].trip_next[tr.trip as usize];
+            // a long layover (> 20 min) is spent in the depot, not on the terminal tracks: the
+            // next trip leaves the depot again as the start of a block
+            if nx >= 0 && self.long_layover(fi, tr.trip as usize) {
+                nx = -1;
+            }
             if nx >= 0 && t >= tr.since + tr.dy.dwell as f64 * 0.5 {
                 let nx = nx as usize;
                 if matches!(self.trip_state[fi][nx], TripState::None | TripState::Pending(_)) && (self.chain(ti, nx, t) || self.turnback(ti, nx, t)) {
@@ -1889,7 +1916,9 @@ impl RailSim {
             }
             let tr = &self.trains[ti];
             let pos = self.plans[tr.plan as usize].point(&self.net, tr.front);
-            if (waited > 240.0 && !self.in_view(pos[0], pos[1])) || waited > 900.0 || (waited > 45.0 && self.blocking(ti)) {
+            // (never in view: a train vanishing from a platform is a pop)
+            let seen = self.train_seen(ti);
+            if !seen && (waited > 240.0 || (waited > 45.0 && self.blocking(ti))) {
                 self.remove_unless_kept(ti);
             }
         }
@@ -1919,7 +1948,54 @@ impl RailSim {
         let first = b.stop_front[0];
         // same direction (through-running) or reversed (change ends)
         let cand = [b.find(&self.net, ef, sf, df), b.find(&self.net, er, sr, -dr)];
-        let Some(nf) = cand.into_iter().flatten().find(|&r| r <= first + 2.0 && r >= len * 0.5 - 1.0) else { return false };
+        // streetcar loops: the car may have run past the next trip's first stop on the loop
+        // track; it starts the trip from where it stands
+        let over = if signalled(b.mode) { 2.0 } else { 300.0 };
+        let mut pb = pb;
+        let nf = match cand.into_iter().flatten().find(|&r| r <= first + over && r >= len * 0.5 - 1.0) {
+            Some(nf) => nf,
+            None => {
+                // the next trip starts a little further along the track the train stands on
+                // (a loop / terminal track): the same trip with its route extended back to here
+                let it0 = b.items[0];
+                if (it0.edge, it0.dir) != (ef, df) {
+                    return false;
+                }
+                let l = self.net.e_len[ef as usize];
+                let along = if df > 0 { sf } else { l - sf };
+                let old_start = -it0.base;
+                let new_start = along - len - 1.0;
+                if new_start < 0.0 || along > old_start + len + 2.0 || old_start - along > 400.0 {
+                    return false;
+                }
+                let key = (pb as u32, (new_start * 2.0) as u32);
+                if let Some(&cp) = self.ext_cache.get(&key) {
+                    pb = cp as usize;
+                    return self.chain_to(ti, nx, pb, len + 1.0, t);
+                }
+                let shift = old_start - new_start;
+                let edges: Vec<u32> = b.items.iter().map(|it| 2 * it.edge + if it.dir > 0 { 0 } else { 1 }).collect();
+                let centres: Vec<f32> = b.stop_centre.iter().map(|c| c + shift).collect();
+                let flags = b.stop_flag.clone();
+                let (feed, local, mode, blen) = (b.feed, b.local, b.mode, b.len);
+                let mut np = build_plan(&self.net, feed, local, mode, blen, true, new_start, &edges, &centres, &flags, &self.bidir);
+                if !np.ok {
+                    return false;
+                }
+                np.pshift = shift;
+                self.plans.push(np);
+                pb = self.plans.len() - 1;
+                self.ext_cache.insert(key, pb as u32);
+                len + 1.0
+            }
+        };
+        self.chain_to(ti, nx, pb, nf, t)
+    }
+
+    /// train `ti` continues as trip `nx` on plan `pb`, its front at `nf` there
+    fn chain_to(&mut self, ti: usize, nx: usize, pb: usize, nf: f32, t: f64) -> bool {
+        let fi = self.trains[ti].feed as usize;
+        let first = self.plans[pb].stop_front[0];
         if !self.switch_plan(ti, pb, nf) {
             return false;
         }
@@ -1935,6 +2011,15 @@ impl RailSim {
         tr.since = t;
         tr.until = dep.max(t + tr.dy.dwell as f64);
         tr.state = if (nf - first).abs() < 3.0 { TState::Dwell } else { TState::Run };
+        if nf > first + 2.0 {
+            // past the first stop: depart from here (dwell until the departure time, then run
+            // to the next stop ahead)
+            let pb_ = &self.plans[pb];
+            let k = pb_.stop_front.iter().position(|&x| x >= nf - 1.5).unwrap_or(pb_.stop_front.len() - 1);
+            let tr = &mut self.trains[ti];
+            tr.stop = k.saturating_sub(1);
+            tr.state = TState::Dwell;
+        }
         true
     }
 
@@ -2029,6 +2114,15 @@ impl RailSim {
     }
 
     /// roughly in view of the camera (within 2 km, inside a 130 deg cone)?
+    /// is any part of train `ti` in the camera's view
+    fn train_seen(&self, ti: usize) -> bool {
+        let tr = &self.trains[ti];
+        let p = &self.plans[tr.plan as usize];
+        let a = p.point(&self.net, tr.front);
+        let b = p.point(&self.net, tr.front - tr.len);
+        self.in_view(a[0], a[1]) || self.in_view(b[0], b[1])
+    }
+
     pub fn in_view(&self, x: f64, y: f64) -> bool {
         let Some((cx, cy, fx, fy)) = self.camera else { return false };
         let (dx, dy) = (x - cx, y - cy);
@@ -2863,7 +2957,7 @@ impl RailSim {
         let mut found = None;
         while let Some((std::cmp::Reverse(c10), e, d, r)) = heap.pop() {
             let c = c10 as f32 / 10.0;
-            if c > dist.get(&(e, d, r)).copied().unwrap_or(f32::INFINITY) + 0.5 || c > 60000.0 {
+            if c > dist.get(&(e, d, r)).copied().unwrap_or(f32::INFINITY) + 0.5 || c > 250000.0 {
                 continue;
             }
             if let Some(&j) = join.get(&(e, d)) {
@@ -3007,8 +3101,9 @@ impl RailSim {
     }
 
     /// end of the line for a train, unless it is being ridden: then it waits where it is
+    /// ... and never in view (it waits until the camera looks away: no pop)
     fn remove_unless_kept(&mut self, ti: usize) {
-        if self.trains[ti].id != self.keep {
+        if self.trains[ti].id != self.keep && !self.train_seen(ti) {
             self.remove(ti, true);
         }
     }
@@ -3097,7 +3192,7 @@ impl RailSim {
             // nothing to give back: an empty-stock member leaves service
             if let Some(&j) = cyc.iter().find(|&&j| self.trains[j].dh && self.trains[j].id != self.keep && !self.trains[j].player) {
                 let q = self.plans[self.trains[j].plan as usize].point(&self.net, self.trains[j].front);
-                if !self.in_view(q[0], q[1]) || self.trains[j].stopped_t > 300.0 {
+                if !self.in_view(q[0], q[1]) {
                     self.remove(j, true);
                     self.locks_broken += 1;
                 }
@@ -3118,14 +3213,15 @@ impl RailSim {
             let (dx, dy) = (p[0] - self.focus.0, p[1] - self.focus.1);
             let far = dx * dx + dy * dy > r2;
             // deadlock valve: stuck at a red for 10 minutes (e.g. a reversal blocked by a follower)
-            let mut stuck = tr.held_t > 600.0;
+            // (never in view: a train vanishing in front of the camera is a pop)
+            let mut stuck = tr.held_t > 600.0 && !self.in_view(p[0], p[1]);
             // an empty-stock move locked head-on with a train that waits for it (each holds
             // what the other needs): the empty train gives way (stabled out of sight)
             if !stuck && tr.dh && tr.held_t > 120.0 && tr.id != self.keep {
                 let me = tr.id;
                 if let Some(o) = self.blocker(ti).and_then(|id| self.trains.iter().position(|t| t.id == id)) {
                     let q = self.plans[tr.plan as usize].point(&self.net, tr.front);
-                    if self.trains[o].held_t > 60.0 && self.blocker(o) == Some(me) && (!self.in_view(q[0], q[1]) || tr.held_t > 300.0) {
+                    if self.trains[o].held_t > 60.0 && self.blocker(o) == Some(me) && !self.in_view(q[0], q[1]) {
                         stuck = true;
                         self.dh_yield += 1;
                     }

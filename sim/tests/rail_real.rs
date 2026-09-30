@@ -627,7 +627,7 @@ fn no_stuck_trains() {
     assert!(worst < 180.0);
     // target 0; the remaining few are terminals whose turnback path is not found (the train
     // is cleared off the platform after 45 s)
-    assert!(illegit <= 50, "{illegit} trains stuck > 3 min without a legitimate occupant ahead");
+    assert!(illegit <= 30, "{illegit} trains stuck > 3 min without a legitimate occupant ahead");
 }
 
 /// debugging: direction-lock runs (bidirectional stretches) of each feed's plans

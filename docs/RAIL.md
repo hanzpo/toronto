@@ -257,10 +257,15 @@ for all modes; tracks an empty-stock turnback runs against the timetabled direct
 two-way (every train on them takes the direction lock; `rebuild` plans each block's
 turnbacks up front); on-sight cars claim a junction only on arrival and only with a clear
 berth; the lock breaker follows on-sight waits (`wait_for`) and time stopped. Pull-outs leave
-just in time and only onto a free platform. Still to do: (2) FCFS queues at tram junction
-boxes; (3) layover on tail tracks; terminals whose turnback path is not found (the train is
-cleared off the platform after 45 s); (4) passing loops (long GO / VIA single track is one
-two-way route today). Measure: `no_stuck_trains` (full weekday, all agencies; run with
+just in time and only onto a free platform. Terminals: every block's turnback is found
+(search limit raised; a trip starting a little further along the loop / terminal track is
+joined with its route extended back to the car, `chain`); layovers longer than 20 min are
+spent in the depot (the next trip pulls out as the start of a block); nothing is ever
+removed while any part of it is in view (`remove_unless_kept`, `train_seen`) — a train
+that must go waits until the camera looks away. Paused (project moves to generated network
+primitives, docs/NETWORK.md): (2) FCFS queues at tram junction boxes (a first attempt
+created priority locks and was reverted); (4) passing loops (long GO / VIA single track is
+one two-way route today); capacity queues. Measure: `no_stuck_trains` (full weekday, all agencies; run with
 `--ignored`): trains stopped > 3 min without a legitimate occupant ahead.
 
 **Implementation plan.** (1) SSPs and route setting for all modes in `build_plan` /
