@@ -68,6 +68,13 @@ sidewalk-to-bridge joins, dash phase, tram tracks classed as siding
 the wrong way, trains colliding → transit-agents. Pearson apron → airports.
 CIBC Square flicker → fixed in 3eda5f1.
 
+### User screenshot 10 (Spadina over the rail corridor, ?cam=-842,-1248,124.6,343,10&t=2026-09-30T08:15:26)
+- [ ] Spadina drawn at grade across the rail yard; parapets float as slabs. → roads (sent)
+- [ ] Far station labels (Ossington … College, kms away) stack on the horizon
+  at street level: limit by distance/altitude/occlusion. → stations/UX
+- [ ] Waiting pedestrians clump into one blob on the sidewalk: spread crowds
+  along the stop/shelter with spacing. → transit-agents / traffic sim
+
 ## Resolved
 - [x] Trains colliding and wrong-track running (the user's Kitchener GO
   report): signalled rail agents with interlocking. Verified with ~220
