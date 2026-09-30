@@ -100,7 +100,7 @@ Debug on an extract: `TPIPE_WORK=work/test_dt uv run python -m tpipe.roadnet`
    `min Σ w(z − ground)² ds + Σ ℓ⁴ (z″)² ds + Σ ℓ²/4 (z′)² ds`.
    - Weights: ground weight is 1 at grade, zero on decks, and weak toward
      `ground − cover` in tunnels.
-   - Length scale ℓ per class: freeway 90 m, streets 55 m, rail 220 m,
+   - Length scale ℓ per class: freeway 130 m, streets 55 m, rail 220 m,
      tram 45 m.
    - Active-set inequalities: clearances over crossings; decks at least
      1.2 m over the ground, ramping in from the abutments; tunnels keep their
@@ -142,6 +142,15 @@ Debug on an extract: `TPIPE_WORK=work/test_dt uv run python -m tpipe.roadnet`
     ends at the intersection with a nose. Where rail runs in it, it is a
     right-of-way (kind 2) and the track sits on a grass bed, like Line 5
     Eglinton and Line 6 Finch West.
+11a. **Twin carriageways.** Where two same-name one-way carriageways are
+    mapped so close that their full inner shoulders would overlap (the DVP,
+    the Gardiner, divided arterials), the inner shoulders narrow (down to
+    0.4 m, ramped 1:30) so the pavements meet at one median barrier with a
+    0.6 m gap. Lanes are never narrowed.
+11b. **Deck gaps.** An elevated gap of at most 30 m between two bridge runs
+    on one stroke (an inferred structure beside a tagged bridge that stops
+    short, two bridge ways with a short untagged way between) becomes one
+    deck.
 12. **Rail embedding.** Streetcar track, and any track inside an intersection
     or across a carriageway, is set in concrete panels with grooved rails. It
     has no ballast.
@@ -201,7 +210,19 @@ Roads (all levels; per vertex unless noted):
   4 pavers, 5 median on the left.
 - `r_dz` f32: height over the pipeline terrain. The client drapes on its own
   terrain mesh plus `dz`, and blends to the absolute `z` on decks and high
-  embankments.
+  embankments. Negative `dz` is ignored outside tunnels: the at-grade floor
+  of the solve is ground - 0.15 m, and the client terrain has 32 m cells.
+  - The client has no road cuts, so the cross-section adapts to the terrain
+    it has. A flat (graded) section raises its high edge to the ground.
+    Wide carriageways get 1 or 3 interior columns where the terrain between
+    the edges bulges more than 6 cm above the straight section. Without
+    this, grass showed through in bands across the DVP lanes.
+  - Freeways get a steel beam guardrail on the right where the verge 4 m
+    out is more than 1.3 m above or below the pavement edge.
+  - Rail approaches graded above the ground get 1:2 grass fills. Rail
+    bridge piers keep off the streets below, carriageway plus 2 m.
+- Rail pieces are stitched across the 16 km processing-block seams
+  (`stitch_rail`). Each block emits its own core part of a track.
 - Per piece: `r_sub` path sub-kind, `r_svc` service kind, `r_surf` surface,
   `r_cyc` cycleway bits. `r_width` is now the median pavement width;
   `r_lanes` is nF + nB.

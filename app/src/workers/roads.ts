@@ -132,13 +132,13 @@ export class RoadBuilder {
 // ---------------------------------------------------------------------------- polyline helpers
 
 /** per-vertex attributes carried along a run (interpolated when clipping / refining) */
-const NUM = ['z', 's', 'el', 'er', 'pl', 'pr', 'lw', 'dz'] as const;
+const NUM = ['z', 's', 'el', 'er', 'pl', 'pr', 'lw', 'dz', 'wl', 'wr'] as const;
 const DISC = ['mk', 'vf', 'sw'] as const;
 /** A run: polyline points with world-continuous along-distance s and per-vertex attributes. */
-interface Run { x: number[]; y: number[]; z: number[]; s: number[]; el: number[]; er: number[]; pl: number[]; pr: number[]; lw: number[]; dz: number[]; mk: number[]; vf: number[]; sw: number[] }
-const newRun = (): Run => ({ x: [], y: [], z: [], s: [], el: [], er: [], pl: [], pr: [], lw: [], dz: [], mk: [], vf: [], sw: [] });
+interface Run { x: number[]; y: number[]; z: number[]; s: number[]; el: number[]; er: number[]; pl: number[]; pr: number[]; lw: number[]; dz: number[]; wl: number[]; wr: number[]; mk: number[]; vf: number[]; sw: number[] }
+const newRun = (): Run => ({ x: [], y: [], z: [], s: [], el: [], er: [], pl: [], pr: [], lw: [], dz: [], wl: [], wr: [], mk: [], vf: [], sw: [] });
 
-interface Src { xyz: Float32Array; s?: Float32Array; el?: Float32Array; er?: Float32Array; pl?: Float32Array; pr?: Float32Array; lw?: Float32Array; dz?: Float32Array; mk?: Uint32Array; vf?: Uint8Array; sw?: Uint8Array; hw: number; v0: number; mk0: number; lw0: number }
+interface Src { xyz: Float32Array; ws?: Uint8Array; s?: Float32Array; el?: Float32Array; er?: Float32Array; pl?: Float32Array; pr?: Float32Array; lw?: Float32Array; dz?: Float32Array; mk?: Uint32Array; vf?: Uint8Array; sw?: Uint8Array; hw: number; v0: number; mk0: number; lw0: number }
 
 function pushLerp(r: Run, S: Src, i: number, j: number, t: number, sAlong: number) {
   const L = (A: ArrayLike<number> | undefined, dflt: number) => (A ? A[i] + (A[j] - A[i]) * t : dflt);
@@ -148,6 +148,9 @@ function pushLerp(r: Run, S: Src, i: number, j: number, t: number, sAlong: numbe
   r.s.push(S.s ? L(S.s, 0) : sAlong);
   r.el.push(L(S.el, S.hw)); r.er.push(L(S.er, S.hw)); r.pl.push(L(S.pl, S.hw)); r.pr.push(L(S.pr, S.hw));
   r.lw.push(L(S.lw, S.lw0)); r.dz.push(L(S.dz, 0));
+  // sidewalk width to the building line (decimetres per side, 0 = default)
+  const W = (c: number) => (S.ws ? (S.ws[i * 2 + c] + (S.ws[j * 2 + c] - S.ws[i * 2 + c]) * t) / 10 : 0);
+  r.wl.push(W(0)); r.wr.push(W(1));
   const k = t < 0.5 ? i : j;
   r.mk.push(S.mk ? S.mk[k] : S.mk0); r.vf.push(S.vf ? S.vf[k] : 0); r.sw.push(S.sw ? S.sw[k] : 0);
 }
@@ -346,6 +349,8 @@ class SegGrid {
 interface Prep {
   run: Run; ox: number[]; oy: number[]; tx: number[]; ty: number[];
   zc: number[]; zl: number[]; zr: number[]; structZ: number[];
+  /** per-vertex cross-section mode (0 draped · 1 flat · 2 structure), roads only */
+  zm?: number[];
   c: number; f: number; feats: Feat[]; lift: number;
   /** path sub-kind (osm_extract SUBKIND), surface code, cycleway bits */
   sub?: number; surf?: number; cyc?: number;
@@ -404,7 +409,7 @@ export function buildRoads(a: Record<string, TypedArray>, terr: Terrain, level: 
       xyz, s: a.r_s as Float32Array | undefined, el: a.r_el as Float32Array | undefined, er: a.r_er as Float32Array | undefined,
       pl: a.r_pl as Float32Array | undefined, pr: a.r_pr as Float32Array | undefined, lw: a.r_lw as Float32Array | undefined,
       dz: a.r_dz as Float32Array | undefined, mk: a.r_mk as Uint32Array | undefined, vf: a.r_vf as Uint8Array | undefined,
-      sw: a.r_sw as Uint8Array | undefined, hw, v0: v0A ? v0A[i] : 0,
+      sw: a.r_sw as Uint8Array | undefined, ws: a.r_ws as Uint8Array | undefined, hw, v0: v0A ? v0A[i] : 0,
       mk0: (f & F_ONEWAY) ? Math.max(lanes, 1) : (Math.ceil(lanes / 2) | (Math.floor(lanes / 2) << 4)), lw0: 3.5,
     };
     const runs = clipRuns(src, off[i], off[i + 1], -0.01, S + 0.01);
@@ -456,6 +461,7 @@ export function buildRoads(a: Record<string, TypedArray>, terr: Terrain, level: 
       const nv = run.x.length;
       const { ox, oy, tx, ty } = offsets(run);
       const zc: number[] = new Array(nv), zl: number[] = new Array(nv), zr: number[] = new Array(nv), structZ: number[] = new Array(nv);
+      const zm: number[] = new Array(nv); // cross-section: 0 draped · 1 flat (graded) · 2 structure / absolute
       for (let k = 0; k < nv; k++) {
         const x = run.x[k], y = run.y[k];
         const t0 = terr.at(x, y);
@@ -464,16 +470,29 @@ export function buildRoads(a: Record<string, TypedArray>, terr: Terrain, level: 
         const dz = net ? run.dz[k] : 0;
         // blend: draped + dz near the ground, the solved absolute profile higher up / on decks
         const wAbs = br ? 1 : (vf & V_GRADED) ? Math.min(1, Math.max(0, (dz - 1.5) / 3)) : 0;
-        const zDr = t0 + ((vf & V_GRADED) ? dz : 0);
+        // draped part never below the drawn ground (the solve's at-grade floor is ground - 0.15 m:
+        // a road 0.12 m under the terrain showed as grass bands where the graded flag toggles)
+        const zDr = t0 + ((vf & V_GRADED) ? ((vf & V_TUNNEL) ? dz : Math.max(dz, 0)) : 0);
         zc[k] = zDr + (run.z[k] - zDr) * wAbs;
         structZ[k] = zc[k];
-        if (wAbs > 0.99 || (vf & V_GRADED && dz > 0.3)) { zl[k] = zr[k] = zc[k]; continue; }
         const hl = run.pl[k], hr = run.pr[k];
+        zm[k] = br || (vf & V_TUNNEL) ? 2 : wAbs > 0.99 || (vf & V_GRADED && dz > 0.3) ? 1 : 0;
+        if (wAbs > 0.99 || (vf & V_GRADED && dz > 0.3)) {
+          zl[k] = zr[k] = zc[k];
+          // graded (flat) cross-section on a side slope: the 32 m terrain triangles can rise
+          // above the pavement edge (grass bands across DVP lanes, cars on the bank) -- the
+          // high edge follows the drawn ground up instead (cars ride that ground)
+          if (!br && !(vf & V_TUNNEL)) {
+            zl[k] = Math.max(zc[k], terr.at(x + ox[k] * hl, y + oy[k] * hl) + 0.02);
+            zr[k] = Math.max(zc[k], terr.at(x - ox[k] * hr, y - oy[k] * hr) + 0.02);
+          }
+          continue;
+        }
         zl[k] = terr.at(x + ox[k] * hl, y + oy[k] * hl) + (zc[k] - t0);
         zr[k] = terr.at(x - ox[k] * hr, y - oy[k] * hr) + (zc[k] - t0);
       }
       const lift = (c <= 7 ? 0.03 + (9 - c) * 0.004 : 0.02);
-      preps.push({ run, ox, oy, tx, ty, zc, zl, zr, structZ, c, f, feats, lift, sub: subA ? subA[i] : 0, surf: surfA ? surfA[i] : 0, cyc: cycA ? cycA[i] : 0 });
+      preps.push({ run, ox, oy, tx, ty, zc, zl, zr, zm, structZ, c, f, feats, lift, sub: subA ? subA[i] : 0, surf: surfA ? surfA[i] : 0, cyc: cycA ? cycA[i] : 0 });
       // at-grade segments (for pier avoidance)
       for (let k = 0; k < nv - 1; k++) {
         if (run.vf[k] & (V_BRIDGE | V_TUNNEL)) continue;
@@ -523,8 +542,31 @@ export function buildRoads(a: Record<string, TypedArray>, terr: Terrain, level: 
     const spanOf = (sv: number) => { let k = 0; while (k < fs.length && fs[k] <= sv + 1e-4) k++; return k; };
     b.n = [0, 1, 0];
     // ---- road surface: columns L(pavement) [C] R(pavement)
-    // centre column (the surface follows the terrain across) only for wide, draped carriageways
-    const wideRoad = level === 0 && c <= 7 && run.pl[0] + run.pr[0] >= 10 && !(run.vf[0] & (V_BRIDGE | V_GRADED));
+    // interior columns on wide carriageways: the surface follows the 32 m terrain triangles across
+    // (a ridge between the two edges would otherwise show through as grass bands across lanes)
+    const wid0 = run.pl[0] + run.pr[0];
+    const zm = P.zm;
+    const colZ = (k: number, x: number, y: number, t0: number) => {
+      const m = zm ? zm[k] : 0;
+      if (m === 2) return zc[k];
+      if (m === 1) return Math.max(zc[k], terr.at(x, y) + 0.02);
+      return terr.at(x, y) + (zc[k] - t0);
+    };
+    let nIn = level === 0 && c <= 7 && !run.vf.every((v) => (v & V_BRIDGE) !== 0) ? (wid0 >= 18 ? 3 : wid0 >= 9 ? 1 : 0) : 0;
+    if (nIn) {
+      // only where the ground actually bulges above the straight edge-to-edge section
+      let need = false;
+      for (let k = 0; k < nv && !need; k++) {
+        if (zm && zm[k] === 2) continue;
+        const x = run.x[k], y = run.y[k], hl = run.pl[k], hr = run.pr[k], t0 = terr.at(x, y);
+        for (let q = 1; q <= 3 && !need; q++) {
+          const fr = q / 4, u = hl - (hl + hr) * fr;
+          const px = x + ox[k] * u, py = y + oy[k] * u;
+          if (colZ(k, px, py, t0) - (zl[k] + (zr[k] - zl[k]) * fr) > 0.06) need = true;
+        }
+      }
+      if (!need) nIn = 0;
+    }
     let prevIdx: number[] | null = null;
     let prevSpan = -1;
     for (let k = 0; k < nv; k++) {
@@ -543,14 +585,18 @@ export function buildRoads(a: Record<string, TypedArray>, terr: Terrain, level: 
         b.j = [fp ? sv - fp.s : FAR, fn ? fn.s - sv : FAR, fp ? fp.after : 0, fn ? fn.before : 0];
         const x = run.x[k], y = run.y[k];
         const hl = run.pl[k], hr = run.pr[k];
-        const L = b.v(x + ox[k] * hl, zl[k] + lift, -(y + oy[k] * hl), hl, sv);
-        const R = b.v(x - ox[k] * hr, zr[k] + lift, -(y - oy[k] * hr), -hr, sv);
-        const cur = wideRoad ? [L, b.v(x, zc[k] + lift, -y, 0, sv), R] : [L, R, R];
+        const cur = [b.v(x + ox[k] * hl, zl[k] + lift, -(y + oy[k] * hl), hl, sv)];
+        if (nIn) {
+          const t0 = terr.at(x, y);
+          for (let q = 1; q <= nIn; q++) {
+            const u = hl - ((hl + hr) * q) / (nIn + 1); // lateral offset, + left
+            const px = x + ox[k] * u, py = y + oy[k] * u;
+            cur.push(b.v(px, colZ(k, px, py, t0) + lift, -py, u, sv));
+          }
+        }
+        cur.push(b.v(x - ox[k] * hr, zr[k] + lift, -(y - oy[k] * hr), -hr, sv));
         if (prevIdx && prevSpan === sp) {
-          if (wideRoad) {
-            b.q(prevIdx[2], cur[2], cur[1], prevIdx[1]);
-            b.q(prevIdx[1], cur[1], cur[0], prevIdx[0]);
-          } else b.q(prevIdx[1], cur[1], cur[0], prevIdx[0]);
+          for (let q = cur.length - 1; q > 0; q--) b.q(prevIdx[q], cur[q], cur[q - 1], prevIdx[q - 1]);
         }
         prevIdx = cur; prevSpan = sp;
       }
@@ -613,7 +659,27 @@ export function buildRoads(a: Record<string, TypedArray>, terr: Terrain, level: 
     // ---- motorway median barrier (left pavement edge of one-way carriageways)
     if (c <= 1 && oneway && !link) {
       for (const [k0, k1] of vRanges(run, (k) => !(run.vf[k] & V_TUNNEL))) {
-        wallStrip(b, P, k0, k1, (k) => run.pl[k] - 0.3, 0.3, 0.2, 0.85, [205, 202, 196], SURF_BARRIER, 6, zc);
+        wallStrip(b, P, k0, k1, (k) => run.pl[k] - 0.3, 0.3, 0.2, 0.85, [205, 202, 196], SURF_BARRIER, 6, zl);
+      }
+    }
+    // ---- steel beam guardrail on the right of freeways where the verge is a steep bank up or a drop
+    //      (OTM / MTO roadside design: a barrier where the side slope is steeper than ~1:3)
+    if (c <= 1) {
+      const bank = new Array(nv).fill(false);
+      for (let k = 0; k < nv; k++) {
+        if (run.vf[k] & (V_BRIDGE | V_TUNNEL)) continue;
+        const l = Math.hypot(ox[k], oy[k]) || 1;
+        const m = run.pr[k] + 4;
+        const gx = run.x[k] - (ox[k] / l) * m, gy = run.y[k] - (oy[k] / l) * m;
+        bank[k] = Math.abs(terr.at(gx, gy) - zr[k]) > 1.3;
+      }
+      // close short gaps, drop short runs
+      for (const [k0, k1] of vRanges(run, (k) => !bank[k])) {
+        if (k0 > 0 && k1 < nv - 1 && run.s[k1 + 1] - run.s[k0 - 1] < 25 && !(run.vf[k0] & (V_BRIDGE | V_TUNNEL))) for (let k = k0; k <= k1; k++) bank[k] = true;
+      }
+      for (const [k0, k1] of vRanges(run, (k) => bank[k])) {
+        if (run.s[k1] - run.s[k0] < 20) continue;
+        wallStrip(b, P, k0, k1, (k) => -(run.pr[k] - 0.25), 0.1, 0.1, 0.8, [176, 180, 182], SURF_BARRIER, 6, zr);
       }
     }
     // ---- bridge structures
@@ -655,14 +721,14 @@ function locate(run: Run, s: number): [number, number] {
 
 function sidewalk(b: RoadBuilder, P: Prep, sd: number, s0: number, s1: number, ws: number, cls: number, terr: Terrain) {
   const { run, ox, oy, zl, zr, lift } = P;
-  interface Pt { x: number; y: number; ox: number; oy: number; ze: number; s: number; e: number; sw: number; br: boolean; zc: number }
+  interface Pt { x: number; y: number; ox: number; oy: number; ze: number; s: number; e: number; sw: number; br: boolean; zc: number; wb: number }
   const pts: Pt[] = [];
   const at = (s: number) => {
     const [k, t] = locate(run, s);
     const L = (A: number[]) => A[k] + (A[k + 1] - A[k]) * t;
     const kk = t < 0.5 ? k : k + 1;
     pts.push({ x: L(run.x), y: L(run.y), ox: L(ox), oy: L(oy), ze: sd > 0 ? L(zl) : L(zr), s, e: sd > 0 ? L(run.pl) : L(run.pr),
-      sw: run.sw[kk], br: (run.vf[kk] & V_BRIDGE) !== 0, zc: L(P.zc) });
+      sw: run.sw[kk], br: (run.vf[kk] & V_BRIDGE) !== 0, zc: L(P.zc), wb: sd > 0 ? L(run.wl) : L(run.wr) });
   };
   at(s0);
   for (let k = 0; k < run.s.length; k++) if (run.s[k] > s0 + 0.05 && run.s[k] < s1 - 0.05) at(run.s[k]);
@@ -703,7 +769,10 @@ function sidewalk(b: RoadBuilder, P: Prep, sd: number, s0: number, s1: number, w
     for (let k = 0; k < pts.length; k++) {
       const p = pts[k];
       b.eL = p.e + inner; b.eR = p.e + inner;
-      const u0 = p.e + inner, u1 = p.e + inner + bd.w;
+      const last_ = bi === bands.length - 1;
+      // downtown main streets: the walk reaches the building line
+      const bw = last_ && p.wb > 0 ? Math.max(bd.w, p.wb - inner) : bd.w;
+      const u0 = p.e + inner, u1 = p.e + inner + bw;
       const ax = p.x + sd * p.ox * u0, ay = p.y + sd * p.oy * u0;
       const qx = p.x + sd * p.ox * u1, qy = p.y + sd * p.oy * u1;
       const yi = yTop[k];
@@ -1100,7 +1169,21 @@ export function buildRail(a: Record<string, TypedArray>, terr: Terrain, level: n
   const b = new RoadBuilder(xyz.length / 3 * 10, xyz.length / 3 * 30);
   const widen = [1, 2, 4][level] ?? 1;
   let count = 0;
-  const noGrid = new SegGrid();
+  // streets below rail bridges: piers stay off the carriageway (+ a sidewalk's width)
+  const roadGrid = new SegGrid();
+  {
+    const ro = a.r_off as Uint32Array | undefined, rx = a.r_xyz as Float32Array | undefined;
+    const rvf = a.r_vf as Uint8Array | undefined, rpl = a.r_pl as Float32Array | undefined, rpr = a.r_pr as Float32Array | undefined;
+    const rc = a.r_class as Uint8Array | undefined;
+    if (level === 0 && ro && rx && rpl && rpr) for (let i = 0; i < ro.length - 1; i++) {
+      if (rc && rc[i] >= 9) continue;
+      for (let k = ro[i]; k < ro[i + 1] - 1; k++) {
+        if (rvf && rvf[k] & (V_BRIDGE | V_TUNNEL)) continue;
+        const hw = Math.max(rpl[k], rpr[k]) + (rc && rc[i] >= 8 ? 0.3 : 2.0);
+        roadGrid.add({ x0: rx[k * 3], y0: rx[k * 3 + 1], x1: rx[k * 3 + 3], y1: rx[k * 3 + 4], hw, z: rx[k * 3 + 2] });
+      }
+    }
+  }
   for (let i = 0; i < n; i++) {
     const f = flags ? flags[i] : 0;
     const c = cls[i] ?? 0;
@@ -1119,7 +1202,7 @@ export function buildRail(a: Record<string, TypedArray>, terr: Terrain, level: n
         const t0 = terr.at(run.x[k], run.y[k]);
         const dz = dzA ? run.dz[k] : 0;
         const wAbs = vf & V_BRIDGE ? 1 : vf & V_GRADED ? Math.min(1, Math.max(0, (dz - 1.5) / 3)) : 0;
-        const zDr = t0 + (vf & V_GRADED ? dz : 0);
+        const zDr = t0 + (vf & V_GRADED ? ((vf & V_TUNNEL) ? dz : Math.max(dz, 0)) : 0);
         z[k] = zDr + (run.z[k] - zDr) * wAbs;
       }
       count++;
@@ -1132,12 +1215,16 @@ export function buildRail(a: Record<string, TypedArray>, terr: Terrain, level: n
           ballast(b, P, k0, k1, hwB, c, level);
         }
         if (level === 0) {
+          // raised approaches (graded above the ground off the span): grass fill slopes, so an
+          // abutment never stands in the air with the track floating behind it
+          for (let k = 0; k < nv; k++) if (!(run.vf[k] & V_BRIDGE)) { run.pl[k] = run.pr[k] = hwB + 0.2; run.sw[k] = 0; }
+          embankment(b, { ...P, lift: 0.03 }, 0, 0, terr);
           for (const [k0, k1] of vRanges(run, (k) => (run.vf[k] & V_BRIDGE) !== 0)) {
             for (let k = k0; k <= k1; k++) { run.pl[k] = run.pr[k] = hwB + 0.6; run.sw[k] = 0; }
             const P2: Prep = { ...P, c: 9, lift: 0.35 };
             const st = struct(run.vf[Math.floor((k0 + k1) / 2)]);
             if (!st) for (let k = k0; k <= k1; k++) run.vf[k] |= ST_RAIL << 4;
-            bridge(b, P2, k0, k1, 0, terr, noGrid);
+            bridge(b, P2, k0, k1, 0, terr, roadGrid);
           }
         }
       }

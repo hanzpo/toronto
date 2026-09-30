@@ -241,6 +241,10 @@ def prepare_lines(terrain):
         sw=np.concatenate([rn["road_sw"], zeros(np.uint8)]),
         lw=np.concatenate([rn["road_lw"], zeros(np.float32) + 3.6]),
     )
+    # sidewalk width to the building line (downtown main streets), decimetres, 0 = default
+    wsr = rn["road_ws"] if "road_ws" in rn else np.zeros((len(rn["road_xyz"]), 2), np.float32)
+    pv["ws"] = np.vstack([np.clip(np.round(wsr * 10), 0, 255).astype(np.uint8),
+                          np.zeros((len(rn["rail_xyz"]), 2), np.uint8)])
     # height over the bare-earth terrain: the client drapes on its own terrain mesh and adds this
     pv["dz"] = (XYZ[:, 2] - terrain.sample(XYZ[:, 0], XYZ[:, 1])).astype(np.float32)
     rail_xyz = rn["rail_xyz"]
@@ -745,6 +749,7 @@ def build_tile(level, tx, ty):
                 arrays[f"r_{k}"] = pv[k][idx].astype(np.float32)
             arrays["r_mk"] = pv["mk"][idx].astype(np.uint32)
             arrays["r_sw"] = pv["sw"][idx].astype(np.uint8)
+            arrays["r_ws"] = pv["ws"][idx].astype(np.uint8).ravel()
             arrays["r_sub"] = attr["sub"][gids].astype(np.uint8)
             arrays["r_svc"] = attr["svc"][gids].astype(np.uint8)
             arrays["r_surf"] = attr["surf"][gids].astype(np.uint8)

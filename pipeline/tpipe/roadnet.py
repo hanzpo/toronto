@@ -839,7 +839,7 @@ def grade_of(L: Lines, i: int) -> float:
 
 
 # vertical-curve length scale per class of line (m): the solve spreads a rise over ~2-3 of these
-ELL = {"motorway": 90.0, "link": 55.0, "road": 55.0, "local": 40.0, "path": 12.0, "rail": 220.0, "subway": 120.0,
+ELL = {"motorway": 130.0, "link": 55.0, "road": 55.0, "local": 40.0, "path": 12.0, "rail": 220.0, "subway": 120.0,
        "lrt": 70.0, "tram": 45.0}
 
 
@@ -1814,6 +1814,22 @@ def run_block(G, core, halo):
     requirements()
     solve(set(u["il"] if u.get("down") else u["iu"] for u in ups))
 
+    # short elevated gaps between two decks (an inferred structure next to a tagged bridge that
+    # stops short, two bridge ways with a few metres of untagged way between) are one deck: a
+    # 10 m stub of track / road floating between two abutments reads as a hole
+    filled = 0
+    for S in strokes:
+        br = (S.vf & V_BRIDGE) != 0
+        if not br.any() or br.all():
+            continue
+        for a_, b_ in list(_runs(~br & ((S.vf & V_TUNNEL) == 0))):
+            if a_ == 0 or b_ == len(br) - 1:
+                continue
+            if S.s[b_ + 1] - S.s[a_ - 1] > 30.0 or (S.z[a_:b_ + 1] - S.g[a_:b_ + 1]).min() < 1.5:
+                continue
+            S.vf[a_:b_ + 1] = (S.vf[a_:b_ + 1] & 0x0F) | V_BRIDGE | (S.vf[a_ - 1] & ~0x0F)
+            filled += 1
+    report["deck_gaps_filled"] = filled
     for S in strokes:
         if S.kind == 0 and S.cls >= 7 and S.attrs is not None:
             m = (S.vf & V_BRIDGE) != 0
@@ -2894,6 +2910,7 @@ def build(bbox=None, out_path=None, workers=2, only=None):
     A = concat_block_files(parts)
     shutil.rmtree(spool, ignore_errors=True)
     report = base_report
+    report["rail_pieces_stitched"] = stitch_rail(A)
     for r in reports:
         for k, v in r.items():
             if isinstance(v, (int, float)) and not isinstance(v, bool):
@@ -3159,6 +3176,81 @@ _OFFS = {"road_off": "road_xyz", "lot_off": "lot_xyz", "rail_off": "rail_xyz", "
          "way_off": "way_xyz", "way_node_off": "way_node", "jn_arm_off": "jn_arm_ang", "js_off": "js_tri",
          "jw_off": "jw_tri", "jc_off": "jc_xy", "md_off": "md_xyz"}
 _TRIS = {"js_tri": "js_xy", "jw_tri": "jw_xy"}
+
+
+def stitch_rail(A: dict) -> int:
+    """Join rail pieces that continue each other across a block seam (each block emits its core
+    part of a track; both share the seam vertex). A piece end joins a piece start at exactly the
+    same point when that pairing is unique there and class / flags agree; the osm lists merge.
+    Unstitched, a yard crossing a seam reads as dozens of dangling track ends."""
+    off, xyz = A["rail_off"], A["rail_xyz"]
+    n = len(off) - 1
+    if n < 2:
+        return 0
+    cls, fl = A["rail_cls"], A["rail_flags"]
+    first = np.round(xyz[off[:-1], :2], 3)
+    last = np.round(xyz[off[1:] - 1, :2], 3)
+    touch = defaultdict(list)                 # point -> [(piece, 0 start / 1 end)]
+    for i in range(n):
+        touch[(first[i, 0], first[i, 1])].append((i, 0))
+        touch[(last[i, 0], last[i, 1])].append((i, 1))
+    nxt = np.full(n, -1, np.int64)
+    prv = np.full(n, -1, np.int64)
+    for lst in touch.values():
+        if len(lst) != 2:
+            continue
+        (a, ea), (b, eb) = lst
+        if ea == eb or a == b:
+            continue
+        i, j = (a, b) if ea == 1 else (b, a)      # i ends here, j starts here
+        if cls[i] != cls[j] or fl[i] != fl[j]:
+            continue
+        nxt[i], prv[j] = j, i
+    if not (nxt >= 0).any():
+        return 0
+    oo, osm = A["rail_osm_off"], A["rail_osm"]
+    order, done = [], np.zeros(n, bool)
+    for i in range(n):
+        if done[i] or prv[i] >= 0:
+            continue
+        chain = [i]
+        done[i] = True
+        while nxt[chain[-1]] >= 0 and not done[nxt[chain[-1]]]:
+            chain.append(int(nxt[chain[-1]]))
+            done[chain[-1]] = True
+        order.append(chain)
+    for i in range(n):                         # closed loops: keep as they are
+        if not done[i]:
+            order.append([i])
+            done[i] = True
+    new = {k: [] for k in ("xyz", "vf", "s")}
+    offs, oofs, osm_new, cls_new, fl_new = [0], [0], [], [], []
+    for chain in order:
+        cnt = 0
+        ids = []
+        for q, i in enumerate(chain):
+            a, b = off[i] + (1 if q else 0), off[i + 1]
+            new["xyz"].append(xyz[a:b])
+            new["vf"].append(A["rail_vf"][a:b])
+            new["s"].append(A["rail_s"][a:b])
+            cnt += b - a
+            for x in osm[oo[i]:oo[i + 1]]:
+                if not ids or ids[-1] != x:
+                    ids.append(x)
+        offs.append(offs[-1] + cnt)
+        osm_new += ids
+        oofs.append(oofs[-1] + len(ids))
+        cls_new.append(cls[chain[0]])
+        fl_new.append(fl[chain[0]])
+    A["rail_off"] = np.array(offs, np.int64)
+    A["rail_xyz"] = np.vstack(new["xyz"])
+    A["rail_vf"] = np.concatenate(new["vf"])
+    A["rail_s"] = np.concatenate(new["s"])
+    A["rail_cls"] = np.array(cls_new, cls.dtype)
+    A["rail_flags"] = np.array(fl_new, fl.dtype)
+    A["rail_osm_off"] = np.array(oofs, np.int64)
+    A["rail_osm"] = np.array(osm_new, osm.dtype)
+    return n - len(order)
 
 
 def concat_block_files(files) -> dict:

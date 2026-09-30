@@ -169,7 +169,9 @@ export function roadMaterial(name = 'roads'): THREE.MeshStandardNodeMaterial {
     const nS = select(u.lessThan(0), nF, nB), lwS = select(u.lessThan(0), lwR, lwL);
     const kS = clamp(floor(u.abs().div(lwS).add(0.5)), 1, max(nS.sub(1), 1));
     const twoLane = band(u.abs(), kS.mul(lwS), lwid, fu).mul(f01(nS.greaterThan(1.5))).mul(dash);
-    const laneCov = select(twoWay, twoLane, oneLane);
+    // local streets (residential / unclassified / service) carry no lane lines in Toronto, even
+    // where OSM counts parking lanes as lanes
+    const laneCov = select(twoWay, twoLane, oneLane).mul(f01(cls.lessThan(4.5)));
     // centre: double yellow on two-way arterials / collectors
     const centre = band(u.abs(), float(0.18), float(0.055), fu).mul(f01(twoWay)).mul(f01(cls.lessThan(4.5)))
       .mul(f01(nF.add(nB).greaterThan(1.5)));
