@@ -75,6 +75,34 @@ CIBC Square flicker → fixed in 3eda5f1.
 - [ ] Waiting pedestrians clump into one blob on the sidewalk: spread crowds
   along the stop/shelter with spacing. → transit-agents / traffic sim
 
+### Bug hunt 2 (local dev, 13:00, High quality): 10 street-level spots
+- [ ] Jumping the camera to a spot at low pitch leaves it at ~2 m inside
+  plazas/courtyards and against walls. Camera must keep clearance from
+  buildings and ground on jumps and orbits. → stations/UX (camera collision)
+- [ ] Yonge-Dundas (E 60, N 200) is an anonymous brick courtyard: no
+  Yonge-Dundas Square, screens/billboards or Eaton Centre. Signature places
+  need landmarks: Y-D Square + screens, Eaton Centre, Nathan Phillips Sq
+  (done), Distillery District, St Lawrence Market, Kensington, Honest Ed's
+  site, the Ex/BMO Field, Ontario Place pods, Scotiabank Arena plaza (done).
+  → landmarks (new pass)
+- [ ] Station labels float across street views and show through buildings
+  (Union visible from the Harbourfront/Queen W). → stations/UX
+- [ ] Lake: huge featureless grey-blue plane with moiré banding; islands flat;
+  no shoreline treatment. → ground/water
+- [ ] Large blank beige areas (land class 0 = untextured) in rail lands,
+  Markham fields and yards; grass patches pixelated. → ground/water (vector
+  ground + textures)
+- [ ] Parking lots: aisles drawn as dark ribbons over blank ground, no
+  stalls/cars. → buildings/props (parking lots)
+- [ ] Brick facade texture scale far too large (bricks ~1 m) on Scarborough
+  plaza. → buildings/props
+- [ ] Queen W: no storefront band; strip between sidewalk and building face
+  unpaved/white. → buildings/props + ground
+- [ ] Trees: dither cross-fade reads as speckled/stippled crowns; airy/yellow
+  crowns look broken (Kipling). → vegetation
+- [ ] Street level at Kipling on High: 54 fps, 10.6 ms CPU, 4.8 M tris. → perf
+  budget check after merges
+
 ## Resolved
 - [x] Trains colliding and wrong-track running (the user's Kitchener GO
   report): signalled rail agents with interlocking. Verified with ~220
