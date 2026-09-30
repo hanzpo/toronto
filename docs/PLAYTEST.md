@@ -108,6 +108,11 @@ CIBC Square flicker → fixed in 3eda5f1.
   boxy nose gear with a single wheel; flat door outline; no Porter livery;
   flat plastic shading. → aircraft (Codex allowed for modelling help)
 
+### Requested: railway level crossings (user)
+- [ ] Full crossings (panels, stop bars, crossbucks, flashers, gate arms,
+  pedestrian gates, cantilevers) → roads; gates and lights driven by real
+  train positions, cars and pedestrians stop, keep-clear → transit/sim.
+
 ## Resolved
 - [x] Trains colliding and wrong-track running (the user's Kitchener GO
   report): signalled rail agents with interlocking. Verified with ~220
