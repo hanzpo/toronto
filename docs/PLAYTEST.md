@@ -98,8 +98,6 @@ CIBC Square flicker → fixed in 3eda5f1.
   plaza. → buildings/props
 - [ ] Queen W: no storefront band; strip between sidewalk and building face
   unpaved/white. → buildings/props + ground
-- [ ] Trees: dither cross-fade reads as speckled/stippled crowns; airy/yellow
-  crowns look broken (Kipling). → vegetation
 - [ ] Street level at Kipling on High: 54 fps, 10.6 ms CPU, 4.8 M tris. → perf
   budget check after merges
 
@@ -124,7 +122,17 @@ CIBC Square flicker → fixed in 3eda5f1.
   (Bloor-Yonge) → stations/UX
 - [ ] Gardiner at Exhibition now elevated on piers (roads WIP): good
 
+### Vegetation follow-ups (after 643b630)
+- [ ] Near bare winter trees show 4 straight limbs (reads like a broom). → vegetation
+- [ ] A tree right at the camera fills the view; camera clearance should
+  include crowns, or near crowns should fade. → vegetation / camera
+- [ ] Large black spike polygon near the camera at King W (?cam=-1180,-620,60,40,12,
+  13:00), probably a shadow caster or rooftop artifact. → investigate
+
 ## Resolved
+- [x] Tree LOD popping and stippled crowns: matched high/mid/far models,
+  per-tree CPU LOD with hysteresis and 0.4 s alpha-to-coverage cross-fade,
+  conifer top-down shards fixed. 643b630 (deploy pending the tile rebuild).
 - [x] Trains colliding and wrong-track running (the user's Kitchener GO
   report): signalled rail agents with interlocking. Verified with ~220
   trains, 0 overlaps and 0 overruns at 1× and 10×, KI GO operated through
