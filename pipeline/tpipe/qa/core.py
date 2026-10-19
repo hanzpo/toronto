@@ -13,7 +13,7 @@ VIEW_DIST = {
     "elevation_jump": 90.0, "road_below_terrain": 90.0, "route_track_conflict": 120.0,
     "rail_gap": 70.0, "rail_kink": 80.0, "transit_route_off_road": 80.0,
     "tree_on_road": 35.0, "tree_on_rail": 35.0, "tree_on_airfield": 60.0, "tree_on_water": 45.0,
-    "prop_in_lane": 35.0, "floating_object": 80.0,
+    "prop_in_lane": 35.0, "prop_in_crosswalk": 35.0, "floating_object": 80.0,
 }
 VIEW_DEFAULT_DIST = 60.0
 VIEW_PITCH = 35.0  # deg below horizon

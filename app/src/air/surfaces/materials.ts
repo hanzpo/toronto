@@ -107,7 +107,8 @@ export function runwayMaterial(): THREE.MeshStandardNodeMaterial {
     const xi = float(1.5);
     const xo = min(hw.sub(3), float(27));
     const P = xo.sub(xi).div(k);
-    const keys = band(t, float(21), float(15), fs).mul(wave(ax.sub(xi), P, P.mul(0.55), fx))
+    // stripes 1.8 m wide (Annex 14 5.2.4.6), spread over [xi, xo]
+    const keys = band(t, float(21), float(15), fs).mul(wave(ax.sub(xi), P, min(P.mul(0.6), float(1.8)), fx))
       .mul(band(ax, xi.add(xo).mul(0.5), xo.sub(xi).mul(0.5), fx));
 
     // designators: letter (if any) nearest the threshold, then the number
@@ -141,16 +142,30 @@ export function runwayMaterial(): THREE.MeshStandardNodeMaterial {
     const aim = band(t, aP.add(aLen.mul(0.5)), aLen.mul(0.5), fs).mul(band(ax, aIn.add(aW.mul(0.5)), aW.mul(0.5), fx))
       .mul(f01(hw.greaterThan(10.5)));
 
-    // touchdown zone bars (pairs): 150 m ×3, then 450/600 ×2, 750/900 ×1 (only while < LDA/2)
-    const tdz = (pos: number, n: number) => {
-      const span = n * 3.3 - 1.5;
-      return band(t, float(pos + 11.25), float(11.25), fs)
-        .mul(band(ax.sub(9), float(span / 2), float(span / 2), fx))
-        .mul(wave(ax.sub(9), 3.3, 1.8, fx))
-        .mul(f01(lda.mul(0.5).greaterThan(pos + 60)));
-    };
-    const tdzAll = tdz(150, 3).add(tdz(450, 2)).add(tdz(600, 2)).add(tdz(750, 1)).add(tdz(900, 1))
-      .mul(f01(lda.greaterThan(1199).and(wide)));
+    // touchdown zone markings (Annex 14 5.2.6, pattern A): pairs every 150 m from 150 m, bars
+    // 22.5 × 3 m spaced 1.5 m, inner edge in line with the aiming point; 3-3-2-2-1-1(-1) bars;
+    // the number of pairs by landing distance (<900 m: 1 · <1200: 2 · <1500: 3 · <2400: 4 ·
+    // else 6), a pair within 50 m of the aiming point is deleted (and not counted)
+    const nPairs = select(lda.lessThan(900), float(1), select(lda.lessThan(1200), float(2), select(lda.lessThan(1500), float(3),
+      select(lda.lessThan(2400), float(4), float(6)))));
+    const aimA = aP, aimB = aP.add(aLen);
+    let tdzAll: N = float(0);
+    let count: N = float(0);
+    const bars = [3, 3, 2, 2, 1, 1, 1];
+    for (let i = 0; i < 7; i++) {
+      const pos = 150 * (i + 1), n = bars[i];
+      const span = n * 4.5 - 1.5;
+      // deleted when within 50 m of the aiming point marking
+      const clash = f01(float(pos + 22.5 + 50).greaterThan(aimA).and(float(pos - 50).lessThan(aimB)).and(hw.greaterThan(10.5)));
+      const keep = float(1).sub(clash);
+      const show = keep.mul(f01(count.lessThan(nPairs))).mul(f01(lda.mul(0.5).greaterThan(pos + 60)));
+      tdzAll = tdzAll.add(band(t, float(pos + 11.25), float(11.25), fs)
+        .mul(band(ax.sub(aIn), float(span / 2), float(span / 2), fx))
+        .mul(wave(ax.sub(aIn), 4.5, 3.0, fx))
+        .mul(show));
+      count = count.add(keep);
+    }
+    tdzAll = tdzAll.mul(f01(lda.greaterThan(899).and(wide)));
 
     // centreline: 30 m stripes / 20 m gaps centred on mid-runway, clear of both designators
     const clW = select(wide, float(0.45), float(0.23));

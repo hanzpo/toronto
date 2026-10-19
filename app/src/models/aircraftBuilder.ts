@@ -50,8 +50,8 @@ const lin = (hex: number): C3 => {
 export const COL = {
   white: lin(0xf2f3f4), wing: lin(0xc4c9cf), wingDark: lin(0xa3aab2), walk: lin(0x8e959c), glass: lin(0x141a22),
   dark: lin(0x24272c), gear: lin(0x8b9097), strut: lin(0xc9ccd0), tyre: lin(0x141517), hub: lin(0x6d7278),
-  metal: lin(0xb8bcc2), lip: lin(0xd9dcdf), fan: lin(0x2a2e33), exhaust: lin(0x4a4d52), prop: lin(0x1d1f22),
-  well: lin(0x3b3f45), spinner: lin(0xe6e8ea),
+  metal: lin(0xb8bcc2), lip: lin(0xdfe2e6), fan: lin(0x3c4249), exhaust: lin(0x4a4d52), prop: lin(0x1d1f22),
+  well: lin(0x3b3f45), spinner: lin(0xe6e8ea), duct: lin(0x5a6068), blade: lin(0x8d949c),
 };
 
 // ------------------------------------------------------------------ mesh builder
@@ -434,8 +434,10 @@ function build(s: AircraftSpec, row: number, low: boolean): { geo: THREE.BufferG
         const sn = sc + ds * k;
         return [sn, crn ? crownY(sn) - 0.02 : cy + yb + dy * k] as [number, number];
       }));
-    for (const cs of panes) {
-      const n = 3;
+    // corners on the crown line keep a narrow centre post (≥ 9° off the top); every other corner stays
+    // clearly on the side of the nose (≥ 27°), so the glazing never wraps over the roof
+    const crownCorner = (sn: number, y: number) => y >= crownY(sn) - 0.05;
+    const paneGrid = (cs: [number, number][], off: number, amin0: number, n = 3) => {
       const rows: V3[][] = [];
       for (let i = 0; i <= n; i++) {
         const u = i / n;
@@ -447,13 +449,32 @@ function build(s: AircraftSpec, row: number, low: boolean): { geo: THREE.BufferG
           const y = (cs[0][1] * (1 - u) + cs[1][1] * u) * (1 - v) + (cs[3][1] * (1 - u) + cs[2][1] * u) * v;
           const f = fus(sn);
           const h = Math.max(-0.98, Math.min(0.995, (y - f.y) / f.hh));
-          row.push(fp(sn, Math.max(5 * DEG, Math.acos(h)), 0.02));
+          // blend the minimum angle: centre-post corners (front column on the crown) 9°, sides amin0
+          const onCrown = (crownCorner(cs[0][0], cs[0][1]) ? 1 - u : 0) * (1 - v) + (crownCorner(cs[3][0], cs[3][1]) ? 1 - u : 0) * v;
+          const amin = (amin0 - (amin0 - 9) * onCrown) * DEG;
+          row.push(fp(sn, Math.max(amin, Math.acos(h)), off));
         }
         rows.push(row);
       }
       const v0 = b.nv, i0 = b.idx.length;
       b.grid(rows, false, V(0.3, 0.3, 1));
       b.mirror(v0, i0);
+    };
+    for (const cs of panes) paneGrid(cs, 0.02, 27);
+    // cockpit "mask" band round the glazing (painted black on liveries that have it — Air Canada, A350s;
+    // fuselage colour otherwise): each pane grown by 0.14 m, just under the glass
+    b.set(COL.white, PART.ACCENT);
+    if (panes.length) {
+      const all = panes.flat();
+      const side = all.filter(([sn, y]) => !crownCorner(sn, y));
+      const sMin = Math.min(...all.map((c) => c[0])), sMax = Math.max(...all.map((c) => c[0]));
+      const yMin = Math.min(...side.map((c) => c[1])), yMax = Math.max(...side.map((c) => c[1]));
+      const ftop = panes[0][3][0];
+      const band: [number, number][] = [
+        [sMin - 0.18, crownY(sMin - 0.18) - 0.02], [sMax + 0.22, yMin - 0.13],
+        [sMax + 0.08, yMax + 0.11], [ftop + 0.22, crownY(ftop + 0.22) - 0.02],
+      ];
+      paneGrid(band, 0.012, 24, 6);
     }
   }
 
@@ -511,7 +532,7 @@ function build(s: AircraftSpec, row: number, low: boolean): { geo: THREE.BufferG
       }
       airfoil(b, secs, 0, SLATC, false, false, true);
       b.set(COL.wing, PART.FIXED);
-      airfoil(b, secs, SLATC, FLAP, false, false, false);
+      airfoil(b, secs, SLATC, FLAP, false, false, k === 0);
       if (flap) {
         b.set(COL.wing, PART.FIXED, ANIM.FLAP);
         b.rowPivots = secs.map((q) => q.le.clone().addScaledVector(V(-1, 0, 0), q.chord * (FLAP - 0.02)).addScaledVector(upv, -q.chord * q.tc * 1.4));
@@ -813,6 +834,7 @@ function fanNacelle(b: MB, xLip: number, y: number, z: number, e: AircraftSpec['
   const seg = low ? 7 : 18;
   const core = e.core ?? 0.55; // core cowl radius / nacelle radius
   const fanLen = len * (e.short ? 0.62 : 0.72); // fan cowl length (then core cowl + plug)
+  const lipL = Math.min(0.45, len * 0.08); // polished lip band length
   b.set(COL.white, PART.ENGINE);
   // outer cowl, from the nozzle forward to the lip, then into the intake
   const rings: [number, number, number, number, number, number?][] = low
@@ -821,21 +843,33 @@ function fanNacelle(b: MB, xLip: number, y: number, z: number, e: AircraftSpec['
       [xLip - fanLen, y, z, r * 0.8, r * 0.8],
       [xLip - fanLen * 0.75, y, z, r * 0.93, r * 0.93, r * 0.93 * flat],
       [xLip - len * 0.32, y, z, r, r, r * flat],
-      [xLip - len * 0.1, y, z, r * 0.98, r * 0.98, r * 0.98 * flat],
-      [xLip - 0.03, y, z, r * 0.92, r * 0.92, r * 0.92 * flat],
+      [xLip - lipL, y, z, r * 0.995, r * 0.995, r * 0.995 * flat],
     ];
   tube(b, rings, seg, false, false);
   if (!low) {
-    // intake lip (bright metal) and duct
+    // polished intake lip: a metal band round the front of the cowl, rolled over into the intake
     b.set(COL.lip, PART.FIXED);
-    tube(b, [[xLip - 0.03, y, z, r * 0.92, r * 0.92, r * 0.92 * flat], [xLip, y, z, r * 0.86, r * 0.86, r * 0.86 * flat], [xLip - 0.12, y, z, r * 0.8, r * 0.8, r * 0.8 * flat]], seg);
+    tube(b, [
+      [xLip - lipL, y, z, r * 0.995, r * 0.995, r * 0.995 * flat],
+      [xLip - lipL * 0.35, y, z, r * 0.975, r * 0.975, r * 0.975 * flat],
+      [xLip, y, z, r * 0.9, r * 0.9, r * 0.9 * flat],
+      [xLip - 0.1, y, z, r * 0.83, r * 0.83, r * 0.83 * flat],
+    ], seg);
+    b.set(COL.duct, PART.FIXED);
+    tube(b, [[xLip - 0.1, y, z, r * 0.83, r * 0.83, r * 0.83 * flat], [xLip - r * 0.5, y, z, r * 0.8, r * 0.8, r * 0.8 * flat]], seg);
+    // fan face (grey disc + lighter blades, kept inside the intake) and a silver spinner
+    const fx = xLip - r * 0.5;
     b.set(COL.fan, PART.FIXED);
-    tube(b, [[xLip - 0.12, y, z, r * 0.8, r * 0.8, r * 0.8 * flat], [xLip - r * 0.45, y, z, r * 0.78, r * 0.78, r * 0.78 * flat]], seg);
-    const fx = xLip - r * 0.45;
-    b.poly(Array.from({ length: seg }, (_, j) => { const a = (j / seg) * Math.PI * 2; return V(fx, y + Math.cos(a) * r * 0.78 * (Math.cos(a) < 0 ? flat : 1), z + Math.sin(a) * r * 0.78); }), V(1, 0, 0));
-    // spinner
-    b.set(COL.dark, PART.FIXED);
-    tube(b, [[fx, y, z, r * 0.22, r * 0.22], [fx + r * 0.3, y, z, 0.02, 0.02]], 8);
+    b.poly(Array.from({ length: seg }, (_, j) => { const a = (j / seg) * Math.PI * 2; return V(fx, y + Math.cos(a) * r * 0.8 * (Math.cos(a) < 0 ? flat : 1), z + Math.sin(a) * r * 0.8); }), V(1, 0, 0));
+    b.set(COL.blade, PART.FIXED);
+    const nb = 18;
+    for (let k = 0; k < nb; k++) {
+      const a0 = (k / nb) * Math.PI * 2, a1 = a0 + (Math.PI * 2 / nb) * 0.45;
+      const pt = (a: number, rr: number) => V(fx + 0.012, y + Math.cos(a) * rr * (Math.cos(a) < 0 ? flat : 1), z + Math.sin(a) * rr);
+      b.poly([pt(a0, r * 0.26), pt(a0 + 0.12, r * 0.76), pt(a1 + 0.12, r * 0.76), pt(a1, r * 0.26)], V(1, 0, 0));
+    }
+    b.set(COL.metal, PART.FIXED);
+    tube(b, [[fx, y, z, r * 0.25, r * 0.25], [fx + r * 0.2, y, z, r * 0.16, r * 0.16], [fx + r * 0.36, y, z, 0.02, 0.02]], 10);
     // fan exhaust (inside of the nozzle) + core cowl + plug
     b.set(COL.exhaust, PART.FIXED);
     const xn = xLip - fanLen;

@@ -490,7 +490,7 @@ class Agency:
             b2[0], t2[0] = bri[0], tun[0]
             ground = self.ter.sample(dxy[:, 0], dxy[:, 1])
             z = grade_profile(dxy, ground, b2, t2, clearance=6.0, cover=COVER.get(mode, 10.0), ramp=150.0,
-                              open_ends=True)
+                              open_ends=True, covered_way=0.0 if mode == "streetcar" else 250.0)  # as rail_graph.COVERED_WAY
             out = np.column_stack([dxy, z])
             out = out[rdp3(out, RAIL_TOL)]
         else:

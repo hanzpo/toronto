@@ -13,7 +13,8 @@ import { attribute, float, mix, step, fract, vec3, mod, floor } from 'three/tsl'
 import { MeshBuilder, paint, rgb, type RGB } from '../../models/builder';
 import { U } from '../../render/uniforms';
 
-export const GSE_KINDS = ['tug', 'cart', 'belt', 'fuel', 'cater', 'push', 'gpu'] as const;
+/** 0-6 are staged by the pipeline (airports.py GSE_*); the rest are placed by the client only */
+export const GSE_KINDS = ['tug', 'cart', 'belt', 'fuel', 'cater', 'push', 'gpu', 'hydrant', 'caterup', 'stairs', 'towbar'] as const;
 export type GseKind = (typeof GSE_KINDS)[number];
 
 const TYRE = rgb(0x1c1c1c), RIM = rgb(0x8a8a8a), STEEL = rgb(0x7d8085), DARK = rgb(0x2b2d30);
@@ -172,8 +173,83 @@ function gpu(): THREE.BufferGeometry {
   return finish(b);
 }
 
+/** hydrant dispenser (Pearson has a hydrant fuel system): low cab-forward truck, rear lift deck
+ *  that goes under the wing refuel panel (rear = local -x) */
+function hydrant(): THREE.BufferGeometry {
+  const b = new MeshBuilder();
+  const white = rgb(0xf0f0ee), red = rgb(0xc3261d), frame = rgb(0x4a4d52);
+  b.box(-3.4, 3.4, 0.45, 0.9, -1.15, 1.15, DARK);
+  b.box(1.9, 3.4, 0.9, 2.3, -1.15, 1.15, white); // cab
+  b.box(3.35, 3.45, 1.45, 2.15, -1.0, 1.0, GLASS, 0, 'bottom top back');
+  b.box(2.2, 3.2, 1.5, 2.15, -1.17, 1.17, GLASS, 0, 'bottom top front back');
+  b.box(1.9, 3.4, 0.9, 1.1, -1.17, 1.17, red, 0, 'bottom top');
+  b.box(2.5, 2.7, 2.3, 2.45, -0.2, 0.2, BEACON);
+  b.box(-1.2, 1.9, 0.9, 1.7, -1.1, 1.1, white); // filter / meter cabinet
+  b.box(-1.0, 0.2, 1.7, 2.0, -0.5, 0.5, rgb(0x222222)); // hose reel
+  b.box(-3.4, -1.2, 2.2, 2.35, -1.15, 1.15, frame, 0, ''); // raised deck
+  for (const z of [-1.1, 1.1]) b.box(-3.4, -1.2, 2.35, 3.25, z - 0.03, z + 0.03, rgb(0xe3a716), 0, 'bottom top'); // rails
+  b.box(-2.6, -2.0, 0.9, 2.2, -0.6, 0.6, frame); // lift column
+  b.box(3.4, 3.5, 1.0, 1.2, -1.0, -0.7, HEAD);
+  b.box(3.4, 3.5, 1.0, 1.2, 0.7, 1.0, HEAD);
+  wheels(b, [-2.4, 2.4], 0.45, 0.3, 1.2);
+  return finish(b);
+}
+
+/** catering hi-lift with the body raised to the door sill (rear platform at local -x) */
+function caterup(): THREE.BufferGeometry {
+  const b = new MeshBuilder();
+  const box = rgb(0xf2f2f0), cabC = rgb(0x2d5aa6), frame = rgb(0x4a4d52);
+  const L = 2.2; // lift
+  b.box(-4.2, 3.8, 0.5, 0.95, -1.05, 1.05, DARK);
+  b.box(2.2, 3.8, 0.95, 2.8, -1.15, 1.15, cabC);
+  b.box(3.75, 3.85, 1.7, 2.6, -1.0, 1.0, GLASS, 0, 'bottom top back');
+  b.box(2.6, 3.5, 1.75, 2.6, -1.17, 1.17, GLASS, 0, 'bottom top front back');
+  b.box(2.8, 3.0, 2.8, 2.95, -0.3, 0.3, BEACON);
+  // scissor: crossed members on both sides (drawn as two slanted boxes each side)
+  const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
+  for (const z of [-0.95, 0.95]) {
+    for (const [xa, xb] of [[-3.6, 1.6], [1.6, -3.6]]) {
+      const n = V(0, 0, Math.sign(z));
+      b.quad(V(xa, 0.95, z), V(xa + 0.3 * Math.sign(xb - xa), 0.95, z), V(xb, 1.3 + L, z), V(xb - 0.3 * Math.sign(xb - xa), 1.3 + L, z), frame, 0, n);
+    }
+  }
+  b.box(-4.3, 1.9, 1.3 + L, 4.0 + L, -1.25, 1.25, box);
+  b.box(-4.35, -4.25, 1.4 + L, 3.9 + L, -1.1, 1.1, rgb(0xc9ccce));
+  b.box(-5.1, -4.3, 1.3 + L, 1.4 + L, -1.2, 1.2, frame, 0, ''); // platform
+  for (const z of [-1.15, 1.15]) b.box(-5.1, -4.3, 1.4 + L, 2.4 + L, z - 0.03, z + 0.03, rgb(0xe3a716), 0, 'bottom top');
+  wheels(b, [-2.8, 2.8], 0.48, 0.3, 1.15);
+  return finish(b);
+}
+
+/** turboprop integral airstair (Q400 forward door), deployed: local x = outward from the fuselage,
+ *  origin on the ground under the door sill at the fuselage side; top at SILL (scaled per type) */
+function stairs(): THREE.BufferGeometry {
+  const b = new MeshBuilder();
+  const c = rgb(0xdadcde), step = rgb(0x55595e);
+  const n = 7, run = 2.3, top = 1.0; // unit height, scaled to the sill
+  for (let i = 0; i < n; i++) {
+    const x0 = (i / n) * run, x1 = ((i + 1) / n) * run, y = top * (1 - (i + 1) / n);
+    b.box(x0, x1, Math.max(0, y - 0.04), y + 0.02, -0.42, 0.42, step, 0, '');
+  }
+  const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z);
+  for (const z of [-0.46, 0.46]) {
+    b.quad(V(0, top - 0.2, z), V(run, 0, z), V(run, 0.1, z), V(0, top + 0.02, z), c, 0, V(0, 0, Math.sign(z)));
+    b.quad(V(0, top + 0.28, z), V(run, 0.35, z), V(run, 0.4, z), V(0, top + 0.33, z), c, 0, V(0, 0, Math.sign(z))); // handrail
+  }
+  return finish(b);
+}
+
+/** pushback towbar: 5 m from the tractor pin (x = 0) to the nose-gear head (x = 5) */
+function towbar(): THREE.BufferGeometry {
+  const b = new MeshBuilder();
+  b.box(0, 5, 0.45, 0.6, -0.08, 0.08, rgb(0xe3a716));
+  b.box(4.6, 5.0, 0.3, 0.75, -0.35, 0.35, DARK);
+  b.wheelPair(1.2, 0.18, 0.1, 0.25, TYRE, RIM, 0.55, 6);
+  return finish(b);
+}
+
 export function gseGeometry(k: GseKind): THREE.BufferGeometry {
-  return { tug, cart, belt, fuel, cater, push, gpu }[k]();
+  return { tug, cart, belt, fuel, cater, push, gpu, hydrant, caterup, stairs, towbar }[k]();
 }
 
 // ---------------------------------------------------------------------------- boarding bridges

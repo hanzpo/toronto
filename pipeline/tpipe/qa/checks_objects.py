@@ -7,7 +7,9 @@ OSM points in the tile (p_kind 3 trees, 4 lamps) and signal poles re-derived
 from the junction arms exactly as street.ts places them.
 
 Categories:
-  prop_in_lane       signal poles / street lamps standing inside a carriageway
+  prop_in_lane       any client-placed street prop (signal poles, lamps and every workers/props.ts
+                     kind: hydrants, bins, benches, bike-share docks, blades, ...) inside a carriageway
+  prop_in_crosswalk  the same on a junction surface (js_*) or a marked crossing
   tree_on_road       tree trunk inside a carriageway (incl. ramps, bridge decks),
                      crown through a low deck, crown over motorway lanes
   tree_on_rail       trunk within RAIL_CLEAR of a track centreline / crown over rails
@@ -50,6 +52,14 @@ BURIED = 3.0  # m: base below the lowest terrain under the footprint
 SHORE_MIN_PX = 60  # water/land edge pixels (4 m) per tile to report
 VECTOR_WATER_KEYS = ("gw_poly", "gp_off", "w_off", "water_off", "g_off", "gv_off", "wv_off")  # vector ground present -> skip
 
+# workers/props.ts K (street props in the dump, version 2); lots, stripes, driveways, wires and parked
+# cars are off-street ground / vehicles and not checked
+PROP_KIND = {0: "hydrant", 1: "bin", 2: "news_box", 3: "postbox", 4: "bench", 5: "bike_ring", 6: "pay_station",
+             7: "planter", 8: "street_blade", 9: "hydro_pole", 11: "highway_sign", 12: "house_bin", 15: "lot_light",
+             17: "bike_share", 18: "bus_pole", 19: "shelter"}
+PROP_WEIGHT = {"bike_share": 2.5, "shelter": 2.5, "bench": 1.5, "hydro_pole": 2.0, "street_blade": 1.5}
+CROSSING_R = 4.0  # m from a marked crossing's centreline node: on the crosswalk
+
 SPECIES = ["norway maple", "silver maple", "sugar maple", "honey locust", "linden", "london plane", "oak", "willow",
            "beech", "columnar", "ornamental", "pine", "shrub", "cedar hedge", "white spruce", "blue spruce",
            "white cedar", "hemlock"]
@@ -61,6 +71,7 @@ def load_props(B: Block) -> dict:
     T = {k: [] for k in ("x", "y", "z", "h", "w", "sp")}
     Lm = {k: [] for k in ("x", "y", "z")}
     Sg = {k: [] for k in ("x", "y", "z", "j")}
+    Pr = {k: [] for k in ("x", "y", "z", "k")}
     have = np.zeros(len(B.tiles), bool)
     for ti, (tx, ty) in enumerate(B.tiles):
         f = PROPS / f"{tx}_{ty}.bin"
@@ -70,8 +81,8 @@ def load_props(B: Block) -> dict:
         if len(raw) < 16:
             continue
         have[ti] = True
-        nv, nl, ns, _ = np.frombuffer(raw, "<u4", 4)
-        nv, nl, ns = int(nv), int(nl), int(ns)
+        nv, nl, ns, ver = np.frombuffer(raw, "<u4", 4)
+        nv, nl, ns, ver = int(nv), int(nl), int(ns), int(ver)
         ox, oy = B.origin(ti)
         vx = np.frombuffer(raw, "<u2", nv, 16) / 64.0 + ox
         vy = np.frombuffer(raw, "<u2", nv, 16 + nv * 2) / 64.0 + oy
@@ -93,6 +104,13 @@ def load_props(B: Block) -> dict:
         Sg["y"].append(sg[:, 1] + oy)
         Sg["z"].append(sg[:, 2])
         Sg["j"].append(np.full(len(sg), ti * 100000) + sg[:, 4])
+        o += ns * 7
+        if ver >= 2 and len(a) > o:
+            pr = a[o:o + ((len(a) - o) // 5) * 5].reshape(-1, 5).astype(np.float64)
+            Pr["k"].append(pr[:, 0].astype(np.int64))
+            Pr["x"].append(pr[:, 1] + ox)
+            Pr["y"].append(pr[:, 2] + oy)
+            Pr["z"].append(pr[:, 3])
     # fallback for tiles without a dump
     miss = ~have
     if miss.any():
@@ -118,7 +136,7 @@ def load_props(B: Block) -> dict:
         Sg["z"].append(B.terrain(sx[sm], sy[sm]))
         Sg["j"].append(sj[sm])
     cat = lambda d: {k: (np.concatenate(v) if v else np.zeros(0)) for k, v in d.items()}  # noqa: E731
-    return {"trees": cat(T), "lamps": cat(Lm), "signals": cat(Sg), "have": have}
+    return {"trees": cat(T), "lamps": cat(Lm), "signals": cat(Sg), "props": cat(Pr), "have": have}
 
 
 def _signal_poles(B: Block):
@@ -245,7 +263,7 @@ def _road_lbl(cw: Carriageway, b: int) -> str:
 
 
 def check_props(B: Block, cats: set) -> list[dict]:
-    want = {"prop_in_lane", "tree_on_road", "tree_on_rail", "tree_over_track", "tree_on_airfield", "tree_on_water"} & cats
+    want = {"prop_in_lane", "prop_in_crosswalk", "tree_on_road", "tree_on_rail", "tree_over_track", "tree_on_airfield", "tree_on_water"} & cats
     if not want:
         return []
     P = B.__dict__.get("_props") or load_props(B)
@@ -255,12 +273,22 @@ def check_props(B: Block, cats: set) -> list[dict]:
     src = "client placement" if P["have"].any() else "OSM/derived"
     # ---- poles and lamps in lanes: the drawn carriageway = segment pavements (r_pl / r_pr) plus the
     # junction surfaces (js_*); a prop on a raised corner sidewalk (jw_*) or a curbed median (md_*) is fine
-    if "prop_in_lane" in cats and cw.ok:
+    if {"prop_in_lane", "prop_in_crosswalk"} & cats and cw.ok:
         js = B.street_polys("js")
+        Pt = B.pts
+        xk = Pt["kind"] == 2
+        xing = shapely.STRtree(shapely.points(Pt["x"][xk], Pt["y"][xk]).tolist()) if xk.any() else None
+        kinds = [("signal_pole", P["signals"], 3.0), ("lamp", P["lamps"], 2.0)]
+        Pp = P["props"]
+        if len(Pp["x"]):
+            for kid, name in PROP_KIND.items():
+                m = Pp["k"] == kid
+                if m.any():
+                    kinds.append((name, {"x": Pp["x"][m], "y": Pp["y"][m], "z": Pp["z"][m]}, PROP_WEIGHT.get(name, 1.0)))
         raised = np.concatenate([B.street_polys("jw"), B.street_polys("md")])
         js_tree = shapely.STRtree(js) if len(js) else None
         raised_tree = shapely.STRtree(raised) if len(raised) else None
-        for kind, D, w in (("signal_pole", P["signals"], 3.0), ("lamp", P["lamps"], 2.0)):
+        for kind, D, w in kinds:
             px, py, pz = D["x"], D["y"], D["z"]
             idx = np.nonzero(B.in_core(px, py))[0]
             if raised_tree is not None and len(idx):
@@ -286,9 +314,19 @@ def check_props(B: Block, cats: set) -> list[dict]:
                         i = idx[qa_[q]]
                         if i not in hit or hit[i][0] < dj[q]:
                             hit[i] = (float(dj[q]), 6.0, "a junction surface", [], None)
+            near_x = set()
+            if xing is not None and hit:
+                ii = np.array(sorted(hit))
+                qa2, _ = xing.query(shapely.points(px[ii], py[ii]), predicate="dwithin", distance=CROSSING_R)
+                near_x = set(ii[np.unique(qa2)].tolist())
             for i in sorted(hit):
                 dep, hw, what, osm, bearing = hit[i]
-                out.append(finding("prop_in_lane", kind, w * (1 + dep / max(hw, 0.5)), px[i], py[i], pz[i], osm,
+                cat = "prop_in_crosswalk" if what == "a junction surface" or i in near_x else "prop_in_lane"
+                if cat not in cats:
+                    continue
+                if cat == "prop_in_crosswalk" and what != "a junction surface":
+                    what = "a marked crossing on " + what
+                out.append(finding(cat, kind, w * (1 + dep / max(hw, 0.5)), px[i], py[i], pz[i], osm,
                                    f"{kind.replace('_', ' ')} stands {dep:.1f} m inside {what} ({src})", bearing=bearing))
     T = P["trees"]
     tx, ty, tz, th, tw, tsp = T["x"], T["y"], T["z"], T["h"], T["w"], T["sp"].astype(np.int64)
@@ -487,7 +525,7 @@ def check_shore(B: Block, cats: set) -> list[dict]:
     return out
 
 
-OBJECT_CATS = {"prop_in_lane", "tree_on_road", "tree_on_rail", "tree_over_track", "tree_on_airfield", "tree_on_water",
+OBJECT_CATS = {"prop_in_lane", "prop_in_crosswalk", "tree_on_road", "tree_on_rail", "tree_over_track", "tree_on_airfield", "tree_on_water",
                "building_overlap", "floating_object", "raster_shore"}
 
 

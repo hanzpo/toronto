@@ -13,6 +13,9 @@ const SUNSET_HORIZON = new THREE.Color(0xe8b48a);
 const SUNSET_ZENITH = new THREE.Color(0x4a6a9e);
 const NIGHT_ZENITH = new THREE.Color(0x070b18);
 const NIGHT_HORIZON = new THREE.Color(0x1a2233);
+/** blue hour (sun 4-8 deg below the horizon) */
+const BLUE_ZENITH = new THREE.Color(0x1c3570);
+const TWILIGHT_HORIZON = new THREE.Color(0x56628f);
 const ANALYTIC_ZENITH = new THREE.Color(0x0d1117);
 const ANALYTIC_HORIZON = new THREE.Color(0x1b222c);
 
@@ -79,20 +82,28 @@ export class Atmosphere {
 
   update(ctx: FrameContext, sunDir: THREE.Vector3) {
     const elev = sunDir.y;
-    // 1 day, 0 night; twilight ~ -6°..+8°
-    const day = THREE.MathUtils.smoothstep(elev, -0.1, 0.14);
+    // real twilight from the solar elevation h (deg; sun.ts gives the true position for Toronto):
+    // direct sun fades out at sunset (h ~ -1), skylight through civil (-6) and nautical (-12) twilight,
+    // street / window lights come on from about sunset (photocells) and are fully on by h ~ -5
+    const h = Math.asin(THREE.MathUtils.clamp(elev, -1, 1)) * 180 / Math.PI;
+    const direct = THREE.MathUtils.smoothstep(h, -0.8, 6);
+    const sky = THREE.MathUtils.smoothstep(h, -12, 4);
+    const lightsOn = 1 - THREE.MathUtils.smoothstep(h, -5, 1.5);
+    const glow = THREE.MathUtils.smoothstep(h, -8, -1) * (1 - direct);   // afterglow on the horizon
+    const day = direct;
     const golden = 1 - THREE.MathUtils.smoothstep(elev, 0.02, 0.35);
-    ctx.daylight = day;
-    U.night.value = 1 - day;
+    ctx.daylight = 1 - lightsOn;
+    U.night.value = lightsOn;
     U.sunDir.value.copy(sunDir);
     U.time.value = ctx.time;
     U.analytics.value += ((ctx.analyticsMode ? 1 : 0) - U.analytics.value) * Math.min(1, ctx.dt * 6);
     const a = U.analytics.value;
 
-    // sky colours
-    const zen = this.tmpC.copy(NIGHT_ZENITH).lerp(this.tmpC2.copy(SUNSET_ZENITH).lerp(DAY_ZENITH, 1 - golden), day);
+    // sky colours: night -> blue hour (skylight) -> sunset -> day (direct sun)
+    const zen = this.tmpC.copy(NIGHT_ZENITH).lerp(BLUE_ZENITH, sky).lerp(this.tmpC2.copy(SUNSET_ZENITH).lerp(DAY_ZENITH, 1 - golden), day);
     U.skyZenith.value.copy(zen).lerp(ANALYTIC_ZENITH, a);
-    const hor = this.tmpC.copy(NIGHT_HORIZON).lerp(this.tmpC2.copy(SUNSET_HORIZON).lerp(DAY_HORIZON, 1 - golden * 0.8), day);
+    const hor = this.tmpC.copy(NIGHT_HORIZON).lerp(TWILIGHT_HORIZON, sky).lerp(SUNSET_HORIZON, glow * 0.8)
+      .lerp(this.tmpC2.copy(SUNSET_HORIZON).lerp(DAY_HORIZON, 1 - golden * 0.8), day);
     U.skyHorizon.value.copy(hor).lerp(ANALYTIC_HORIZON, a);
     U.fogColor.value.copy(U.skyHorizon.value);
     U.sunColor.value.setRGB(1, 0.93 - golden * 0.25, 0.84 - golden * 0.45);
@@ -107,10 +118,11 @@ export class Atmosphere {
     this.sun.color.copy(U.sunColor.value);
     // strong key light, modest sky fill: sunlit vs shaded faces and shadows read clearly
     this.sun.intensity = 3.1 * day * (1 - a * 0.5);
-    this.hemi.intensity = 0.3 + 0.55 * day;
-    this.hemi.color.setRGB(0.85 + 0.1 * day, 0.9 + 0.05 * day, 1.0);
-    this.hemi.groundColor.setRGB(0.5 * day + 0.08, 0.48 * day + 0.08, 0.42 * day + 0.1);
-    if (day < 0.05) { this.hemi.color.setRGB(0.45, 0.52, 0.75); this.hemi.intensity = 0.45; }
+    // sky fill follows the skylight (twilight keeps a cool blue fill after the sun has set)
+    const twi = Math.max(THREE.MathUtils.smoothstep(h, -10, 0) * 0.75, day);
+    this.hemi.intensity = 0.42 + 0.43 * twi;
+    this.hemi.color.setRGB(0.45 + 0.4 * sky + 0.1 * day, 0.52 + 0.38 * sky + 0.05 * day, 0.75 + 0.25 * sky);
+    this.hemi.groundColor.setRGB(0.5 * day + 0.08 + 0.08 * sky, 0.48 * day + 0.08 + 0.08 * sky, 0.42 * day + 0.1 + 0.1 * sky);
 
     // Shadow frustum around the focus point. castShadow is never toggled:
     // flipping it rebuilds every lit material's shader (a multi-100 ms stall

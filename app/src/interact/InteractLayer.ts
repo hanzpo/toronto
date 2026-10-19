@@ -125,7 +125,7 @@ export class InteractLayer implements Layer {
   private walkNear: { trip: number; label: string } | null = null;
 
   constructor() {
-    this.tunnel = new TunnelBuilder((e, n) => this.engine.heightAt(e, n));
+    this.tunnel = new TunnelBuilder({ heightAt: (e, n) => this.engine.heightAt(e, n), dataRoot: () => this.engine?.dataRoot ?? '', trains: (out) => this.trainsNear(out) });
   }
 
   async init(engine: Engine) {
@@ -453,6 +453,22 @@ export class InteractLayer implements Layer {
 
   // ======================================================================= internals
 
+  /** Other trains of the attached vehicle's mode within 1.2 km, as drawn (tunnel signal aspects). */
+  private trainsNear(out: { e: number; n: number; heading: number; length: number }[]): number {
+    const v = this.system.vehicles, me = this.trip, mode = this.tripInfo?.mode;
+    const c = this.camSmooth;
+    if (!c || !mode) return 0;
+    let k = 0;
+    for (let i = 0; i < v.count && k < 64; i++) {
+      if (v.trip[i] === me || MODES[v.mode[i]] !== mode || Math.hypot(v.x[i] - c.e, v.y[i] - c.n) > 1200) continue;
+      const d = this.transit.drawnVehicle(v.trip[i]);
+      if (!d) continue;
+      const o = out[k] ?? (out[k] = { e: 0, n: 0, heading: 0, length: 0 });
+      o.e = d.x; o.n = d.y; o.heading = d.heading; o.length = d.length;
+      k++;
+    }
+    return k;
+  }
 
   private traffic(): TrafficApi | null {
     return (this.engine.layers.find((l) => l.id === 'traffic') as unknown as TrafficApi) ?? null;

@@ -77,7 +77,8 @@ drawn by `app/src/workers/ground.ts` + `render/tiles/groundMaterial.ts`)
   < 4 m² dropped. Classes as the raster, plus vector-only
   `24 hard court (tennis, basketball, pickleball…) · 25 ball diamond ·
   26 running track · 27 pier / quay deck · 28 breakwater / groyne (armour
-  stone) · 29 mown verge` (uncovered land within 45 m of a motorway / trunk:
+  stone) · 29 mown verge · 40 gorge wall rock / scree` (Niagara gorge walls,
+  below) (uncovered land within 45 m of a motorway / trunk:
   medians, interchange infields, shoulders; and a 4 m landscaped band inside
   commercial / industrial lots). Class 0 (anything unmapped) is drawn as rough
   grass. **Parking lots are `gp_class == 11`** (amenity=parking, asphalt base;
@@ -90,6 +91,17 @@ drawn by `app/src/workers/ground.ts` + `render/tiles/groundMaterial.ts`)
   Lake Ontario −0.3 m (74.7 m ASL), Lake Erie 99.2; ponds / lakes: the 10th
   percentile of the terrain's 90 m minimum along their shore; rivers (level
   varies > 2 m along the shore) follow the field. Nothing is below Lake Ontario.
+  −32767 = follows `gw_field` and is drawn as whitewater rapids. River water
+  may slope: the client shades any water steeper than ~4 % (and all rapids) as
+  whitewater flowing downhill, never as a flat mirror.
+- Niagara Falls (`tpipe.falls`, `pipeline/curated/falls.json`): river water is
+  cut along the crest lines of the Horseshoe, American and Bridal Veil Falls;
+  the gorge below is a flat water body at the Maid of the Mist pool level
+  (99.0 m ASL) and the upper river follows a field graded down to each brink
+  (157 / 158 m ASL) inside the rapids zones (flagged −32767). The 1955
+  Terrapin Point fill, which the OSM riverbank still covers, is land. The
+  gorge walls (steep ground within 110 m of the pool water, below 85 % of the
+  local rim) are class 40. The curtains themselves are landmarks (below).
 - `gw_field` i16 [33·33] — river level field (dm), same layout as a 33×33
   terrain grid; only present when a field-level water polygon exists.
 - `sh_off` u32 [nS+1] · `sh_xy` u16 [2·n] · `sh_z` i16 [n] (water level, dm) ·
@@ -255,6 +267,11 @@ Optional per-landmark extras (local frame, `pipeline/tpipe/landmarks.py`):
 ground-floor masses `lower`, `columns` off the lanes, curb `canopy`; the QA
 road check counts only `lower` + `columns`), `op` (Ontario Place pods and
 bridges), `lanes` (Distillery paving + catwalks).
+Waterfalls (`kind: "waterfall"`, `tpipe.falls`): `line` crest (world E, N),
+`toe` downstream edge of the OSM waterfall area (curtain foot / talus toe),
+`top` brink level, `foot` where the free fall lands (pool, or the talus top),
+`bottom` pool level (datum m), `talus` bool, `flow` share of the river's flow.
+Drawn by `landmarks/falls.ts` (curtain, plunge foam, talus, mist).
 
 ## Road graph (`data/graph/{tx}_{ty}.bin.gz`, level-0 grid)
 
@@ -284,3 +301,83 @@ and laneway furniture (`r_svc` 3 = `service=alley`; without `r_svc`, named
 "Lane …" service roads or unnamed old-city service roads with houses along
 them). Records are `USTRIDE` = 9 floats: kind, x, n, z, angle, sx, sy, sz,
 variant (kinds in `UK`), rendered by `layers/UrbanLayer.ts`.
+
+## Primitive network slice (`tpipe.primnet`, `?net=2`; docs/NETWORK.md)
+
+`OUT/net2/` (served under the data root when the slice is enabled):
+- `primnet.json`: `assets` (ordered bands: kind, width, height, dir, vehicle classes, track
+  offsets, platform rules; `offsets` = left edge of every band), `edges` (asset, ways,
+  resampled model centreline `xyz` every 2 m, `band_left` / `band_w` per station and band,
+  `platforms` [s0, s1, side, w, h, band, stop], `frontage` [left, right] widths per station),
+  `nodes` (legs: angle, setback, curb half widths `hw_l/hw_r`, building-line half widths
+  `out_l/out_r`; signal flag), `lanes` (per lane band: classes, dir, polyline), `paths`
+  (turning paths per movement with classes), `ped` (sidewalk, platform, crosswalk, corner,
+  ramp segments), `interactions` (type + outcome generate / snap / review),
+  `tram_special_work` (model tram rails with the junctions they cross), `tag_table`, `qa`.
+- `graph/*.bin.gz`: traffic-sim graph tiles (tpipe.graph format) for the tiles around the
+  slice: the slice's ways replaced by one one-way edge per direction along the centre of that
+  direction's car lanes; the ?net=2 build serves them as `data/graph`.
+- `surface.npz` (surface builder input, replaces its infer_bands): `seg_off/seg_xyz` (model
+  centreline and z per station), `nb_off` per segment into bands, per band `nb_kind` u8 (index
+  into `kinds`: lane, shoulder, bike_lane, parking, median, transit_row, platform, sidewalk,
+  furniture, boulevard, frontage, curb, bed), `nb_mat` u8 (`mats`: asphalt, concrete, grass,
+  pavers, ballast), `nb_h` f32 top height over the carriageway edge, `nb_uoff` per band into
+  `nb_u0/nb_u1` f32 signed lateral offsets per station (+ left, u0 > u1); events `ne_seg,
+  ne_s0, ne_s1, ne_band, ne_kind` (0 platform, 1 driveway).
+  **Node heights (one set, owned by `tpipe.primgeom`; the ?net=2 renderer reads the same values
+  from `primnet.json` node meshes: `patch`, `bz`, `retz`, `walkz`, `bldgz`).** All z are model
+  carriageway level (m); walk tops are `+ nc_h`.
+  - Node boxes: `nd_off` (per box, into the outline) / `nd_xy` f64 outline / `nd_zv` f32 z per
+    outline vertex (leg ring z; along curb returns the return's vertical curve) / `nd_z` f32 mean /
+    `nd_id` i32 node id.
+  - Box surface patches: `np_off` / `np_xyz` f64 (x, y, z) vertices, `nt_off` / `nt_tri` u32
+    triangles (indices local to the patch), `np_node` i32 node id. Plan: the box clipped by a
+    1.5 m grid, constrained-Delaunay per cell (conforms exactly to the outline). Heights: outline
+    vertices from `nd_zv`; interior the discrete harmonic interpolant (uniform graph Laplacian,
+    exact sparse solve) -- the n-sided Coons patch. Nodes whose box needed a make-valid fix
+    have no patch (flat at `nd_z`).
+  - Corner curves, one record per corner (`nc_node` i32, `nc_corner` u8 = corner i between leg i
+    and leg i+1 in ring order), each a full curve from ring point to ring point with z: curb
+    return `nc_off` / `nc_xy` f64 / `nc_z` f32 (+ `nc_h` walk height behind the curb); walk edge
+    `nw_off` / `nw_xyz` f64; building line `nl_off` / `nl_xyz` f64. Heights: cubic Hermite over
+    arc length between the two leg rings' z, leaving each ring on its leg's grade (|g| <= 0.12),
+    so every corner profile is G1 with both legs. Near-parallel leg pairs have no corner record.
+  **Rail corridor (tpipe.primrail; primnet.json `rail`, the same records).** All z datum m; track z is
+  the formation level (the client draws the ballast top at + 0.28 and the rail head at + 0.44).
+  - Track bands `rt_off / rt_xyz` (centreline), `rt_hw` f32 ballast half width (1.8 main / 1.4
+    siding), `rt_cls` u8 (0 main, 1 siding), `rt_bridge` u8 per vertex.
+  - Shared bed `rb_off / rb_xyz` (mesh vertices, z = nearest tracks' formation + 0.03), `rbt_off /
+    rbt_tri` u32 (local indices): the union of the ballast footprints, gaps < 4 m closed.
+  - Slopes `rs_off / rs_in / rs_out` (paired samples: bed edge, slope foot on the lidar ground, 1:2),
+    `rs_kind` u8 (0 berm, 1 cut). Walls `rw_off / rw_xy`, `rw_zb / rw_zt` f32 per vertex (retaining
+    walls where a slope does not fit before a street / building or the ground already steps).
+    Fences `rf_off / rf_xyz` (base line), `rf_h` f32.
+  - Structures (street over rail; the SURFACE.md interface): deck footprints `st_off / st_xy`
+    (walk edge to walk edge) + `st_z` mean deck z; abutment lines `sa_off / sa_xyz` (deck z) +
+    `sa_seat` (deck z - 1.5); pier column footprints `sp_off / sp_xy` (quads) + `sp_ztop`; piers
+    stand clear of every track band by 1.5 m, spans <= 35 m where the yard allows.
+  - Level crossings (primnet.json `rail.crossings`): mapped ones (crossings.json) and inferred
+    private yard crossings (`inferred`, a service road meeting a track at grade), with gate masts /
+    arms / lights per tags.
+  - `primnet.json z_source` = "lidar" when the model was solved on the lidar DTM
+    (tpipe.lidar_terrain): the client draws the slice at its own z (no lift to the tile terrain).
+  - `bbox.json rail` = true: the tile worker drops its own main / siding track drawing in the bbox.
+  - Slice QA (qa.json): rail_above_bed, adjacent_track_z_step, duplicate_track,
+    underpass_drawn_at_grade, mapped_crossing_not_at_grade on the drawn rail.
+
+### Model z from the lidar (tpipe.lidar_terrain; model_vs_dtm)
+
+The vertical solve samples the NRCan HRDEM 1 m bare-earth DTM where cached
+(`pipeline/raw/lidar/hrdem_dtm`), the 30 m terrain.npz elsewhere; the source of every sample is
+`lidar_terrain.get().source(x, y)` (1 lidar, 0 fallback; DTM below -1 m datum is a void -> fallback)
+and roadnet_report.json logs the counts per tile (`terrain_samples`, `terrain_source_tiles`).
+Level decisions use the 1 m DSM: a rail-over-rail separation by tags where nothing is overhead is
+dropped (`rail_rail_separation_dropped_no_structure`). Grade caps are design maxima (motorway 6 %,
+link / road 8 %, local 12 %, service 15 %). Curated corridors (pipeline/curated/corridors.json) cite
+their lidar evidence; mode `lidar_ground` pins a corridor's tracks to its measured ground (median of
+the corridor's track samples within 7 m, structures excluded). QA `model_vs_dtm`
+(tpipe.qa.checks_dtm, also in `tpipe.qa`): at-grade road / rail z minus the DTM per level-0 tile
+(median, p95, > 1.0 m), vertices under decks / roofs and DTM voids not judged; the gate for the
+region rollout. Writes OUT/qa/model_vs_dtm.json.
+- `bbox.json`, `interactions_report.json` (override log), `review_queue.json` (evidence and
+  ortho / DTM / DSM links per item), `qa.json`.

@@ -230,39 +230,19 @@
    "snap": 68.5,
    "profile": [
     [
-     -79.405393,
-     43.63919,
-     4.3
-    ],
-    [
-     -79.401828,
-     43.639957,
-     4.3
-    ],
-    [
-     -79.398264,
-     43.640725,
-     4.2
-    ],
-    [
-     -79.394105,
-     43.64162,
-     4.3
-    ],
-    [
      -79.391728,
      43.642131,
-     5.0
+     3.74
     ],
     [
      -79.388757,
      43.64277,
-     7.6
+     5.18
     ],
     [
      -79.38543,
      43.643486,
-     8.1
+     6.19
     ],
     [
      -79.383623,
@@ -282,35 +262,937 @@
     [
      -79.375447,
      43.645632,
-     8.2
+     6.5
     ],
     [
      -79.370931,
      43.646603,
-     7.6
+     6.48
     ],
     [
      -79.367365,
      43.647369,
-     6.8
+     6.48
     ],
     [
      -79.362611,
      43.648391,
-     6.3
+     6.52
     ],
     [
      -79.357857,
      43.649412,
-     5.5
+     6.0
     ]
    ],
-   "note": "Union Station Rail Corridor: top-of-rail level (datum m) of every main / siding track within snap m of the control line, exact (drawn and driven at this z). The Union deck section (York St to Bay St, UP platform 1A west of York) is flat at 8.31 m; streets pass under in open underpasses (roadnet: short street tunnels below the track are opened and dipped under it). The union_station landmark deck and platforms read this level from the model (landmarks.json union_station.rail_z). West of Spadina the corridor falls to the level Bathurst yards (about 4.3 m datum, the DTM there) under the Bathurst St bridge.",
+   "note": "Union Station Rail Corridor: level (datum m) of every main / siding track within snap m of the control line, exact (drawn and driven at this z). Outside the Union deck the levels are FORMATION levels from the lidar: the client draws the ballast top at z + 0.28 m and the rail head at z + 0.44 m, so the drawn ballast meets the measured ground (z = median HRDEM DTM over the corridor's track vertices within 60 m along the line, minus 0.28; vertices under decks / roofs (DSM > DTM + 3 m) and DTM voids excluded; see 'evidence'). The Union deck section (York St to Bay St) keeps 8.31 m from union_deck.json; the lidar puts the drawn ballast there at 6.9-7.1 m (review with the stations agent). Streets pass under in open underpasses. West of point 4 (E -688) the yard is usrc_yard (lidar_ground).",
    "sources": [
     "Station deck level and approach hints: pipeline/curated/union_deck.json history (stations agent, from the Union landmark model and OSM platform ways)",
     "City of Toronto DSM along the corridor (berm / viaduct tops 6-8 m datum between Spadina and Cherry)",
-    "https://en.wikipedia.org/wiki/Union_Station_Rail_Corridor (elevated corridor from Bathurst to the Don, street underpasses)"
+    "https://en.wikipedia.org/wiki/Union_Station_Rail_Corridor (elevated corridor from Bathurst to the Don, street underpasses)",
+    "NRCan HRDEM 1 m DTM + DSM mosaic (CanElevation 8_2, Open Government Licence - Canada), cached as pipeline/raw/lidar/hrdem_{dtm,dsm}/{tx}_{ty}.tif; sampled 2026-09-30 by tpipe.lidar_terrain (datum = ASL - 75 m)"
+   ],
+   "level": "formation",
+   "evidence": [
+    {
+     "point": 0,
+     "lonlat": [
+      -79.405393,
+      43.63919
+     ],
+     "z_old": 4.3,
+     "z": 3.26,
+     "n_track_vertices": 86,
+     "dtm_minus_ballast_median": 3.26,
+     "p10": 3.12,
+     "p90": 3.36,
+     "dsm_median": 3.67,
+     "kept": null,
+     "moved_to": "usrc_yard"
+    },
+    {
+     "point": 1,
+     "lonlat": [
+      -79.401828,
+      43.639957
+     ],
+     "z_old": 4.3,
+     "z": 2.02,
+     "n_track_vertices": 134,
+     "dtm_minus_ballast_median": 2.02,
+     "p10": 1.74,
+     "p90": 2.31,
+     "dsm_median": 2.4,
+     "kept": null,
+     "moved_to": "usrc_yard"
+    },
+    {
+     "point": 2,
+     "lonlat": [
+      -79.398264,
+      43.640725
+     ],
+     "z_old": 4.2,
+     "z": 2.1,
+     "n_track_vertices": 167,
+     "dtm_minus_ballast_median": 2.1,
+     "p10": 1.87,
+     "p90": 2.34,
+     "dsm_median": 2.48,
+     "kept": null,
+     "moved_to": "usrc_yard"
+    },
+    {
+     "point": 3,
+     "lonlat": [
+      -79.394105,
+      43.64162
+     ],
+     "z_old": 4.3,
+     "z": 2.14,
+     "n_track_vertices": 120,
+     "dtm_minus_ballast_median": 2.14,
+     "p10": 1.86,
+     "p90": 3.42,
+     "dsm_median": 2.7,
+     "kept": null,
+     "moved_to": "usrc_yard"
+    },
+    {
+     "point": 4,
+     "lonlat": [
+      -79.391728,
+      43.642131
+     ],
+     "z_old": 5.0,
+     "z": 3.74,
+     "n_track_vertices": 145,
+     "dtm_minus_ballast_median": 3.74,
+     "p10": 0.44,
+     "p90": 4.38,
+     "dsm_median": 4.2,
+     "kept": null
+    },
+    {
+     "point": 5,
+     "lonlat": [
+      -79.388757,
+      43.64277
+     ],
+     "z_old": 7.6,
+     "z": 5.18,
+     "n_track_vertices": 151,
+     "dtm_minus_ballast_median": 5.18,
+     "p10": 4.7,
+     "p90": 5.39,
+     "dsm_median": 5.59,
+     "kept": null
+    },
+    {
+     "point": 6,
+     "lonlat": [
+      -79.38543,
+      43.643486
+     ],
+     "z_old": 8.1,
+     "z": 6.19,
+     "n_track_vertices": 164,
+     "dtm_minus_ballast_median": 6.19,
+     "p10": 6.03,
+     "p90": 6.42,
+     "dsm_median": 6.69,
+     "kept": null
+    },
+    {
+     "point": 7,
+     "lonlat": [
+      -79.383623,
+      43.643874
+     ],
+     "z_old": 8.31,
+     "z": 8.31,
+     "n_track_vertices": 165,
+     "dtm_minus_ballast_median": 6.87,
+     "p10": 6.71,
+     "p90": 6.97,
+     "dsm_median": 7.29,
+     "kept": "Union deck (union_deck.json, stations agent): lidar disagrees by 1.4 m -- review"
+    },
+    {
+     "point": 8,
+     "lonlat": [
+      -79.382447,
+      43.644127
+     ],
+     "z_old": 8.31,
+     "z": 8.31,
+     "n_track_vertices": 83,
+     "dtm_minus_ballast_median": 7.03,
+     "p10": 6.94,
+     "p90": 7.17,
+     "dsm_median": 7.47,
+     "kept": "Union deck (union_deck.json, stations agent): lidar disagrees by 1.3 m -- review"
+    },
+    {
+     "point": 9,
+     "lonlat": [
+      -79.378216,
+      43.645037
+     ],
+     "z_old": 8.31,
+     "z": 8.31,
+     "n_track_vertices": 24,
+     "dtm_minus_ballast_median": 7.06,
+     "p10": 6.92,
+     "p90": 7.31,
+     "dsm_median": 7.42,
+     "kept": "Union deck (union_deck.json, stations agent): lidar disagrees by 1.3 m -- review"
+    },
+    {
+     "point": 10,
+     "lonlat": [
+      -79.375447,
+      43.645632
+     ],
+     "z_old": 8.2,
+     "z": 6.5,
+     "n_track_vertices": 153,
+     "dtm_minus_ballast_median": 6.5,
+     "p10": 6.43,
+     "p90": 6.67,
+     "dsm_median": 6.94,
+     "kept": null
+    },
+    {
+     "point": 11,
+     "lonlat": [
+      -79.370931,
+      43.646603
+     ],
+     "z_old": 7.6,
+     "z": 6.48,
+     "n_track_vertices": 114,
+     "dtm_minus_ballast_median": 6.48,
+     "p10": 6.42,
+     "p90": 6.53,
+     "dsm_median": 6.9,
+     "kept": null
+    },
+    {
+     "point": 12,
+     "lonlat": [
+      -79.367365,
+      43.647369
+     ],
+     "z_old": 6.8,
+     "z": 6.48,
+     "n_track_vertices": 82,
+     "dtm_minus_ballast_median": 6.48,
+     "p10": 6.29,
+     "p90": 6.53,
+     "dsm_median": 6.88,
+     "kept": null
+    },
+    {
+     "point": 13,
+     "lonlat": [
+      -79.362611,
+      43.648391
+     ],
+     "z_old": 6.3,
+     "z": 6.52,
+     "n_track_vertices": 135,
+     "dtm_minus_ballast_median": 6.52,
+     "p10": 6.4,
+     "p90": 6.58,
+     "dsm_median": 6.93,
+     "kept": null
+    },
+    {
+     "point": 14,
+     "lonlat": [
+      -79.357857,
+      43.649412
+     ],
+     "z_old": 5.5,
+     "z": 6.0,
+     "n_track_vertices": 156,
+     "dtm_minus_ballast_median": 6.0,
+     "p10": 5.91,
+     "p90": 6.08,
+     "dsm_median": 6.37,
+     "kept": null
+    }
    ]
+  },
+  {
+   "id": "usrc_yard",
+   "kind": "rail",
+   "names": [],
+   "max_class": 1,
+   "mode": "lidar_ground",
+   "structure": "rail",
+   "exact": true,
+   "snap": 68.5,
+   "profile": [
+    [
+     -79.405393,
+     43.63919,
+     null
+    ],
+    [
+     -79.401828,
+     43.639957,
+     null
+    ],
+    [
+     -79.398264,
+     43.640725,
+     null
+    ],
+    [
+     -79.394105,
+     43.64162,
+     null
+    ],
+    [
+     -79.391728,
+     43.642131,
+     null
+    ]
+   ],
+   "ballast": 0.28,
+   "note": "USRC from the Bathurst St bridge to John St (Bathurst North Yard): every main / siding track is pinned exact to its own measured ground -- the lidar DTM along the track, 80 m running median smoothed over 20 m (decks classified as ground, e.g. under Blue Jays Way, and DTM voids are shorter than the window), minus 0.28 m (drawn ballast top = DTM). The yard has two track levels (the south group 1.5-2 m above the north group; DTM sections at E -1040, -730, -660), which one control line could not hold; a free solve mis-decided the separations under the Spadina / Blue Jays Way bridges (tested 2026-09-30), hence pinned. The profile here is only the control line (z unused).",
+   "sources": [
+    "NRCan HRDEM 1 m DTM + DSM mosaic (CanElevation 8_2, Open Government Licence - Canada), cached as pipeline/raw/lidar/hrdem_{dtm,dsm}/{tx}_{ty}.tif; sampled 2026-09-30 by tpipe.lidar_terrain (datum = ASL - 75 m)"
+   ]
+  },
+  {
+   "id": "spadina_usrc_bridge",
+   "names": [
+    "Spadina Avenue"
+   ],
+   "max_class": 2,
+   "mode": "absolute",
+   "structure": "girder",
+   "snap": 25.0,
+   "profile": [
+    [
+     -79.393986,
+     43.642939,
+     8.37
+    ],
+    [
+     -79.393902,
+     43.642804,
+     8.4
+    ],
+    [
+     -79.39386,
+     43.642669,
+     8.76
+    ],
+    [
+     -79.393807,
+     43.642534,
+     9.42
+    ],
+    [
+     -79.393753,
+     43.642399,
+     10.25
+    ],
+    [
+     -79.393715,
+     43.642264,
+     11.05
+    ],
+    [
+     -79.393627,
+     43.642129,
+     11.65
+    ],
+    [
+     -79.393592,
+     43.641994,
+     12.27
+    ],
+    [
+     -79.393524,
+     43.641859,
+     12.57
+    ],
+    [
+     -79.393483,
+     43.641724,
+     12.79
+    ],
+    [
+     -79.393423,
+     43.641589,
+     12.78
+    ],
+    [
+     -79.393358,
+     43.641454,
+     12.65
+    ],
+    [
+     -79.393303,
+     43.641319,
+     12.31
+    ],
+    [
+     -79.39323,
+     43.641184,
+     11.93
+    ]
+   ],
+   "note": "Spadina Avenue over the USRC (both carriageways and the 510 ROW): approaches on fill from the lidar DTM, the deck from the lidar DSM along the ROW centre (no traffic on the ROW). The model's solve put the deck 0.5-0.8 m low and started the north ramp 40 m early (+1.5 m at Front St).",
+   "sources": [
+    "NRCan HRDEM 1 m DTM + DSM mosaic (CanElevation 8_2, OGL-Canada), pipeline/raw/lidar/hrdem_{dtm,dsm}; sampled 2026-09-30 by tpipe.lidar_terrain (datum = ASL - 75 m; DSM = median of a 5-point cross 1.5 m wide)"
+   ],
+   "evidence": [
+    {
+     "xy": [
+      -870.3,
+      -1140
+     ],
+     "z": 8.37,
+     "on": "ground: DTM",
+     "dtm": 8.37,
+     "dsm": 8.41
+    },
+    {
+     "xy": [
+      -863.5,
+      -1155
+     ],
+     "z": 8.4,
+     "on": "ground: DTM",
+     "dtm": 8.41,
+     "dsm": 8.55
+    },
+    {
+     "xy": [
+      -860.1,
+      -1170
+     ],
+     "z": 8.76,
+     "on": "ground: DTM",
+     "dtm": 8.76,
+     "dsm": 8.8
+    },
+    {
+     "xy": [
+      -855.8,
+      -1185
+     ],
+     "z": 9.42,
+     "on": "ground: DTM",
+     "dtm": 9.42,
+     "dsm": 9.45
+    },
+    {
+     "xy": [
+      -851.5,
+      -1200
+     ],
+     "z": 10.25,
+     "on": "ground: DTM (abutment)",
+     "dtm": 10.25,
+     "dsm": 10.28
+    },
+    {
+     "xy": [
+      -848.4,
+      -1215
+     ],
+     "z": 11.05,
+     "on": "deck: DSM median of centre and +-9 m (11.14, 10.72, 11.05)",
+     "dtm": 7.29,
+     "dsm": 11.14
+    },
+    {
+     "xy": [
+      -841.3,
+      -1230
+     ],
+     "z": 11.65,
+     "on": "deck: DSM (11.58, 11.70; centre 14.45 = overhead sign, dropped)",
+     "dtm": -0.25,
+     "dsm": 14.45
+    },
+    {
+     "xy": [
+      -838.5,
+      -1245
+     ],
+     "z": 12.27,
+     "on": "deck: DSM median (12.40, 12.05, 12.27)",
+     "dtm": -1.85,
+     "dsm": 12.4
+    },
+    {
+     "xy": [
+      -833.0,
+      -1260
+     ],
+     "z": 12.57,
+     "on": "deck: DSM median",
+     "dtm": 2.56,
+     "dsm": 12.79
+    },
+    {
+     "xy": [
+      -829.7,
+      -1275
+     ],
+     "z": 12.79,
+     "on": "deck: DSM median",
+     "dtm": 3.86,
+     "dsm": 12.99
+    },
+    {
+     "xy": [
+      -824.9,
+      -1290
+     ],
+     "z": 12.78,
+     "on": "deck: DSM median",
+     "dtm": 8.86,
+     "dsm": 13.03
+    },
+    {
+     "xy": [
+      -819.6,
+      -1305
+     ],
+     "z": 12.65,
+     "on": "abutment / fill: DTM",
+     "dtm": 12.85,
+     "dsm": 14.81
+    },
+    {
+     "xy": [
+      -815.2,
+      -1320
+     ],
+     "z": 12.31,
+     "on": "fill: DTM",
+     "dtm": 12.54,
+     "dsm": 17.42
+    },
+    {
+     "xy": [
+      -809.3,
+      -1335
+     ],
+     "z": 11.93,
+     "on": "fill: DTM",
+     "dtm": 12.08,
+     "dsm": 12.16
+    }
+   ]
+  },
+  {
+   "id": "blue_jays_way_usrc_bridge",
+   "names": [
+    "Blue Jays Way"
+   ],
+   "max_class": 4,
+   "mode": "absolute",
+   "structure": "girder",
+   "snap": 25.0,
+   "profile": [
+    [
+     -79.391239,
+     43.643432,
+     8.08
+    ],
+    [
+     -79.391188,
+     43.643302,
+     8.48
+    ],
+    [
+     -79.391135,
+     43.643172,
+     9.29
+    ],
+    [
+     -79.391082,
+     43.643043,
+     10.17
+    ],
+    [
+     -79.391032,
+     43.642913,
+     11.04
+    ],
+    [
+     -79.390981,
+     43.642783,
+     11.94
+    ],
+    [
+     -79.390939,
+     43.642651,
+     12.8
+    ],
+    [
+     -79.390941,
+     43.642252,
+     14.31
+    ],
+    [
+     -79.390947,
+     43.642117,
+     14.18
+    ],
+    [
+     -79.390965,
+     43.642015,
+     13.8
+    ],
+    [
+     -79.390988,
+     43.641966,
+     13.6
+    ],
+    [
+     -79.391039,
+     43.641911,
+     13.1
+    ],
+    [
+     -79.391097,
+     43.641863,
+     12.7
+    ],
+    [
+     -79.391191,
+     43.641819,
+     12.1
+    ],
+    [
+     -79.391515,
+     43.641736,
+     10.5
+    ],
+    [
+     -79.391895,
+     43.641644,
+     9.2
+    ],
+    [
+     -79.392391,
+     43.641539,
+     9.9
+    ],
+    [
+     -79.392881,
+     43.641436,
+     11.5
+    ],
+    [
+     -79.393183,
+     43.64137,
+     12.2
+    ]
+   ],
+   "note": "Blue Jays Way over the USRC: the north approach rises 8.1 -> 12.8 m (5.2 %) on fill from Front St (DTM), the deck is at 14.2-14.3 m (DSM); the model had the deck at 16.2 m and the approach up to 2.7 m above the ground. South of the deck the street turns west to Spadina on fill and ground (DTM), the deck reaching to about N -1248 (DSM).",
+   "sources": [
+    "NRCan HRDEM 1 m DTM + DSM mosaic (CanElevation 8_2, OGL-Canada), pipeline/raw/lidar/hrdem_{dtm,dsm}; sampled 2026-09-30 by tpipe.lidar_terrain (datum = ASL - 75 m; DSM = median of a 5-point cross 1.5 m wide)"
+   ],
+   "evidence": [
+    {
+     "xy": [
+      -648.6,
+      -1085.3
+     ],
+     "z": 8.08,
+     "on": "ground: DTM (Front St)",
+     "dtm": 8.08,
+     "dsm": 8.12
+    },
+    {
+     "xy": [
+      -644.5,
+      -1099.7
+     ],
+     "z": 8.48,
+     "on": "ground: DTM",
+     "dtm": 8.48,
+     "dsm": 8.54
+    },
+    {
+     "xy": [
+      -640.2,
+      -1114.1
+     ],
+     "z": 9.29,
+     "on": "ground: DTM",
+     "dtm": 9.29,
+     "dsm": 10.15
+    },
+    {
+     "xy": [
+      -636.0,
+      -1128.5
+     ],
+     "z": 10.17,
+     "on": "ground: DTM",
+     "dtm": 10.17,
+     "dsm": 10.56
+    },
+    {
+     "xy": [
+      -631.9,
+      -1142.9
+     ],
+     "z": 11.04,
+     "on": "ground: DTM",
+     "dtm": 11.04,
+     "dsm": 11.29
+    },
+    {
+     "xy": [
+      -627.8,
+      -1157.4
+     ],
+     "z": 11.94,
+     "on": "ground: DTM",
+     "dtm": 11.94,
+     "dsm": 11.99
+    },
+    {
+     "xy": [
+      -624.4,
+      -1172.0
+     ],
+     "z": 12.8,
+     "on": "abutment: DTM",
+     "dtm": 12.8,
+     "dsm": 12.85
+    },
+    {
+     "xy": [
+      -624.6,
+      -1216.3
+     ],
+     "z": 14.31,
+     "on": "deck: DSM",
+     "dtm": 8.64,
+     "dsm": 14.31
+    },
+    {
+     "xy": [
+      -625.1,
+      -1231.3
+     ],
+     "z": 14.18,
+     "on": "deck: DSM",
+     "dtm": 8.43,
+     "dsm": 14.18
+    },
+    {
+     "xy": [
+      -626.5,
+      -1242.7
+     ],
+     "z": 13.8,
+     "on": "deck: DSM",
+     "dtm": 9.5,
+     "dsm": 13.8
+    },
+    {
+     "xy": [
+      -628.4,
+      -1248.1
+     ],
+     "z": 13.6,
+     "on": "deck end: DSM",
+     "dtm": 11.2,
+     "dsm": 13.6
+    },
+    {
+     "xy": [
+      -632.5,
+      -1254.2
+     ],
+     "z": 13.1,
+     "on": "abutment / fill: DTM",
+     "dtm": 13.1,
+     "dsm": 13.2
+    },
+    {
+     "xy": [
+      -637.2,
+      -1259.6
+     ],
+     "z": 12.7,
+     "on": "fill: DTM",
+     "dtm": 12.7,
+     "dsm": 12.7
+    },
+    {
+     "xy": [
+      -644.8,
+      -1264.5
+     ],
+     "z": 12.1,
+     "on": "fill: DTM",
+     "dtm": 12.1,
+     "dsm": 12.2
+    },
+    {
+     "xy": [
+      -670.9,
+      -1273.7
+     ],
+     "z": 10.5,
+     "on": "ground: DTM",
+     "dtm": 10.5,
+     "dsm": 10.6
+    },
+    {
+     "xy": [
+      -701.6,
+      -1283.9
+     ],
+     "z": 9.2,
+     "on": "ground: DTM",
+     "dtm": 9.2,
+     "dsm": 9.8
+    },
+    {
+     "xy": [
+      -741.6,
+      -1295.6
+     ],
+     "z": 9.9,
+     "on": "ground: DTM",
+     "dtm": 9.9,
+     "dsm": 10.0
+    },
+    {
+     "xy": [
+      -781.1,
+      -1307.0
+     ],
+     "z": 11.5,
+     "on": "ground: DTM (DSM 14.7 = sign)",
+     "dtm": 11.5,
+     "dsm": 14.7
+    },
+    {
+     "xy": [
+      -805.5,
+      -1314.3
+     ],
+     "z": 12.2,
+     "on": "ground: DTM (Spadina)",
+     "dtm": 12.2,
+     "dsm": 12.3
+    }
+   ]
+  },
+  {
+   "id": "spadina_510_usrc_bridge",
+   "kind": "rail",
+   "ways": [
+    22689356,
+    22689357,
+    340033781,
+    340033783,
+    553279131,
+    680812256,
+    1132764595,
+    1132764596
+   ],
+   "max_class": 4,
+   "mode": "absolute",
+   "structure": "rail",
+   "exact": true,
+   "snap": 8.0,
+   "profile": [
+    [
+     -79.393986,
+     43.642939,
+     8.37
+    ],
+    [
+     -79.393902,
+     43.642804,
+     8.4
+    ],
+    [
+     -79.39386,
+     43.642669,
+     8.76
+    ],
+    [
+     -79.393807,
+     43.642534,
+     9.42
+    ],
+    [
+     -79.393753,
+     43.642399,
+     10.25
+    ],
+    [
+     -79.393715,
+     43.642264,
+     11.05
+    ],
+    [
+     -79.393627,
+     43.642129,
+     11.65
+    ],
+    [
+     -79.393592,
+     43.641994,
+     12.27
+    ],
+    [
+     -79.393524,
+     43.641859,
+     12.57
+    ],
+    [
+     -79.393483,
+     43.641724,
+     12.79
+    ],
+    [
+     -79.393423,
+     43.641589,
+     12.78
+    ],
+    [
+     -79.393358,
+     43.641454,
+     12.65
+    ],
+    [
+     -79.393303,
+     43.641319,
+     12.31
+    ],
+    [
+     -79.39323,
+     43.641184,
+     11.93
+    ]
+   ],
+   "note": "The 510 Spadina tracks over the USRC ride the ROW slab: the same measured profile as spadina_usrc_bridge (lidar DSM / DTM sampled on the ROW centre line, i.e. the slab top). The model had the tram solved on its own as a flat 12.4 m deck from Front St (up to 3 m off the road). Way-filtered: pinned per stroke in tpipe.roadnet only (rail_geom.curated_rail_z skips it, so the heavy-rail tracks under the bridge are untouched).",
+   "sources": [
+    "NRCan HRDEM 1 m DTM + DSM mosaic (CanElevation 8_2, OGL-Canada), pipeline/raw/lidar/hrdem_{dtm,dsm}; sampled 2026-09-30 by tpipe.lidar_terrain (datum = ASL - 75 m; DSM = median of a 5-point cross 1.5 m wide)"
+   ],
+   "evidence": "see spadina_usrc_bridge"
   }
  ]
 }

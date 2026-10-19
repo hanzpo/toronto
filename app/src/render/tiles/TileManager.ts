@@ -7,6 +7,8 @@ import { GroundPage, GROUND_LAYERS } from './materials';
 import { roadMaterial } from './roadMaterial';
 import { groundMaterial } from './groundMaterial';
 import { cutFloor, type CutBuf } from '../../workers/ground';
+import { surfaceHeight, type SurfIndex, type SurfMesh } from '../../workers/surface';
+import { surfaceMaterials } from './surfaceMaterial';
 import type { StreetBuf } from '../../workers/street';
 import { HousePools } from './houses';
 import { facadeMaterial } from './facadeMaterial';
@@ -74,6 +76,8 @@ export interface Tile {
   cuts?: CutBuf | null;
   /** embankment fills (level 0): 8 floats per segment, see workers/ground.ts buildGround */
   emb?: Float32Array | null;
+  /** unified surface top-triangle index (?surf=1) */
+  surf?: SurfIndex | null;
   /** street props / parking lots (level 0), consumed by PropsLayer */
   props: import('../../workers/props').PropsBuf | null;
   /** rooftops / construction / laneways (level 0), consumed by UrbanLayer */
@@ -245,11 +249,22 @@ export class TileManager {
         zones = sj.zones ?? [];
       }
     } catch { /* optional */ }
+    // ?net=2: the primitive-network slice replaces the tile street drawing in its bbox
+    let net2: number[] | null = null;
+    if (/[?&]net=2\b/.test(location.search)) {
+      try {
+        const r = await fetch(`${this.dataRoot}/net2/bbox.json`);
+        if (r.ok && (r.headers.get('content-type') ?? '').includes('json')) {
+          const j = (await r.json()) as { bbox: number[]; rail?: boolean };
+          net2 = [...j.bbox, j.rail ? 1 : 0];          // [4]: the slice draws the heavy rail too
+        }
+      } catch { /* no slice */ }
+    }
     const n = Math.max(1, Math.min(6, (navigator.hardwareConcurrency || 4) - 1));
     for (let i = 0; i < n; i++) {
       const w = new Worker(new URL('../../workers/tileWorker.ts', import.meta.url), { type: 'module' });
       w.onmessage = (ev: MessageEvent<WorkerOut>) => this.onWorker(i, ev.data);
-      w.postMessage({ type: 'config', suppress, heritage, zones, build: this.manifest.build ?? 0, vground: !/[?&]vground=0\b/.test(location.search) } satisfies WorkerIn);
+      w.postMessage({ type: 'config', suppress, heritage, zones, build: this.manifest.build ?? 0, vground: !/[?&]vground=0\b/.test(location.search), surf: /[?&]surf=1\b/.test(location.search), net2 } satisfies WorkerIn);
       this.workers.push(w);
       this.workerLoad.push(0);
     }
@@ -279,6 +294,11 @@ export class TileManager {
       if (!S) continue;
       const t = this.tiles.get(key(L, Math.floor(e / S), Math.floor(n / S)));
       if (t && t.heights) {
+        if (t.surf) {
+          // unified surface (?surf=1): the drawn ground itself
+          const z = surfaceHeight(t.surf, Math.min(Math.max(e - t.tx * S, 0), S - 1e-3), Math.min(Math.max(n - t.ty * S, 0), S - 1e-3));
+          if (!Number.isNaN(z)) return z;
+        }
         if (t.cuts) {
           // open cuts / portal approaches: the ground there is the cut floor (rail level)
           const f = cutFloor(t.cuts, e - t.tx * S, n - t.ty * S);
@@ -678,6 +698,8 @@ export class TileManager {
     if (m.color) g.setAttribute('color', new THREE.BufferAttribute(m.color, 4, true));
     if (m.attrs) for (const k in m.attrs) g.setAttribute(k, new THREE.BufferAttribute(m.attrs[k].array, m.attrs[k].size));
     g.setIndex(new THREE.BufferAttribute(m.index, 1));
+    const groups = (m as SurfMesh).groups;
+    if (groups) for (const [start, cnt, mi] of groups) if (cnt) g.addGroup(start, cnt, mi);
     g.boundingSphere = sphere.clone();
     const b = new THREE.Box3();
     b.setFromCenterAndSize(sphere.center, new THREE.Vector3(sphere.radius * 1.4, sphere.radius * 1.4, sphere.radius * 1.4));
@@ -720,7 +742,7 @@ export class TileManager {
     let terrain = raster;
     t.terrainFar = null;
     if (r.vground) {
-      terrain = new THREE.Mesh(this.geometry(r.vground, sphere), groundMaterial());
+      terrain = new THREE.Mesh(this.geometry(r.vground, sphere), (r.vground as SurfMesh).groups ? surfaceMaterials() : groundMaterial()) as unknown as typeof raster;
       count(r.vground);
       t.terrainFar = raster;
       raster.visible = false;
@@ -762,6 +784,7 @@ export class TileManager {
     t.canopy = r.canopy;
     t.cuts = r.cuts ?? null;
     t.emb = r.emb ?? null;
+    t.surf = r.surf ?? null;
     t.props = r.props;
     t.urban = r.urban ?? null;
     if (r.urban) bytes += r.urban.items.byteLength;
@@ -791,7 +814,7 @@ export class TileManager {
     if (t.page && t.layer >= 0) t.page.release(t.layer);
     this.bytes -= t.bytes;
     Object.assign(t, {
-      group: null, terrain: null, terrainFar: null, buildings: null, collide: null, roads: null, railStart: 0, streetMask: 7, roadNear: 0, heights: null, houses: null, street: null, canopy: null, cuts: null, emb: null, props: null, urban: null,
+      group: null, terrain: null, terrainFar: null, buildings: null, collide: null, roads: null, railStart: 0, streetMask: 7, roadNear: 0, heights: null, houses: null, street: null, canopy: null, cuts: null, emb: null, surf: null, props: null, urban: null,
       page: null, layer: -1, bytes: 0, state: 'none', counts: null,
     });
     this.readyCount--;

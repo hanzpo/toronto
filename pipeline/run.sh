@@ -45,6 +45,11 @@ uv run python -m tpipe.ferries  # water life: ferry routes, marinas, sailing loo
 # vector ground at level 0 (land cover, water, shores, open cuts / portals; docs/SPEC.md)
 osmium tags-filter work/combined.osm.pbf nwr/leisure=pitch,track nwr/man_made=pier,breakwater,groyne,quay w/cutting w/embankment w/natural=cliff -o work/ground_extra.osm.pbf --overwrite
 uv run python -m tpipe.ground --workers 2
+# unified at-grade surface (docs/SURFACE.md): sf_* added to every level-0 tile in place; any tile
+# error (exception, open edge, area mismatch) aborts the run. Primitive-network bands where present.
+OUT_DIR=${TPIPE_OUT:-../app/public/data}
+NET2=(); [ -f "$OUT_DIR/net2/surface.npz" ] && NET2=(--net2 "$OUT_DIR/net2/surface.npz")
+uv run python -m tpipe.surface --src "$OUT_DIR" --out "$OUT_DIR" --in-place --all --workers 2 ${NET2[@]+"${NET2[@]}"}
 uv run python -m tpipe.landmarks
 
 # 5. Air traffic (needs raw/air/sd: vradarserver standing-data, see docs/AIR.md)

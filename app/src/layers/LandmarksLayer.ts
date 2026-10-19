@@ -1,5 +1,5 @@
-// Custom landmark models (CN Tower, TD Centre, City Hall, ...) plus animated
-// sheets for the Niagara waterfalls. The tile renderer already skips the OSM
+// Custom landmark models (CN Tower, TD Centre, City Hall, ...) plus Niagara
+// Falls (landmarks/falls.ts). The tile renderer already skips the OSM
 // buildings these replace (landmarks.json `suppress`).
 //
 // Draw calls: landmarks near each other are clustered (≤ 2.5 km) and each
@@ -8,10 +8,11 @@
 // turns ~75 per-landmark draws (+ ~30 shadow draws) downtown into ~25.
 import * as THREE from 'three/webgpu';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { attribute, color, float, fract, mix, sin, time, uv } from 'three/tsl';
+import { attribute } from 'three/tsl';
 import type { Engine } from '../engine/Engine';
 import type { FrameContext, Layer } from '../engine/types';
-import { LANDMARKS, createLandmarks, setNight, waterfalls, type LandmarkEntry } from '../landmarks';
+import { LANDMARKS, createLandmarks, setNight, type LandmarkEntry } from '../landmarks';
+import { buildFalls, setFallsDaylight } from '../landmarks/falls';
 import { useApp } from '../state/store';
 import { OCC } from '../render/tiles/facadeMaterial';
 import { CULL, SHADOW_ONLY_LAYER } from '../engine/view';
@@ -185,13 +186,15 @@ export class LandmarksLayer implements Layer {
         pts: list.map((e) => ({ x: e.pos[0], y: e.base + (LANDMARKS[e.id].height || 0) / 2, z: -e.pos[1], lod: LANDMARKS[e.id].lodDistance ?? 1800 })),
       });
     });
-    for (const w of waterfalls(json)) this.group.add(waterfallMesh(w));
     this.group.traverse((o) => {
       if ((o as THREE.Mesh).isMesh && !o.userData.shadowProxy) {
         o.castShadow = true;
         o.receiveShadow = true;
       }
     });
+    // Niagara Falls: curtains, foam, talus, mist (landmarks/falls.ts); no shadow casting
+    const falls = buildFalls(json);
+    if (falls) this.group.add(falls);
     engine.scene.add(this.group);
   }
 
@@ -205,6 +208,7 @@ export class LandmarksLayer implements Layer {
       cl.high.visible = near;
       cl.low.visible = !near;
     }
+    setFallsDaylight(ctx.daylight);
     const night = Math.round((1 - ctx.daylight) * 50) / 50;
     // office towers' lit windows also follow office occupancy (render/tiles/facadeMaterial OCC.y)
     const occ = Math.round((OCC.value as THREE.Vector3).y * 50);
@@ -218,36 +222,4 @@ export class LandmarksLayer implements Layer {
   dispose() {
     this.group.removeFromParent();
   }
-}
-
-function waterfallMesh(w: LandmarkEntry): THREE.Mesh {
-  const line = (w as unknown as { line: [number, number][] }).line;
-  const top = (w as unknown as { top: number }).top;
-  const bottom = (w as unknown as { bottom: number }).bottom;
-  const pos: number[] = [];
-  const uvs: number[] = [];
-  const idx: number[] = [];
-  let acc = 0;
-  for (let i = 0; i < line.length; i++) {
-    const [e, n] = line[i];
-    if (i > 0) acc += Math.hypot(e - line[i - 1][0], n - line[i - 1][1]);
-    pos.push(e, top, -n, e, bottom, -n);
-    uvs.push(acc / 20, 1, acc / 20, 0);
-    if (i > 0) {
-      const a = (i - 1) * 2;
-      idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
-    }
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
-  g.setIndex(idx);
-  const m = new THREE.MeshBasicNodeMaterial({ side: THREE.DoubleSide, transparent: true });
-  // falling streaks: bands scrolling down, broken up along the brink
-  const streak = fract(uv().y.mul(6).add(time.mul(1.4)).add(sin(uv().x.mul(7.3)).mul(0.35)));
-  m.colorNode = mix(color(0x9fc9d8), color(0xf4fbff), streak.pow(3));
-  m.opacityNode = float(0.92);
-  const mesh = new THREE.Mesh(g, m);
-  mesh.name = w.id;
-  return mesh;
 }

@@ -13,9 +13,10 @@ import {
 } from 'three/tsl';
 import type { FrameContext } from '../../engine/types';
 import { U } from '../../render/uniforms';
-import { AIRCRAFT, aircraftModel } from '../../models/aircraft';
-import { PH } from '../track';
-import type { AirSystem } from '../AirSystem';
+import { AIRCRAFT, aircraftModel, type AircraftSpec } from '../../models/aircraft';
+import { PROF_T } from '../../models/aircraftBuilder';
+import { PH, type Track } from '../track';
+import { AirSystem } from '../AirSystem';
 import {
   GSE_KINDS, gseGeometry, tunnelGeometry, linkGeometry, rotundaGeometry, cabGeometry, legsGeometry, bogieGeometry,
   mastGeometry, apronMaterial, BRIDGE_FLOOR, MAST_H, type GseKind,
@@ -36,7 +37,36 @@ export interface ApronData {
 
 type Mover = { path: number; speed: number; phase: number; kind: 'train' | 'fuel' | 'cater' | 'belt' | 'push'; carts: number };
 type Path = { xyz: Float32Array; cum: Float32Array; L: number };
-type Placed = { k: GseKind; x: number; y: number; z: number; yaw: number };
+type Placed = { k: GseKind; x: number; y: number; z: number; yaw: number; sy?: number };
+/** an aircraft at its stand (or pushing back): pose + seconds until pushback starts */
+interface Parked { e: number; n: number; h: number; yaw: number; type: string; phase: number; key: string; pushIn: number }
+
+const RETRACT_BEFORE_PUSH = 150; // s: bridge pulls back, turnaround GSE leaves
+const TUG_BEFORE_PUSH = 100; // s: pushback tractor + towbar connected
+
+/** fuselage half width at station x (m from the nose tip): nose plan profile, tail-cone taper */
+export function halfWidthAt(s: AircraftSpec, x: number): number {
+  const W = s.fus.w / 2, nose = s.fus.nose, L = s.fus.len ?? s.length, tail = s.fus.tail;
+  if (x < nose) {
+    const f = Math.max(0, x / nose);
+    const T = s.fus.prof?.T ?? PROF_T, w = s.fus.prof?.w;
+    if (w) {
+      let i = 0;
+      while (i < T.length - 2 && T[i + 1] < f) i++;
+      const t = (f - T[i]) / Math.max(1e-6, T[i + 1] - T[i]);
+      return W * (w[i] + (w[i + 1] - w[i]) * Math.min(1, Math.max(0, t)));
+    }
+    const e = s.fus.noseShape[2];
+    return W * Math.pow(1 - Math.pow(1 - f, e), 1 / e);
+  }
+  if (x > L - tail) return W * (1 - 0.55 * Math.min(1, (x - (L - tail)) / tail));
+  return W;
+}
+
+/** passenger door sill above the ground at the main gear */
+export const sillOf = (s: AircraftSpec) => s.fus.belly + s.fus.h * 0.4;
+/** lower-deck cargo door sill */
+const cargoSillOf = (s: AircraftSpec) => s.fus.belly + s.fus.h * 0.14;
 
 const SERVICE_MAX = 64; // parked aircraft with a turnaround set drawn at once
 const DOCK_RATE = 1 / 45; // bridge travel: full stow ↔ dock in 45 s (sim)
@@ -137,8 +167,8 @@ export class ApronFurniture {
     this.staticN = { ...cnt };
     this.setupMovers(d.paths);
     const nMov = this.movers.length;
-    const extra: Record<GseKind, number> = { tug: 2, cart: 4, belt: 1, fuel: 1, cater: 1, push: 1, gpu: 0 };
-    const extraMov: Record<GseKind, number> = { tug: nMov, cart: nMov * 3, belt: nMov, fuel: nMov, cater: nMov, push: nMov, gpu: 0 };
+    const extra: Record<GseKind, number> = { tug: 2, cart: 8, belt: 2, fuel: 1, cater: 0, push: 1, gpu: 1, hydrant: 1, caterup: 2, stairs: 1, towbar: 1 };
+    const extraMov: Record<GseKind, number> = { tug: nMov, cart: nMov * 3, belt: nMov, fuel: nMov, cater: nMov, push: nMov, gpu: 0, hydrant: 0, caterup: 0, stairs: 0, towbar: 0 };
     this.gm = {} as Record<GseKind, THREE.InstancedMesh>;
     for (const k of GSE_KINDS) {
       this.gm[k] = inst(A.gse[k], A.mat, cnt[k] + extra[k] * SERVICE_MAX + extraMov[k], `gse-${k}`);
@@ -250,9 +280,13 @@ export class ApronFurniture {
     const night = 1 - ctx.daylight;
     for (const g of this.glow) g.visible = night > 0.05;
     const [ox, on] = this.d.origin;
-    // parked / pushing-back aircraft of this airport by stand
-    const parked = new Map<number, { e: number; n: number; h: number; yaw: number; type: string; phase: number; key: string }>();
+    // parked / pushing-back aircraft of this airport by stand (+ time to pushback from the
+    // departure track the air system has already built for it)
+    const parked = new Map<number, Parked>();
     if (sys && this.d.icao && sys.ready) {
+      const { dayNum: D, tau } = AirSystem.airDay(ctx.simMs);
+      const cache = (sys as unknown as { cache: Map<string, { tr: Track }> }).cache;
+      const ncfg = sys.airports.get(this.d.icao)?.j.configs.length ?? 1;
       for (let i = 0; i < sys.count; i++) {
         const pl = sys.planes[i];
         if (pl.icao !== this.d.icao) continue;
@@ -260,52 +294,38 @@ export class ApronFurniture {
         if (ph !== PH.PARKED && ph !== PH.PUSHBACK) continue;
         const R = sys.schedules.get(pl.profile)?.airports[pl.icao]?.rot;
         if (!R) continue;
-        parked.set(R.st[pl.rot], { e: pl.pose.e, n: pl.pose.n, h: pl.pose.h, yaw: pl.pose.yaw, type: pl.type, phase: ph, key: pl.key });
+        let pushIn = Infinity;
+        if (ph === PH.PUSHBACK) pushIn = 0;
+        else if (pl.kind !== 'arr') {
+          for (let c = 0; c < ncfg; c++) {
+            const tr = cache?.get(`${pl.key}:d:${c}`)?.tr;
+            if (tr) { pushIn = tr.t0 - (tau - (pl.dayNum - D) * 86400); break; }
+          }
+        }
+        parked.set(R.st[pl.rot], { e: pl.pose.e, n: pl.pose.n, h: pl.pose.h, yaw: pl.pose.yaw, type: pl.type, phase: ph, key: pl.key, pushIn });
       }
     }
-    // ---- bridges
+    // ---- bridges: every parked jet's L1 (and wide-body L2) door takes the nearest free bridge
+    // that can reach it from ahead of / beside the door on the left (greedy by reach)
     const dtSim = Number.isFinite(this.lastSim) ? (ctx.simMs - this.lastSim) / 1000 : 1e9;
     this.lastSim = ctx.simMs;
     const snap = !(dtSim >= 0 && dtSim < 20);
-    const sib = sys ? this.sibs(sys) : [];
+    const dockKey = [...parked.entries()].filter(([, p]) => p.phase === PH.PARKED && p.pushIn > RETRACT_BEFORE_PUSH).map(([s, p]) => `${s}:${p.key}`).join(',');
+    if (dockKey !== this.dockKey) {
+      this.dockKey = dockKey;
+      this.assignBridges(parked);
+    }
     let any = false;
-    this.bridges.forEach((b) => {
-      let tgt = 0;
-      b.has = false;
-      const cands = b.stand >= 0 ? (sib[b.stand]?.length ? sib[b.stand] : [b.stand]) : [];
-      for (const si of cands) {
-        const p = parked.get(si);
-        if (!p || p.phase !== PH.PARKED) continue;
-        const spec = AIRCRAFT[p.type] ?? AIRCRAFT.A320;
-        if (spec.cls === 'turboprop') continue;
-        const pDoors = spec.doors.filter((d) => d[2] === 'P').map((d) => d[0]).sort((a, c) => a - c);
-        if (b.door === 1 && (spec.cls !== 'wide' || pDoors.length < 2)) continue;
-        const dx = pDoors[Math.min(b.door, pDoors.length - 1)] ?? 5;
-        const noseX = aircraftModel(p.type).points.noseX;
-        const fe = Math.cos(p.yaw), fn = Math.sin(p.yaw);
-        const le = -fn, ln = fe;
-        const half = spec.fus.w / 2;
-        const de = p.e + fe * (noseX - dx) + le * half, dn = p.n + fn * (noseX - dx) + ln * half;
-        const tx = de - ox, tz = -(dn - on);
-        const reach = Math.hypot(tx - b.rx, tz - b.rz);
-        if (reach < 9 || reach > 52) continue;
-        // bridges reach a door from ahead of it / beside it on the left, never from behind the wing
-        const ve = (b.rx + ox) - de, vn = (on - b.rz) - dn;
-        if (ve * le + vn * ln < 0.3 * reach || ve * fe + vn * fn < -0.35 * reach) continue;
-        b.tx = tx; b.tz = tz; b.th = p.h + spec.fus.belly + spec.fus.h * 0.4;
-        b.nx = le; b.nz = -ln;
-        b.has = true;
-        tgt = 1;
-        break;
-      }
+    for (const b of this.bridges) {
+      const tgt = b.has ? 1 : 0;
       const k0 = b.k;
       b.k = snap ? tgt : tgt > b.k ? Math.min(tgt, b.k + DOCK_RATE * dtSim) : Math.max(tgt, b.k - DOCK_RATE * 1.6 * dtSim);
       if (b.k !== k0 || b.dirty) { b.dirty = false; any = true; }
-    });
+    }
     if (any) this.layoutBridges();
     if (!this.gseOn) return;
-    // ---- turnaround GSE (rebuilt when the set of parked aircraft changes)
-    const key = [...parked.entries()].map(([s, p]) => `${s}:${p.key}:${p.phase}`).join(',');
+    // ---- turnaround GSE (rebuilt when the set of parked aircraft / their phase changes)
+    const key = [...parked.entries()].map(([s, p]) => `${s}:${p.key}:${p.phase}:${p.pushIn < TUG_BEFORE_PUSH ? 2 : p.pushIn < RETRACT_BEFORE_PUSH ? 1 : 0}`).join(',');
     if (key !== this.svcKey || [...parked.values()].some((p) => p.phase === PH.PUSHBACK)) {
       this.svcKey = key;
       this.layoutService(parked, ctx);
@@ -363,54 +383,142 @@ export class ApronFurniture {
     for (const m of Object.values(this.bm)) m.instanceMatrix.needsUpdate = true;
   }
 
-  /** turnaround set around each parked aircraft (service side = right), tug on the nose during pushback */
-  private layoutService(parked: Map<number, { e: number; n: number; h: number; yaw: number; type: string; phase: number; key: string }>, _ctx: FrameContext) {
+  private dockKey = '\u0000';
+
+  private assignBridges(parked: Map<number, Parked>) {
+    const [ox, on] = this.d.origin;
+    const cand: { cost: number; b: number; door: string; t: [number, number, number, number, number] }[] = [];
+    for (const [si, p] of parked) {
+      if (p.phase !== PH.PARKED || p.pushIn <= RETRACT_BEFORE_PUSH) continue;
+      const spec = AIRCRAFT[p.type] ?? AIRCRAFT.A320;
+      if (spec.cls === 'turboprop') continue; // airstairs
+      const pDoors = spec.doors.filter((d) => d[2] === 'P').map((d) => d[0]).sort((a, c) => a - c);
+      const noseX = aircraftModel(p.type).points.noseX;
+      const fe = Math.cos(p.yaw), fn = Math.sin(p.yaw), le = -fn, ln = fe;
+      const nDoors = spec.cls === 'wide' ? Math.min(2, pDoors.length) : 1;
+      for (let d = 0; d < nDoors; d++) {
+        const dx = pDoors[d];
+        const hw = halfWidthAt(spec, dx);
+        const de = p.e + fe * (noseX - dx) + le * hw, dn = p.n + fn * (noseX - dx) + ln * hw;
+        const tx = de - ox, tz = -(dn - on);
+        this.bridges.forEach((b, bi) => {
+          const reach = Math.hypot(tx - b.rx, tz - b.rz);
+          if (reach < 9 || reach > 52) return;
+          const ve = (b.rx + ox) - de, vn = (on - b.rz) - dn;
+          if (ve * le + vn * ln < 0.3 * reach || ve * fe + vn * fn < -0.35 * reach) return;
+          // L2 bridges should sit aft of the L1 one: penalise forward rotundas for door 1
+          const along = ve * fe + vn * fn;
+          cand.push({ cost: reach + (d === 1 && along > 0 ? along : 0) + (b.stand === si ? -3 : 0), b: bi, door: `${si}:${d}`, t: [tx, tz, p.h + sillOf(spec), le, -ln] });
+        });
+      }
+    }
+    cand.sort((a, c) => a.cost - c.cost);
+    const usedB = new Set<number>(), usedD = new Set<string>();
+    for (const b of this.bridges) b.has = false;
+    for (const c of cand) {
+      if (usedB.has(c.b) || usedD.has(c.door)) continue;
+      usedB.add(c.b); usedD.add(c.door);
+      const b = this.bridges[c.b];
+      [b.tx, b.tz, b.th, b.nx, b.nz] = c.t;
+      b.has = true;
+      b.dirty = true;
+    }
+  }
+
+  /**
+   * Turnaround GSE by type, at the doors that are actually served (right side): belt loaders
+   * against the forward and aft cargo doors with cart trains beside them, fuel at the
+   * right-wing refuel point (hydrant dispenser at Pearson, tanker elsewhere), catering hi-lift at
+   * right-side passenger doors, GPU at the nose, airstairs down from a turboprop's forward door.
+   * Everything but the pushback tractor leaves RETRACT_BEFORE_PUSH s before pushback; the
+   * tractor + towbar connect at the nose gear TUG_BEFORE_PUSH s before and push the aircraft.
+   */
+  private layoutService(parked: Map<number, Parked>, _ctx: FrameContext) {
     const [ox, on] = this.d.origin;
     this.service = [];
-    const put = (k: GseKind, e: number, nn: number, h: number, yaw: number) => {
-      this.service.push({ k, x: e - ox, y: h, z: -(nn - on), yaw });
+    const hydrantAirport = this.d.icao === 'CYYZ';
+    const put = (k: GseKind, e: number, nn: number, h: number, yaw: number, sy = 1) => {
+      this.service.push({ k, x: e - ox, y: h, z: -(nn - on), yaw, sy });
     };
     let sets = 0;
     for (const p of parked.values()) {
       const spec = AIRCRAFT[p.type] ?? AIRCRAFT.A320;
       const noseX = aircraftModel(p.type).points.noseX;
       const fe = Math.cos(p.yaw), fn = Math.sin(p.yaw), re = fn, rn = -fe;
+      /** point at station x (m from the nose tip), `side` m to the right of the centre line */
       const at = (x: number, side: number) => [p.e + fe * (noseX - x) + re * side, p.n + fn * (noseX - x) + rn * side] as const;
-      const yawF = p.yaw, yawIn = p.yaw - Math.PI / 2; // along the fuselage / pointing into it from the right
-      if (p.phase === PH.PUSHBACK) {
-        const [e, nn] = at(-4.2, 0);
-        put('push', e, nn, p.h, p.yaw + Math.PI);
+      const yawF = p.yaw, yawR = p.yaw - Math.PI / 2, yawL = p.yaw + Math.PI / 2;
+      const h = p.h;
+      // pushback tractor + towbar on the nose gear (pin 5 m ahead of the gear, tractor facing the aircraft)
+      if (p.phase === PH.PUSHBACK || p.pushIn < TUG_BEFORE_PUSH) {
+        const g = spec.gear.nose;
+        const [be, bn] = at(g - 5, 0);
+        put('towbar', be, bn, h, yawF);
+        const [te, tn] = at(g - 5 - 3.3, 0);
+        put('push', te, tn, h, yawF + Math.PI);
         continue;
       }
-      if (sets++ >= SERVICE_MAX) continue;
-      const h = p.h, half = spec.fus.w / 2;
+      if (p.pushIn < RETRACT_BEFORE_PUSH || sets++ >= SERVICE_MAX) continue;
       const hsh = [...p.key].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
-      const cargo = spec.doors.filter((d) => d[2] === 'C').map((d) => d[0]);
+      const cargo = spec.doors.filter((d) => d[2] === 'C').map((d) => d[0]).sort((a, c) => a - c);
       const pax = spec.doors.filter((d) => d[2] === 'P').map((d) => d[0]).sort((a, c) => a - c);
-      const big = spec.cls === 'wide' || spec.cls === 'narrow';
-      // belt loader nosed into the forward hold door, baggage tug + carts alongside
-      const fwdC = cargo.length ? Math.min(...cargo) : spec.length * 0.3;
-      if (spec.cls !== 'turboprop') {
-        const [e, nn] = at(fwdC, half + 4.1);
-        put('belt', e, nn, h, yawIn + Math.PI + 0.35);
+      const turbo = spec.cls === 'turboprop';
+      // belt loaders: bumper (local x = 4.0) on the fuselage side at the cargo door, trailing aft
+      // at 25°, belt head at the cargo sill
+      const beltAt = (x: number) => {
+        const hw = halfWidthAt(spec, x);
+        const a = 0.44;
+        const oe = re * Math.cos(a) - fe * Math.sin(a), onn = rn * Math.cos(a) - fn * Math.sin(a);
+        const [de, dn] = at(x, hw);
+        put('belt', de + oe * 4.05, dn + onn * 4.05, h, Math.atan2(-onn, -oe), Math.min(1.15, Math.max(0.55, (cargoSillOf(spec) + 0.25) / 3.05)));
+      };
+      const train = (x: number, n: number) => {
+        const lat = halfWidthAt(spec, x) + 7.0;
+        const [te, tn] = at(x - 2.5, lat);
+        put('tug', te, tn, h, yawF);
+        for (let c = 0; c < n; c++) { const [e, nn] = at(x + 1.2 + c * 3.6, lat); put('cart', e, nn, h, yawF); }
+      };
+      if (!turbo && cargo.length) {
+        beltAt(cargo[0]);
+        train(cargo[0], 1 + (hsh % 3));
+        if (cargo.length > 1) { beltAt(cargo[cargo.length - 1]); train(cargo[cargo.length - 1], 1 + ((hsh >> 3) % 2)); }
+      } else if (turbo) {
+        // hand-loaded hold: cart train beside the baggage door, airstairs down from the forward door (left)
+        const cx = cargo.length ? cargo[cargo.length - 1] : spec.length * 0.7;
+        train(cx, 1 + (hsh % 2));
+        if (pax.length) {
+          const hw = halfWidthAt(spec, pax[0]);
+          const [se, sn] = at(pax[0], -hw);
+          put('stairs', se, sn, h, yawL, h > -1e9 ? sillOf(spec) : 1);
+        }
       }
-      const trainX = fwdC + 3;
-      const [te, tn] = at(trainX - 2, half + 9.5);
-      put('tug', te, tn, h, yawF);
-      for (let c = 0; c < 1 + (hsh % 3); c++) {
-        const [e, nn] = at(trainX + 2 + c * 3.6, half + 9.5);
-        put('cart', e, nn, h, yawF);
+      // fuel at the right-wing refuel point: outboard of the engine, just behind the leading edge
+      if (hsh % 5 !== 0) {
+        const root = spec.fus.w / 2;
+        const z = Math.min(spec.span * 0.3, spec.eng.mount === 'wing' ? spec.eng.z + (turbo ? 4.2 : 3.2) : root + 5);
+        const xLE = spec.wing.x + Math.max(0, z - root) * Math.tan((spec.wing.sweep * Math.PI) / 180);
+        if (hydrantAirport && !turbo) {
+          // dispenser deck (local -x end) under the panel, truck facing forward
+          const [e, nn] = at(xLE + 1.2 - 2.4, z);
+          put('hydrant', e, nn, h, yawF);
+        } else {
+          const [e, nn] = at(xLE - 1.0, z + 1.5);
+          put('fuel', e, nn, h, yawF);
+        }
       }
-      // catering at the rear right door (big aircraft), fuel truck under the right wing
-      if (big && pax.length >= 2 && hsh % 4 !== 0) {
-        const [e, nn] = at(pax[pax.length - 1], half + 5.2);
-        put('cater', e, nn, h, yawIn); // rear lift platform against the door
+      // catering hi-lift: rear platform (local -x) against right-side passenger doors
+      if (!turbo && pax.length >= 2 && hsh % 4 !== 1) {
+        const doors = spec.cls === 'wide' ? [pax[0], pax[pax.length - 1]] : [pax[pax.length - 1]];
+        for (const dx of doors) {
+          const hw = halfWidthAt(spec, dx);
+          const [e, nn] = at(dx, hw + 5.15);
+          put('caterup', e, nn, h, yawR, Math.max(0.8, Math.min(1.35, sillOf(spec) / 3.5)));
+        }
       }
-      if (hsh % 3 !== 0) {
-        const wx = spec.length * 0.46;
-        // outboard of the engines (turboprops: clear of the propeller disc)
-        const [e, nn] = at(wx, half + Math.max(spec.span * (spec.cls === 'turboprop' ? 0.36 : 0.22), 6) + 2);
-        put('fuel', e, nn, h, yawF + Math.PI);
+      // ground power unit at the nose (receptacle under the nose, right side)
+      if (hsh % 3 !== 2) {
+        const [e, nn] = at(Math.max(1.5, spec.gear.nose - 2.5), 3.2);
+        put('gpu', e, nn, h, yawF + Math.PI);
       }
     }
   }
@@ -418,12 +526,12 @@ export class ApronFurniture {
   /** dynamic GSE each frame: cached turnaround sets + vehicles on the service roads */
   private writeDynamic(simS: number) {
     const n = { ...this.staticN };
-    const put = (k: GseKind, x: number, y: number, z: number, yaw: number) => {
+    const put = (k: GseKind, x: number, y: number, z: number, yaw: number, sy = 1) => {
       const m = this.gm[k];
       if (n[k] >= m.instanceMatrix.count) return;
-      setM(m, n[k]++, x, y, z, yaw);
+      setM(m, n[k]++, x, y, z, yaw, 0, 1, sy, 1);
     };
-    for (const q of this.service) put(q.k, q.x, q.y, q.z, q.yaw);
+    for (const q of this.service) put(q.k, q.x, q.y, q.z, q.yaw, q.sy);
     const o = [0, 0, 0, 0, 0];
     const LANE = 1.8;
     const place = (k: GseKind, p: Path, u: number) => {
@@ -450,7 +558,7 @@ export class ApronFurniture {
       this.dynN[k] = n[k];
     }
   }
-  private dynN: Record<GseKind, number> = { tug: -1, cart: -1, belt: -1, fuel: -1, cater: -1, push: -1, gpu: -1 };
+  private dynN = Object.fromEntries(GSE_KINDS.map((k) => [k, -1])) as Record<GseKind, number>;
 
   dispose() {
     for (const m of [...Object.values(this.bm), ...Object.values(this.gm), ...(this.mastMesh ? [this.mastMesh] : [])]) m.dispose();

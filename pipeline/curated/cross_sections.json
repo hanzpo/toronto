@@ -1,0 +1,700 @@
+{
+ "about": "Curated cross-sections (docs/CROSS_SECTION.md): the first source in the derivation order (curated, then authoritative, then OSM tags, then standards defaults). Each entry matches network-model edges by street name (and optional bbox, E0,N0,E1,N1 world m) and gives the ordered bands from the LEFT building line to the RIGHT building line in the edge's direction. For a divided street ('pair': true) the two one-way carriageways are joined into one edge whose left half carries the opposite direction. Widths in m. A transit_row band carries its track offsets (m from the band centre) and gets platform bands at the stops of the listed routes (GTFS, side from the stop position, length 'platform_len' m).",
+ "cross_sections": [
+  {
+   "id": "spadina_row",
+   "names": [
+    "Spadina Avenue"
+   ],
+   "bbox": [
+    -1900,
+    -1700,
+    -700,
+    1900
+   ],
+   "pair": true,
+   "sources": [
+    "City of Toronto, Spadina Avenue streetcar ROW (510), photos and 8 cm ortho 2023: 7.2-7.6 m concrete ROW with raised curbs, 2 lanes each way, curb lanes for parking/loading, wide sidewalks",
+    "TTC Flexity Outlook: 30.2 m long; platform islands about 2.5 m wide, 40-45 m long incl. ramps",
+    "Asset refinement 2026-09-30: City of Toronto Complete Streets Guidelines (2017) ch.4 -- pedestrian clearway >= 2.1 m (main streets wider), furnishing / planting zone >= 1.5 m for tree pits; 150 mm barrier curb (T-600.05); Spadina ROW 160 ft (48.8 m) so the frontage band still reaches the facades",
+    "TTC Spadina island retrofit (2012, low-floor Flexity): islands raised and lengthened, railings along the traffic side, yellow tactile edge on the track side; island top ~250 mm above the track slab (Flexity floor 355 mm above top of rail, no level boarding)",
+    "Extent 2026-09-30: the 510 track (model tram pieces 455 / 459) continues in the ROW over the USRC bridge and south to Queens Quay; extent extended to N -1700"
+   ],
+   "bands": [
+    {
+     "kind": "sidewalk",
+     "w": 4.3,
+     "surface": "concrete"
+    },
+    {
+     "kind": "furniture",
+     "w": 1.5,
+     "surface": "pavers"
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "parking",
+     "w": 2.5,
+     "dir": -1
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": -1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": -1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "transit_row",
+     "w": 7.4,
+     "surface": "concrete",
+     "tracks": [
+      -1.72,
+      1.72
+     ],
+     "track_dir": [
+      -1,
+      1
+     ],
+     "platforms": {
+      "routes": [
+       "510",
+       "310"
+      ],
+      "w": 2.6,
+      "platform_len": 42.0,
+      "h": 0.25
+     }
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "parking",
+     "w": 2.5,
+     "dir": 1
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "furniture",
+     "w": 1.5,
+     "surface": "pavers"
+    },
+    {
+     "kind": "sidewalk",
+     "w": 4.3,
+     "surface": "concrete"
+    }
+   ]
+  },
+  {
+   "id": "king_streetcar_mixed",
+   "names": [
+    "King Street West"
+   ],
+   "bbox": [
+    -2600,
+    -1300,
+    300,
+    -400
+   ],
+   "sources": [
+    "King Street Transit Priority Corridor (2019): 2 lanes each way, streetcar tracks in the inner lanes (mixed traffic), curb lanes for loading / patios, sidewalks about 3-4 m downtown (8 cm ortho 2023)",
+    "Asset refinement 2026-09-30: King St W is a 66 ft (20.1 m) ROW: ~13.0 m curb to curb (curb lanes 3.3 m for loading / right turns, inner streetcar lanes 3.2 m), 3.5 m walks each side = 2.3 m clearway + 1.2 m furnishing zone with tree pits and poles (Complete Streets Guidelines; 8 cm ortho 2023)"
+   ],
+   "bands": [
+    {
+     "kind": "sidewalk",
+     "w": 2.3,
+     "surface": "concrete"
+    },
+    {
+     "kind": "furniture",
+     "w": 1.2,
+     "surface": "pavers"
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": -1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "lane",
+     "w": 3.2,
+     "dir": -1,
+     "classes": [
+      "car",
+      "bus",
+      "truck",
+      "tram"
+     ],
+     "track": 0.0
+    },
+    {
+     "kind": "lane",
+     "w": 3.2,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck",
+      "tram"
+     ],
+     "track": 0.0
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "furniture",
+     "w": 1.2,
+     "surface": "pavers"
+    },
+    {
+     "kind": "sidewalk",
+     "w": 2.3,
+     "surface": "concrete"
+    }
+   ]
+  },
+  {
+   "id": "queen_w_streetcar_mixed",
+   "names": [
+    "Queen Street West"
+   ],
+   "bbox": [
+    -1800,
+    -800,
+    -500,
+    -200
+   ],
+   "sources": [
+    "Queen St W (Bathurst-University): 66 ft (20.1 m) ROW, streetcar (501) in the inner lanes in mixed traffic, curb lanes for parking off-peak / traffic in the peaks, ~3.5 m sidewalks with tree pits, poles and bike rings in a paved furnishing zone -- no grass boulevard (Complete Streets Guidelines 'main street'; 8 cm ortho 2023)",
+    "replaces the tag default osm_c3_4l_2sw_tram, which gave Queen W 1.5 m grass boulevards"
+   ],
+   "bands": [
+    {
+     "kind": "sidewalk",
+     "w": 2.3,
+     "surface": "concrete"
+    },
+    {
+     "kind": "furniture",
+     "w": 1.2,
+     "surface": "pavers"
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "lane",
+     "w": 3.1,
+     "dir": -1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "lane",
+     "w": 3.4,
+     "dir": -1,
+     "classes": [
+      "car",
+      "bus",
+      "truck",
+      "tram"
+     ],
+     "track": 0.0
+    },
+    {
+     "kind": "lane",
+     "w": 3.4,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck",
+      "tram"
+     ],
+     "track": 0.0
+    },
+    {
+     "kind": "lane",
+     "w": 3.1,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "furniture",
+     "w": 1.2,
+     "surface": "pavers"
+    },
+    {
+     "kind": "sidewalk",
+     "w": 2.3,
+     "surface": "concrete"
+    }
+   ]
+  },
+  {
+   "id": "richmond_w_cycle_track",
+   "names": [
+    "Richmond Street West"
+   ],
+   "bbox": [
+    -1800,
+    -900,
+    -500,
+    -300
+   ],
+   "status": "proposed: needs a primnet slice rebuild check (bike_lane band in lanes / QA, one-way edge direction = travel direction)",
+   "sources": [
+    "Richmond St W: one-way westbound, 3 traffic lanes, protected cycle track on the south (left-hand) side since 2014, 1.5-1.8 m with a ~1 m buffer (flexi-posts / planters / precast curbs) (City of Toronto Cycling Network; 8 cm ortho 2023)"
+   ],
+   "bands": [
+    {
+     "kind": "sidewalk",
+     "w": 2.2,
+     "surface": "concrete"
+    },
+    {
+     "kind": "furniture",
+     "w": 1.0,
+     "surface": "pavers"
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "bike_lane",
+     "w": 1.8,
+     "dir": 1,
+     "classes": [
+      "bike"
+     ]
+    },
+    {
+     "kind": "shoulder",
+     "w": 0.9,
+     "surface": "asphalt",
+     "note": "painted buffer with flexi-posts"
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "furniture",
+     "w": 1.0,
+     "surface": "pavers"
+    },
+    {
+     "kind": "sidewalk",
+     "w": 2.2,
+     "surface": "concrete"
+    }
+   ]
+  },
+  {
+   "id": "adelaide_w_cycle_track",
+   "names": [
+    "Adelaide Street West"
+   ],
+   "bbox": [
+    -1800,
+    -900,
+    -500,
+    -300
+   ],
+   "status": "proposed: needs a primnet slice rebuild check (bike_lane band; Adelaide carries streetcar diversion track in the right lanes -- add the tram class there before enabling)",
+   "sources": [
+    "Adelaide St W: one-way eastbound, 3 traffic lanes, protected cycle track on the north (left-hand) side since 2014 (City of Toronto Cycling Network; 8 cm ortho 2023)"
+   ],
+   "bands": [
+    {
+     "kind": "sidewalk",
+     "w": 2.2,
+     "surface": "concrete"
+    },
+    {
+     "kind": "furniture",
+     "w": 1.0,
+     "surface": "pavers"
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "bike_lane",
+     "w": 1.8,
+     "dir": 1,
+     "classes": [
+      "bike"
+     ]
+    },
+    {
+     "kind": "shoulder",
+     "w": 0.9,
+     "surface": "asphalt",
+     "note": "painted buffer with flexi-posts"
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "furniture",
+     "w": 1.0,
+     "surface": "pavers"
+    },
+    {
+     "kind": "sidewalk",
+     "w": 2.2,
+     "surface": "concrete"
+    }
+   ]
+  },
+  {
+   "id": "st_clair_row",
+   "names": [
+    "St. Clair Avenue West",
+    "St Clair Avenue West"
+   ],
+   "pair": false,
+   "status": "defined, not yet in a slice",
+   "sources": [
+    "St Clair streetcar ROW (512, 2010): centre ROW with raised curbs and side platforms at stops"
+   ],
+   "bands": [
+    {
+     "kind": "sidewalk",
+     "w": 3.0,
+     "surface": "concrete"
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": -1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": -1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "transit_row",
+     "w": 7.2,
+     "surface": "concrete",
+     "tracks": [
+      -1.7,
+      1.7
+     ],
+     "track_dir": [
+      -1,
+      1
+     ],
+     "platforms": {
+      "routes": [
+       "512",
+       "312"
+      ],
+      "w": 2.6,
+      "platform_len": 42.0,
+      "h": 0.2
+     }
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "sidewalk",
+     "w": 3.0,
+     "surface": "concrete"
+    }
+   ]
+  },
+  {
+   "id": "queens_quay_row",
+   "names": [
+    "Queens Quay West"
+   ],
+   "status": "defined, not yet in a slice",
+   "sources": [
+    "Queens Quay revitalization (2015): streetcar ROW south of centre, 2 traffic lanes on the north side, Martin Goodman Trail and promenade on the south side"
+   ],
+   "bands": [
+    {
+     "kind": "sidewalk",
+     "w": 4.0,
+     "surface": "pavers"
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": -1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "lane",
+     "w": 3.3,
+     "dir": 1,
+     "classes": [
+      "car",
+      "bus",
+      "truck"
+     ]
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "transit_row",
+     "w": 7.0,
+     "surface": "grass",
+     "tracks": [
+      -1.7,
+      1.7
+     ],
+     "track_dir": [
+      -1,
+      1
+     ],
+     "platforms": {
+      "routes": [
+       "509",
+       "510"
+      ],
+      "w": 2.6,
+      "platform_len": 42.0,
+      "h": 0.2
+     }
+    },
+    {
+     "kind": "curb",
+     "w": 0.15,
+     "h": 0.15
+    },
+    {
+     "kind": "bike_lane",
+     "w": 3.6,
+     "dir": 0,
+     "classes": [
+      "bike"
+     ]
+    },
+    {
+     "kind": "sidewalk",
+     "w": 6.0,
+     "surface": "pavers"
+    }
+   ]
+  }
+ ]
+}

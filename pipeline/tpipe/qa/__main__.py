@@ -27,7 +27,7 @@ import time
 import numpy as np
 
 from .. import geo
-from . import checks_rail, checks_stations, checks_transit, data
+from . import checks_dtm, checks_rail, checks_stations, checks_transit, data
 from .core import dedupe, order, view_for
 from .runner import BLOCK_CATS, GLOBAL_CATS, _init, _run
 
@@ -53,7 +53,8 @@ OWNER = {  # which workstream fixes each category (docs/QA.md)
     "raster_shore": "ground",
     # cross-layer merge gate against the network model (docs/ROADS.md "Source of truth")
     **{c: "model" for c in ("rail_above_bed", "duplicate_track", "underpass_drawn_at_grade", "drawn_rail_vs_train_path",
-                            "graph_vs_model", "sidewalk_between_carriageways", "lane_count_jump", "duplicate_crosswalk", "adjacent_track_z_step")},
+                            "graph_vs_model", "sidewalk_between_carriageways", "lane_count_jump", "duplicate_crosswalk", "adjacent_track_z_step",
+                            "mapped_crossing_not_generated", "model_vs_dtm")},
 }
 
 
@@ -109,6 +110,8 @@ def main(argv=None) -> int:
         tasks.append(("global", ("landmarks", cats, bbox)))
     if checks_stations.STATION_CATS & cats:
         tasks.append(("global", ("stations", cats, bbox)))
+    if checks_dtm.DTM_CATS & cats:
+        tasks.append(("global", ("dtm", cats, bbox)))
     if BLOCK_CATS & cats:
         tasks += [("block", (bx, by, cats, bbox)) for bx, by in blocks]
     findings: list[dict] = []

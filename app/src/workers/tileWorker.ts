@@ -13,12 +13,14 @@ import { extractFootprints } from './collide';
 import { applyStationZones, setStationZones } from './stationZones';
 import { dropAirsideTile } from './airside';
 import { SURF_CURB, SURF_TACTILE } from './roads';
+import { dropNet2 } from '../net2/tileFilter';
+import { buildSurface, SurfaceSampler, structuresOnly, surfaceFurniture, surfaceRails } from './surface';
 
 /** road surfaces only drawn on tiles near the camera (TileManager ROAD_NEAR): vertical curb faces, tactile plates */
 const NEAR_SURFS = new Set([SURF_CURB, SURF_TACTILE]);
 
 export type WorkerIn =
-  | { type: 'config'; suppress: number[]; heritage?: number[]; build: number; zones?: number[][]; vground?: boolean }
+  | { type: 'config'; suppress: number[]; heritage?: number[]; build: number; zones?: number[][]; vground?: boolean; surf?: boolean; net2?: number[] | null }
   | { type: 'prefetch'; url: string }
   | { type: 'load'; id: number; url: string; level: number; tx: number; ty: number; size: number; grid: number }
   | { type: 'cancel'; id: number };
@@ -33,6 +35,8 @@ export type WorkerOut =
 let suppress = new Set<number>();
 /** level-0 vector ground (off with ?vground=0, for A/B checks) */
 let useVGround = true;
+/** unified at-grade surface (`?surf=1`, docs/SURFACE.md) where the tile carries sf_* */
+let useSurf = false;
 /** where tile bytes came from: local Cache Storage, CDN edge cache, or R2 (edge miss) */
 export type TileSource = 'local' | 'edge' | 'origin';
 const sources = new Map<string, TileSource>();
@@ -91,12 +95,16 @@ function transfers(m: MeshBuf | null, out: Transferable[]) {
   if (m.attrs) for (const k in m.attrs) out.push(m.attrs[k].array.buffer);
 }
 
+let net2Box: number[] | null = null;
+
 self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
   const msg = ev.data;
   if (msg.type === 'config') {
     suppress = new Set(msg.suppress);
     setHeritage(msg.heritage ?? []);
     useVGround = msg.vground !== false;
+    useSurf = msg.surf === true;
+    net2Box = msg.net2 ?? null;
     setStationZones(msg.zones);
     openCache(msg.build);
     return;
@@ -124,11 +132,16 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     const { arrays: a, header } = decodeTbn<{ names?: string[] }>(buf);
     if (level === 0) applyStationZones(a, msg.tx * size, msg.ty * size, size);
     if (level === 0) await dropAirsideTile(a, url, msg.tx * size, msg.ty * size, size); // apron roads: drawn by AirportLayer
+    if (level === 0 && net2Box) dropNet2(a, net2Box, msg.tx * size, msg.ty * size);   // ?net=2: the slice draws these
     const G = (a.terrain_h ? Math.round(Math.sqrt(a.terrain_h.length)) : grid) || grid;
     const terr = buildTerrain(a.terrain_h as Int16Array, G, size, level);
     const sampler = new TerrainSampler(terr.heights, G, size);
     const embList: number[] = [];
-    const vground = level === 0 && useVGround ? buildGround(a, sampler, a.ground as Uint8Array | undefined, embList) : null;
+    // ?surf=1: one surface mesh replaces terrain / vector ground / ribbons / sidewalks / medians / beds;
+    // placement (props, lamps, trees, rails) samples that surface
+    const surf = level === 0 && useSurf ? buildSurface(a, size) : null;
+    const place = surf ? new SurfaceSampler(sampler, surf.index) : sampler;
+    const vground = surf ? surf.mesh : level === 0 && useVGround ? buildGround(a, sampler, a.ground as Uint8Array | undefined, embList) : null;
     const emb = embList.length ? Float32Array.from(embList) : null;
     const cuts = level === 0 ? cutData(a, size) : null;
     // houses first: footprints that aren't houses (long / narrow) join the extruded buildings
@@ -137,24 +150,29 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     const bld = buildBuildings(a, suppress, level, msg.tx * size, msg.ty * size, sampler, header.names);
     const ground = a.ground ? (a.ground as Uint8Array).slice() : new Uint8Array(256 * 256);
     const roads = buildRoads(a, sampler, level, ground);
-    const rail = buildRail(a, sampler, level);
-    const street = level === 0 ? buildStreet(a, roads.streets, roads.junctions, sampler, ground, msg.tx, msg.ty) : null;
-    const props = level === 0 ? buildProps(a, header.names ?? [], roads.streets, roads.junctions, sampler, ground, houses, msg.tx, msg.ty) : null;
+    // ?surf=1: decks / parapets / piers from the road mesher, plus barriers, guardrails and tactile plates on the surface
+    if (surf) roads.mesh = concatMeshes(buildRoads(structuresOnly(a, 'r'), place, level, ground).mesh, surfaceFurniture(a, surf.index, size));
+    const rail = surf
+      ? { mesh: concatMeshes(buildRail(structuresOnly(a, 'l'), place, level).mesh, surfaceRails(a, surf.index, size)), count: 0 }
+      : buildRail(a, sampler, level);
+    const street = level === 0 ? buildStreet(a, roads.streets, roads.junctions, place, ground, msg.tx, msg.ty) : null;
+    const props = level === 0 ? buildProps(a, header.names ?? [], roads.streets, roads.junctions, place, ground, houses, msg.tx, msg.ty) : null;
     // rooftops (from buildBuildings), construction sites, laneways: layers/UrbanLayer.ts
-    const urban = level === 0 ? buildUrban(a, header.names ?? [], bld.items, sampler, ground, houses, msg.tx, msg.ty) : null;
+    const urban = level === 0 ? buildUrban(a, header.names ?? [], bld.items, place, ground, houses, msg.tx, msg.ty) : null;
     const canopy = level === 1 ? buildCanopy(a, ground, sampler, msg.tx, msg.ty, size) : null;
     const street3d = concatMeshes(roads.mesh, rail.mesh);
     const railStart = roads.mesh ? roads.mesh.index.length : 0;
     const roadNear = street3d && level === 0 ? frontSurfaces(street3d, railStart, NEAR_SURFS) : 0;
     const collide = level === 0 ? extractFootprints(a, suppress) : null;
     const result: TileMeshes = {
-      terrain: terr.mesh, vground, cuts, emb, heights: terr.heights, grid: G, ground, minH: terr.minH, maxH: Math.max(terr.maxH, 0),
+      terrain: terr.mesh, vground, cuts, emb, surf: surf?.index ?? null, heights: terr.heights, grid: G, ground, minH: terr.minH, maxH: Math.max(terr.maxH, 0),
       buildings: bld.mesh, collide, roads: street3d, railStart, roadNear, terrainCoarse: terr.coarseStart, houses, street, canopy, props, urban,
       counts: { buildings: bld.count, houses: houses?.count ?? 0, roads: roads.count, rails: rail.count },
     };
     const tr: Transferable[] = [terr.heights.buffer, ground.buffer];
     if (collide) tr.push(collide.off.buffer, collide.xy.buffer, collide.bottom.buffer, collide.top.buffer, ...(collide.occ ? [collide.occ.buffer] : []));
     transfers(terr.mesh, tr); transfers(vground, tr);
+    if (surf) tr.push(surf.index.idx.buffer, surf.index.off.buffer, surf.index.tris.buffer); // index.pos is the mesh's position buffer
     if (cuts) tr.push(cuts.off.buffer, cuts.xy.buffer, cuts.type.buffer, cuts.toff.buffer, cuts.txyz.buffer, cuts.tkind.buffer, cuts.box.buffer); transfers(bld.mesh, tr); transfers(street3d, tr);
     if (canopy) tr.push(canopy.buffer);
     if (emb) tr.push(emb.buffer);

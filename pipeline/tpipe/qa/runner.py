@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import time
 
-from . import checks_clip, checks_graph, checks_landmarks, checks_model, checks_objects, checks_rail, checks_roads, checks_stations, checks_transit, data
+from . import checks_dtm, checks_clip, checks_graph, checks_landmarks, checks_model, checks_objects, checks_rail, checks_roads, checks_stations, checks_transit, data
 
 BLOCK_CATS = (checks_roads.ROAD_CATS | checks_graph.GRAPH_CATS | checks_model.MODEL_CATS | checks_objects.OBJECT_CATS | checks_transit.TRANSIT_CATS | checks_clip.CLIP_CATS
               | {"rail_kink", "rail_gap"})
-GLOBAL_CATS = checks_rail.RAIL_CATS | checks_stations.STATION_CATS | {"landmark_overlap", "landmark_road_overlap"}
+GLOBAL_CATS = checks_rail.RAIL_CATS | checks_stations.STATION_CATS | {"landmark_overlap", "landmark_road_overlap"} | checks_dtm.DTM_CATS
 
 
 def _block_task(args):
@@ -38,6 +38,8 @@ def _global_task(args):
         return checks_stations.run_global(cats, bbox)
     if which == "landmarks":
         return checks_landmarks.run_global(cats, bbox)
+    if which == "dtm":
+        return checks_dtm.run_global(cats, bbox)
     return []
 
 

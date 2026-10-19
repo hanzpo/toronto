@@ -14,7 +14,7 @@ import { U } from '../render/uniforms';
 import { baseTone } from '../render/tiles/materials';
 import { useApp } from '../state/store';
 import type { PropsBuf } from '../workers/props';
-import { K, PSTRIDE } from '../workers/props';
+import { K, PSTRIDE, SEG_STRIDE } from '../workers/props';
 import * as G from './props/geometry';
 import { LOT_TYPES, lotOccupancy } from './parkingOcc';
 import { clock } from '../state/clock';
@@ -571,16 +571,21 @@ export class PropsLayer implements Layer {
         for (const i of l) {
           const e = st.x[i], n = st.y[i];
           if (Math.hypot(e - E, n - Nn) > STOP_R) continue;
+          // ?net=2: stops on the slice's platforms carry their own TTC furniture (net2/props.ts)
+          if ((window as { __net2?: { ownsStop(e: number, n: number): boolean } }).__net2?.ownsStop(e, n)) continue;
           const rec = this.tiles.get(`0/${Math.floor(e / 1024)}/${Math.floor(n / 1024)}`) ?? [...this.tiles.values()].find((t) => e >= t.e0 && e < t.e0 + 1024 && n >= t.n0 && n < t.n0 + 1024);
           if (!rec) continue;
           // snap to the nearest street: pole just behind the curb, facing the road
           const lx = e - rec.e0, ly = n - rec.n0, sg = rec.data.segs;
+          // segs: x0, y0, x1, y1, drawn pavement half-width left, right, cls (workers/props.ts SEG_STRIDE)
           let bd = 40, bx = 0, by = 0, bhw = 0, bcls = 5;
-          for (let k = 0; k < sg.length; k += 6) {
+          for (let k = 0; k < sg.length; k += SEG_STRIDE) {
             const x0 = sg[k], y0 = sg[k + 1], dx = sg[k + 2] - x0, dy = sg[k + 3] - y0, l2 = dx * dx + dy * dy || 1;
             const t = Math.max(0, Math.min(1, ((lx - x0) * dx + (ly - y0) * dy) / l2));
-            const px = x0 + dx * t, py = y0 + dy * t, d = Math.hypot(lx - px, ly - py) - sg[k + 4];
-            if (d < bd) { bd = d; bx = px; by = py; bhw = sg[k + 4]; bcls = sg[k + 5]; }
+            const px = x0 + dx * t, py = y0 + dy * t;
+            const hw = dx * (ly - py) - dy * (lx - px) > 0 ? sg[k + 4] : sg[k + 5]; // the stop's side of the road
+            const d = Math.hypot(lx - px, ly - py) - hw;
+            if (d < bd) { bd = d; bx = px; by = py; bhw = hw; bcls = sg[k + 6]; }
           }
           if (bd >= 40) continue;
           let nx = lx - bx, ny = ly - by;

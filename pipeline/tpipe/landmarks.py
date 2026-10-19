@@ -4,7 +4,8 @@ Emits ``app/public/data/landmarks.json`` (see docs/SPEC.md "Landmarks"):
 
     [{id, name, pos:[E,N], base, rotation, suppress:[osm ids], height,
       footprint:[[x,y],...], parts:{alias:[[x,y],...]}}]
-    + waterfall entries {id, name, kind:"waterfall", line:[[E,N],...], top, bottom}
+    + waterfall entries {id, name, kind:"waterfall", line, toe, top, foot, bottom, talus, flow}
+      (tpipe.falls, curated/falls.json)
 
 ``footprint``/``parts`` are in the model's *canonical local frame*: metres
 relative to ``pos`` and rotated by ``-rotation`` (x = canonical "east",
@@ -207,15 +208,7 @@ LANDMARKS: list[dict] = [
          anchors={"coliseum": 227711310}),
 ]
 
-WATERFALLS = [
-    # (id, name, osm way id, downstream reference lon/lat — the gorge side)
-    ("horseshoe_falls", "Horseshoe Falls", 56539663, (-79.0735, 43.0833)),
-    ("american_falls", "American Falls", 217355188, (-79.0725, 43.0850)),
-    ("bridal_veil_falls", "Bridal Veil Falls", 515298933, (-79.0720, 43.0838)),
-]
-# Upper Niagara River at the brink ≈ 171.5 m ASL; Maid-of-the-Mist pool ≈ 100 m ASL.
-FALLS_TOP_ASL = {"horseshoe_falls": 171.5, "american_falls": 170.0, "bridal_veil_falls": 170.0}
-FALLS_BOTTOM_ASL = 100.0
+# Waterfalls (Niagara): handcrafted crests and levels in curated/falls.json (tpipe.falls).
 
 
 # Carriageway widths (m) by highway class when `lanes` / `width` are missing; for
@@ -699,35 +692,11 @@ def main() -> None:
         if entry.get("id") == "union_station":
             entry.update(union_rails_from_model(entry))
 
-    # Waterfalls: brink lines.
-    for fid, name, wid, ref in WATERFALLS:
-        if wid not in lines and wid not in areas:
-            print(f"!! waterfall {fid} ({wid}) not found")
-            continue
-        g = lines[wid][1] if wid in lines else areas[wid][1].exterior
-        coords = np.asarray(g.coords)
-        rx, ry = geo.project(*ref)
-        if np.allclose(coords[0], coords[-1]) and len(coords) > 4:
-            # Closed outline: split at the two mutually farthest vertices and
-            # keep the arc farther from the gorge (the upstream crest).
-            c = coords[:-1]
-            dmat = np.hypot(c[:, None, 0] - c[None, :, 0], c[:, None, 1] - c[None, :, 1])
-            i, j = np.unravel_index(np.argmax(dmat), dmat.shape)
-            i, j = sorted((int(i), int(j)))
-            arc1 = c[i:j + 1]
-            arc2 = np.vstack([c[j:], c[:i + 1]])
-
-            def dist(a):
-                return float(np.mean(np.hypot(a[:, 0] - rx, a[:, 1] - ry)))
-
-            coords = arc1 if dist(arc1) > dist(arc2) else arc2
-        top = FALLS_TOP_ASL[fid] - geo.DATUM_M
-        out.append({
-            "id": fid, "name": name, "kind": "waterfall", "osm": wid,
-            "line": [[round(float(x), 2), round(float(y), 2)] for x, y in coords],
-            "top": round(top, 1), "bottom": round(FALLS_BOTTOM_ASL - geo.DATUM_M, 1),
-        })
-        print(f"{fid:22s} {len(coords)} pts top={top:.1f}")
+    # Waterfalls: crest / foot lines and levels (tpipe.falls, curated/falls.json).
+    from . import falls
+    for w in falls.landmark_entries():
+        out.append(w)
+        print(f"{w['id']:22s} {len(w['line'])} pts top={w['top']:.1f} foot={w['foot']:.1f}")
 
     geo.OUT.mkdir(parents=True, exist_ok=True)
     path = geo.OUT / "landmarks.json"

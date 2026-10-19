@@ -79,7 +79,11 @@ ART_RAMP_MIN = 80.0          # m: a shorter one-way link is a channelized turn, 
 # road under rail: Toronto's rail underpasses (Yonge, Bay, York St under the USRC) are signed ~4.3-4.5 m
 CLEAR = {"road": 5.0, "rail": 7.0, "path": 2.7, "ped_over_road": 5.3, "road_under_rail": 4.5}
 DECK = {"road": 1.3, "motorway": 1.9, "rail": 1.5, "path": 0.8}
-GRADE = {"motorway": 0.035, "link": 0.055, "road": 0.05, "local": 0.07, "path": 0.12, "rail": 0.014,
+# grade caps of the vertical solve: design maxima (upper bounds), not targets -- with the 1 m lidar
+# terrain (tpipe.lidar_terrain) the solve follows the measured ground and these only stop noise;
+# raised 2026-09-30 from the 30 m-terrain values (3.5 / 5.5 / 5 / 7 / 12 %), which forced long
+# early ramps (e.g. a 12 % yard access ramp under the Spadina bridge, model_vs_dtm +6.8 m)
+GRADE = {"motorway": 0.06, "link": 0.08, "road": 0.08, "local": 0.12, "service": 0.15, "path": 0.15, "rail": 0.014,
          "subway": 0.035, "lrt": 0.05, "tram": 0.06}
 RAMP_SMOOTH = 14.0          # m, sigma of the vertical-curve smoothing
 DENSE = 10.0                # m, solve spacing
@@ -887,6 +891,8 @@ def grade_of(L: Lines, i: int) -> float:
         return GRADE["motorway"]
     if c <= 4:
         return GRADE["road"]
+    if c == 6:
+        return GRADE["service"]
     if c <= 7:
         return GRADE["local"]
     return GRADE["path"]
@@ -1358,7 +1364,7 @@ def _kind_name(L, i):
     return "road"
 
 
-def decide_levels(L: Lines, X, dsm_sample, report):
+def decide_levels(L: Lines, X, dsm_sample, report, overhead=None):
     """upper / lower for every crossing; at-grade ones are dropped (reported)."""
     ups = []
     stats = defaultdict(int)
@@ -1376,6 +1382,16 @@ def decide_levels(L: Lines, X, dsm_sample, report):
         # the layer is untagged (a Lake Shore bridge over a creek is not above the Gardiner)
         ea = la if la != 0 else (1 if ba else -1 if ta else 0)
         eb = lb if lb != 0 else (1 if bb else -1 if tb else 0)
+        if ea != eb and ka == "rail" and kb == "rail" and overhead is not None and not (ta and tb):
+            # two tracks stacked by their tags where the 1 m lidar sees nothing overhead at the
+            # crossing (DSM = DTM): the tags are wrong there (a diamond / switch at grade) -- logged
+            ov = overhead(x["p"])
+            if ov is not None and ov < 3.0:
+                stats["rail_rail_separation_dropped_no_structure"] += 1
+                lon, lat = geo.unproject(*x["p"])
+                suspicious.append(dict(kind="rail_rail_tags_no_structure", a=int(L.id[a]), b=int(L.id[b]),
+                                       lon=round(lon, 6), lat=round(lat, 6), overhead_m=round(float(ov), 2)))
+                continue
         if ea != eb:
             up = a if ea > eb else b
         elif ta != tb:
@@ -1474,7 +1490,7 @@ def make_dsm_sampler(terr):
             return None
         xs = np.interp(ks[ok], s, pts[:, 0])
         ys = np.interp(ks[ok], s, pts[:, 1])
-        h = sample_dsm(terr, xs, ys)
+        h = terr.dsm(xs, ys) if hasattr(terr, "dsm") and callable(terr.dsm) else sample_dsm(terr, xs, ys)
         mid = h[list(np.nonzero(ok)[0]).index(2)]
         others = np.delete(h, list(np.nonzero(ok)[0]).index(2))
         return float(mid - np.median(others))
@@ -1542,6 +1558,51 @@ def rail_graph_targets(strokes: list, L, curated: dict, report) -> None:
     report["rail_graph_pinned_strokes"] = n
 
 
+BALLAST_DRAWN = 0.28   # client track drawing: ballast top = formation z + 0.28, rail head + 0.44
+
+
+def _corridor_field(strokes, box, cls_max, terr=None, radius=7.0):
+    # 7 m: the disc takes in the adjacent track (~4.5 m) but not a yard's other level group (>= 9 m)
+    """(tree of valid samples, g, radius) over every rail stroke sample inside a corridor's box; samples
+    under a structure (1 m DSM > DTM + 3 m: the DTM there is the deck or an interpolation) don't count"""
+    pts, gs = [], []
+    for S in strokes:
+        if S.kind != 1 or S.cls > cls_max or S.g is None:
+            continue
+        m = shapely.contains_xy(box, S.xy[:, 0], S.xy[:, 1])
+        if m.any():
+            pts.append(S.xy[m]); gs.append(S.g[m])
+    if not pts:
+        return None
+    P = np.vstack(pts)
+    G = np.concatenate(gs)
+    if terr is not None and hasattr(terr, "dsm") and callable(terr.dsm):
+        ok = (terr.dsm(P[:, 0], P[:, 1]) - G) <= 3.0
+        P, G = P[ok], G[ok]
+    if not len(P):
+        return None
+    return (cKDTree(P), G, radius)
+
+
+def _lidar_ground(S, field=None, window=80.0, sigma=20.0, step=2.0):
+    """robust ground profile along a stroke: the corridor field (median of all corridor track samples
+    within its radius) or the stroke's own terrain samples, then a running median and smoothing"""
+    from scipy.ndimage import median_filter
+    s = S.s
+    g = S.g
+    if field is not None:
+        tree, G, r = field
+        near = tree.query_ball_point(S.xy, r)
+        far = tree.query_ball_point(S.xy, 40.0)
+        g = np.array([np.median(G[q]) if q else (np.median(G[f]) if f else g0) for q, f, g0 in zip(near, far, S.g)])
+    if s[-1] - s[0] < step * 3:
+        return g.copy()
+    u = np.arange(s[0], s[-1] + step, step)
+    zu = np.interp(u, s, g)
+    zm = median_filter(zu, size=max(3, int(window / step) | 1), mode="nearest")
+    return np.interp(s, u, _smooth_s(u, zm, sigma, step))
+
+
 def load_curated():
     p = geo.PIPE / "curated" / "corridors.json"
     out = json.loads(p.read_text())["corridors"] if p.exists() else []
@@ -1596,6 +1657,34 @@ def curated_targets(C, strokes: list[Stroke], L: Lines, terr, report):
                 continue
             base = _smooth_s(S.s, S.g, 150.0)[idx] if mode == "above_ground" else 0.0
             zt = base + h[ok]
+            if mode == "lidar_ground":
+                # the corridor's measured ground (lidar DTM, tpipe.lidar_terrain) as ONE field over all
+                # its tracks (parallel tracks share a bed level): per vertex the median of every corridor
+                # track sample within 12 m (decks classified as ground and DTM voids drop out), then an
+                # 80 m running median / 20 m smoothing along the track, minus the drawn ballast
+                # (formation z = ballast top - BALLAST_DRAWN). Pinned exact like an absolute corridor.
+                if "_field" not in c:
+                    c["_field"] = _corridor_field(strokes, box, cls_max, terr)
+                fld = c["_field"]
+                zt = _lidar_ground(S, fld)[idx] - float(c.get("ballast", BALLAST_DRAWN))
+                # structures are not on the ground: a flyover's bridge / a dive's tunnel vertices are
+                # left to the solve (clearance lifts the upper track, the lower stays on its ground)
+                keep = (S.vf[idx] & V_BRIDGE) == 0
+                tun = (S.vf[idx] & V_TUNNEL) != 0
+                if tun.any() and hasattr(terr, "dsm") and callable(terr.dsm):
+                    # a covered / tunnel tag only counts where the lidar sees something overhead
+                    # (OSM's covered tracks under a flyover often run on far past its deck)
+                    xy = S.xy[idx[tun]]
+                    over = terr.dsm(xy[:, 0], xy[:, 1]) - terr.sample(xy[:, 0], xy[:, 1]) > 3.0
+                    keep[np.nonzero(tun)[0][over]] = False
+                    # nothing overhead (DSM = DTM, open track on the ortho): the tunnel / covered tag
+                    # is wrong here -- the vertex is at grade (logged)
+                    free = idx[np.nonzero(tun)[0][~over]]
+                    S.vf[free] &= ~V_TUNNEL
+                    report["tunnel_tag_dropped_open_track"] = report.get("tunnel_tag_dropped_open_track", 0) + int(len(free))
+                idx, zt = idx[keep], zt[keep]
+                if not len(idx):
+                    continue
             # ramps: only pin the part of the ramp within the corridor where it is a bridge
             if all(L.flags[i] & F_LINK for i in ws) and not c.get("pin_links", False):
                 keep = (S.vf[idx] & V_BRIDGE) != 0
@@ -1796,7 +1885,12 @@ def run_block(G, core, halo):
     s_off = [s0 for _, s0 in subs]
     in_block = set(i for st in raw_strokes for i, _ in st)
     events = [ev for ev in G["events"] if ev["branch"] in in_block]
-    terr = get_terrain()
+    # terrain for the vertical solve: HRDEM 1 m lidar DTM where cached, 30 m terrain.npz elsewhere
+    # (tpipe.lidar_terrain; the source of every sample is terr.source(x, y), counts logged per tile)
+    from .lidar_terrain import get as get_lidar_terrain
+    terr = get_lidar_terrain()
+    terr.log.clear()
+    terr.voids = 0
 
     # ---- geometry: assemble + fillet
     strokes: list[Stroke] = []
@@ -1916,7 +2010,15 @@ def run_block(G, core, halo):
         o += len(S.s)
     # ---- crossings
     X = find_crossings(L, strokes, way_stroke, report, np.nonzero(way_stroke >= 0)[0])
-    ups = decide_levels(L, X, make_dsm_sampler(terr), report)
+    def _overhead(p):
+        if not (hasattr(terr, "dsm") and callable(terr.dsm)):
+            return None
+        q = np.asarray(p, np.float64).reshape(1, 2)
+        h, src = terr.sample_src(q[:, 0], q[:, 1])
+        if src[0] != 1:
+            return None                     # no lidar here: keep the tags
+        return float(terr.dsm(q[:, 0], q[:, 1])[0] - h[0])
+    ups = decide_levels(L, X, make_dsm_sampler(terr), report, _overhead)
     geoms = {}
 
     def sloc(si, p):
@@ -2197,6 +2299,10 @@ def run_block(G, core, halo):
         dz = np.abs(S.z - S.g)
         S.vf[dz > 0.15] |= V_GRADED
         S.vf[(S.vf & (V_BRIDGE | V_TUNNEL)) != 0] |= V_GRADED
+    tr = terr.report()
+    report["terrain_samples"] = {"hrdem_dtm_1m": tr["samples_hrdem"], "terrain_npz_30m": tr["samples_fallback"],
+                                 "of_which_dtm_void": tr["samples_void"]}
+    report["terrain_source_tiles"] = {f"{k}:{src}": n for k, v in tr["per_tile"].items() for src, n in v.items()}
     return strokes, report, ups, ev_full, curated
 
 

@@ -405,7 +405,8 @@ export function aircraftModel(code: string): AircraftModel {
  * Per-type fuselage pattern rows (2 texel rows per type, 2048 wide, u = station / length):
  *  pattern row: R = 1 − |x − nearest window centre| / (pitch / 2) (0 = no window), G = door distance
  *               from its fore/aft edge / 0.6 m, B = door kind / 8 (1 P, 2 O, 3 C, 4 M)
- *  param row:   R = window half width / 0.5, G = half height / 0.5, B = pitch / 1, A = cargo door height / 4
+ *  param row:   u < ½: R = window half width / 0.5, G = half height / 0.5, B = pitch / 1, A = cargo door height / 4
+ *               u ≥ ½: R = fuselage length / 100, G = title start / length, B = title cap height / 2
  */
 export const DECAL_W = 2048;
 let decalTex: THREE.DataTexture | null = null;
@@ -437,10 +438,21 @@ export function aircraftDecalTexture(): THREE.DataTexture {
       data[o + i * 4 + 1] = Math.round(Math.min(1, g) * 255);
       data[o + i * 4 + 2] = Math.round((bk / 8) * 255);
       data[o + i * 4 + 3] = 255;
-      data[op + i * 4] = Math.round(Math.min(1, w.hw / 0.5) * 255);
-      data[op + i * 4 + 1] = Math.round(Math.min(1, w.hh / 0.5) * 255);
-      data[op + i * 4 + 2] = Math.round(Math.min(1, w.pitch) * 255);
-      data[op + i * 4 + 3] = Math.round(Math.min(1, (s.cls === 'wide' ? 1.7 : s.cls === 'turboprop' ? 1.2 : 1.15) / 4) * 255);
+      if (i < DECAL_W / 2) {
+        data[op + i * 4] = Math.round(Math.min(1, w.hw / 0.5) * 255);
+        data[op + i * 4 + 1] = Math.round(Math.min(1, w.hh / 0.5) * 255);
+        data[op + i * 4 + 2] = Math.round(Math.min(1, w.pitch) * 255);
+        data[op + i * 4 + 3] = Math.round(Math.min(1, (s.cls === 'wide' ? 1.7 : s.cls === 'turboprop' ? 1.2 : 1.15) / 4) * 255);
+      } else {
+        // second parameter set (sampled at u = 0.75): fuselage length / 100, title start station / length,
+        // title cap height (m) / 2
+        const pax = s.doors.filter((d) => d[2] === 'P' || d[2] === 'M').map((d) => d[0] + d[1] / 2).sort((a, c) => a - c);
+        const t0 = (pax[0] ?? 4) + (s.freighter ? 0.8 : 1.4);
+        data[op + i * 4] = Math.round(Math.min(1, L / 100) * 255);
+        data[op + i * 4 + 1] = Math.round(Math.min(1, t0 / L) * 255);
+        data[op + i * 4 + 2] = Math.round(Math.min(1, (s.fus.h * 0.19) / 2) * 255);
+        data[op + i * 4 + 3] = 255;
+      }
     }
   });
   const t = new THREE.DataTexture(data, DECAL_W, n * 2, THREE.RGBAFormat, THREE.UnsignedByteType);

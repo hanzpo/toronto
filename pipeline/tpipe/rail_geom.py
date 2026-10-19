@@ -147,6 +147,9 @@ def rail_corridors() -> list[dict]:
     for c in json.loads(p.read_text())["corridors"]:
         if c.get("kind") != "rail" or c.get("mode", "above_ground") != "absolute":
             continue
+        if c.get("ways"):
+            continue          # way-filtered (e.g. one street's tram): pinned by tpipe.roadnet per stroke only;
+                              # consumers read it from the model (model_rail_z), never by position
         pr = c["profile"]
         x, y = geo.project(np.array([q[0] for q in pr]), np.array([q[1] for q in pr]))
         out.append(dict(id=c["id"], xy=np.stack([x, y], 1), z=np.array([q[2] for q in pr], np.float64),

@@ -86,7 +86,11 @@ departures ≥ 70 s, mixed arr/dep ≥ 110 s) by delaying later movements.
   runway entry, line-up and hold, takeoff roll (1.75–2.3 m/s² to Vr), rotation
   (pitch smoothing), straight climb-out 4.5–8 km, turn towards the destination,
   climb to FL240–360 (turboprops FL240), disappears 180 km out.
-- Aircraft are parked at their stand between in-block and pushback (and overnight).
+- Aircraft are parked at their stand between in-block and pushback (and overnight). The
+  stand point (OSM parking-position end) is usually within a few metres of the terminal, so
+  the nose stops `NOSE_CLEAR` = 4.5 m short of it (`track.ts standPose`); the per-type
+  nose-wheel stop mark is `standNoseWheel()` (the apron markings still draw one bar at the
+  stand point).
 - Follow camera (`AirLayer.follow`): smoothed chase from 3/4 behind, ≈ 2–2.3 aircraft lengths
   away (+ up to 20 % with speed), low pitch; dragging the view changes the kept offset.
 - No taxi conflict resolution: aircraft can occasionally overlap on taxiways.
@@ -125,7 +129,14 @@ forward, origin = main-gear ground contact. Detailed LOD ≈ 2.8–4.4 k triangl
 - **Liveries** (`air/liveries.ts`): six colours + belly split, cheatline, rear-fuselage wrap
   (WestJet / Rouge / Transat / Sunwing …) painted in the shader; tail logos drawn once with
   Canvas2D into a 1024² atlas (Air Canada rondelle, Porter wordmark pattern, WestJet leaf,
-  United globe, BA flag …); lit cabin windows + logo glow at night.
+  United globe, BA flag …); fuselage titles ("AIR CANADA", "WESTJET", "porter" …) from a
+  second Canvas atlas (1024 × 32 px row per airline), placed above the forward cabin windows
+  and reading left → right on both sides; black cockpit-window mask band (Air Canada / Jazz,
+  every A350 and A330neo); lit cabin windows + logo glow at night.
+- Engines: nacelle in livery colour with a polished lip band rolled into the intake, grey fan
+  face with blades and a silver spinner kept inside the intake, bypass nozzle + core plug;
+  cockpit glazing is kept on the front / sides of the nose (side corners ≥ 27° off the crown,
+  centre posts ≥ 9°).
 - Per-instance data: one interleaved buffer of 9 vec4 (colours + gear / far / flaps / prop /
   spoiler / art / livery params / transform); geometry uses 5 vertex buffers (6 total ≤ 8;
   14 of 16 attributes). One draw per type per LOD, shared material; far aircraft keep ≥ 15 px

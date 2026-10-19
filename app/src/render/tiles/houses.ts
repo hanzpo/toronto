@@ -17,6 +17,7 @@ import type { HouseBuf } from '../../workers/meshing';
 import { U } from '../uniforms';
 import { OCC } from './facadeMaterial';
 import { baseTone } from './materials';
+import { applyCutaway } from '../cutaway';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type N = any;
@@ -319,6 +320,7 @@ const lin = (r: number, g: number, b: number) => vec3(Math.pow(r, 2.2), Math.pow
 function houseMaterial(name: string) {
   const m = new THREE.MeshLambertNodeMaterial();
   m.name = name;
+  applyCutaway(m);
   const pal = palette();
   const hinfo = attribute('hinfo', 'vec4');
   const hcol = attribute('hcol', 'vec3');

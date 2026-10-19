@@ -17,7 +17,7 @@ Results history is in `docs/qa-results.md`.
 ## Running
 
 ```sh
-node app/qa/props_dump.mjs                      # client prop/tree placement dump (incremental, ~2.5 min full)
+node app/qa/props_dump.mjs                      # client prop/tree/street-prop placement dump (format v2) (incremental, ~2.5 min full)
 cd pipeline
 uv run python -m tpipe.qa --record              # whole region, 2 workers -> app/public/data/qa/issues.json
 uv run python -m tpipe.qa --categories road_width_step,flat_crossing --bbox=-4096,-4096,4096,4096
@@ -83,7 +83,8 @@ Thresholds are constants at the top of each module.
 
 | category | sub-types | rule |
 |---|---|---|
-| prop_in_lane | signal_pole, lamp | The client-placed pole or lamp is more than 0.3 m inside the drawn carriageway (classes 0–6) at its own level (screenshot 4): the segment pavement between the per-vertex edges `r_pl` / `r_pr` (flat caps), or a junction surface (`js_*`). Props on a raised corner sidewalk (`jw_*`) or a curbed median (`md_*`) are fine. |
+| prop_in_lane | signal_pole, lamp, and every street-prop kind in the dump (hydrant, bin, news_box, postbox, bench, bike_ring, pay_station, planter, street_blade, hydro_pole, highway_sign, house_bin, lot_light, bike_share, bus_pole, shelter) | The client-placed prop is more than 0.3 m inside the drawn carriageway (classes 0–6) at its own level (screenshot 4): the segment pavement between the per-vertex edges `r_pl` / `r_pr` (flat caps). Props on a raised corner sidewalk (`jw_*`) or a curbed median (`md_*`) are fine. Parking-lot pads, stripes, driveways, wires and parked cars are not checked. |
+| prop_in_crosswalk | as prop_in_lane | The same, on a junction surface (`js_*`) or within 4 m of a marked crossing node on the pavement. |
 | tree_on_road | trunk_in_carriageway, crown_through_deck, crown_over_highway | The trunk is more than 0.2 m inside a ribbon, including ramps and decks; the crown pokes through a deck lower than the tree; or the crown reaches ≥ 1.5 m over motorway or trunk lanes. |
 | tree_on_rail | trunk_on_track | The trunk is within 3 m of a track centreline. Crowns over tracks are `tree_over_track`. |
 | tree_on_airfield / tree_on_water | trunk | The land cover under the trunk is aeroway, runway or airfield grass, or water. |

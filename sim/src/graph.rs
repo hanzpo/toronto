@@ -828,6 +828,13 @@ impl Graph {
             _ if deg <= 2 => 3.0,
             _ => (max_hw + 1.2).max(n.ped_trim + 2.2).clamp(3.0, 22.0),
         };
+        // designed junctions (tpipe.primnet, docs/INTERSECTIONS.md): the stop line comes with the
+        // node (n_flags bits 2-7, whole metres) so the sim stops and turns where the box is drawn
+        let fixed = (n.flags >> 2) as f32;
+        if fixed > 0.0 && deg >= 2 {
+            n.setback = fixed;
+            n.ped_trim = (fixed - 2.2).max(0.0);
+        }
     }
 
     fn signals_near(&self, x: f64, y: f64) -> Vec<u32> {

@@ -14,7 +14,7 @@ import * as THREE from 'three/webgpu';
 import {
   Fn, attribute, float, vec2, vec3, vec4, texture, positionLocal, normalLocal, modelWorldMatrix, positionGeometry,
   cameraPosition, transformNormalToView, mix, smoothstep, clamp, floor, fract, max, min, abs, length, normalize, pow,
-  sin, cos, fwidth, select, dot, reflect, round,
+  sin, cos, fwidth, select, dot, reflect, round, dFdx, dFdy, cross, sign,
 } from 'three/tsl';
 import { U } from '../uniforms';
 import { baseTone } from './materials';
@@ -33,7 +33,7 @@ interface ClassLook {
   macro?: number; mow?: number;
 }
 
-/** SPEC ground classes (+ vector-only 24-29, banks 30-33, portals 34-37) */
+/** SPEC ground classes (+ vector-only 24-29, banks 30-33, portals 34-37, gorge rock 40) */
 export const GROUND_LOOK: Record<number, ClassLook> = {
   0: { col: 0x9ea477, rough: 0.97, a: [0.8, 0, 0, 0.1], b: [0, 0, 0.45, 0], macro: 0.7 }, // rough grass / meadow
   2: { col: 0x7f9c58, rough: 0.96, a: [1, 0, 0, 0], b: [0, 0, 0.15, 0], macro: 0.45 }, // park grass
@@ -69,6 +69,7 @@ export const GROUND_LOOK: Record<number, ClassLook> = {
   37: { col: 0xa6a298, rough: 0.9, a: [0, 0, 0.5, 0] }, // portal headwall
   38: { col: 0x77736d, rough: 0.45 }, // rails in open cuts
   39: { col: 0x7d9656, rough: 0.96, a: [1, 0, 0, 0], b: [0, 0, 0.3, 0], macro: 0.4 }, // embankment grass
+  40: { col: 0x7a7468, rough: 0.95, a: [0.25, 0, 0, 0.3], b: [0.9, 0, 0.2, 1.1], macro: 0.8 }, // gorge wall: dolostone + scree (Niagara)
 };
 
 function classTable(): THREE.DataTexture {
@@ -201,7 +202,10 @@ function makeGroundMaterial(): THREE.MeshStandardNodeMaterial {
   // ---- water
   const isW = isCls(cls, 1);
   const shoreD = gd.y, shoreT = round(gd.z), kind = round(gd.w);
-  const WS = waterSurface(e, nN, dist, viewDir, kind, shoreD, shoreT, tB.g.add(tA.r.mul(0.3)));
+  // the water triangle's own plane (exact: every drawn water triangle is planar) -> slope and downhill direction
+  const fc = cross(dFdx(positionLocal), dFdy(positionLocal));
+  const face = normalize(fc.mul(sign(fc.y)));
+  const WS = waterSurface(e, nN, dist, viewDir, kind, shoreD, shoreT, tB.g.add(tA.r.mul(0.3)), { h, face });
   const { wN, wcol, fres, sky, foam } = WS;
   col = mix(col, wcol.mul(float(1).sub(fres)), isW);
 
@@ -220,21 +224,62 @@ function makeGroundMaterial(): THREE.MeshStandardNodeMaterial {
  * directions; periods divide every tile size) + two long, low swells, each faded
  * by the pixel footprint (mipmapped as well), so it never aliases into stripes.
  * Returns the world normal, body colour (before fresnel), fresnel, sky reflection
- * colour and foam. `kind` 0 lake · 1 pond · 2 river; `shoreD` m; `shoreT` shore type.
+ * colour and foam. `kind` 0 lake · 1 pond · 2 river · 3 rapids; `shoreD` m; `shoreT` shore type.
+ *
+ * `flow` (vector ground only): the surface level `h` (m) and the water triangle's
+ * plane normal. Rapids (kind 3: curated steep reaches, below weirs / dams / falls;
+ * tpipe.rivers, tpipe.falls) are whitewater advected downhill (two-phase flow map,
+ * so the per-triangle flow direction never tears the pattern), breaking along
+ * ledges on the level contours; their slope sets how hard they break. River
+ * levels are flat across the channel (tpipe.rivers), so plain rivers stay water.
  */
-export function waterSurface(e: N, nN: N, dist: N, viewDir: N, kind: N, shoreD: N, shoreT: N, noise: N) {
+export function waterSurface(e: N, nN: N, dist: N, viewDir: N, kind: N, shoreD: N, shoreT: N, noise: N, flow?: { h: N; face: N }) {
   const waterN = streetTexture('water_normal.webp', false);
   const foot = dist.mul(0.0016).div(max(abs(viewDir.y), 0.12)); // metres per pixel along the surface
   const t = U.time;
   const n1 = texture(waterN, vec2(e, nN).div(32).add(vec2(t.mul(0.011), t.mul(0.007))));
   const n2 = texture(waterN, vec2(nN, e.negate()).div(8).add(vec2(t.mul(-0.023), t.mul(0.017))));
   const f1 = smoothstep(4.0, 0.2, foot), f2 = smoothstep(1.0, 0.05, foot);
-  const calm = mix(float(1), float(0.5), f01(kind.greaterThan(0.5))); // ponds / rivers calmer
+  let calm: N = mix(float(1), float(0.5), f01(kind.greaterThan(0.5))); // ponds / rivers calmer
   const TAU = Math.PI * 2;
+  // ---- whitewater on sloped / rapids water
+  let ww: N = float(0), wwFoam: N = float(0);
+  if (flow) {
+    const fy = max(flow.face.y, 0.2);
+    const g = vec2(flow.face.x, flow.face.z.negate()).div(fy); // downhill (E, N) per metre
+    const s = length(g);
+    const dir = g.div(max(s, 1e-4));
+    // whitewater only where the data says so (rapids flag: curated rapids zones, below weirs,
+    // dams and falls) -- a slope alone never turns a river white; it only sets how hard it breaks
+    const rap = f01(kind.greaterThan(2.5));
+    const steep = smoothstep(0.03, 0.12, s).mul(rap);
+    ww = rap.mul(smoothstep(0.002, 0.012, s).mul(0.55).add(0.45));
+    // two-phase flow map: offsets stay below speed * period, blends hide the reset
+    const speed = mix(float(5), float(9), steep), P = 2.4;
+    const ph0 = fract(t.div(P)), ph1 = fract(t.div(P).add(0.5));
+    const w0 = float(1).sub(abs(ph0.mul(2).sub(1)));
+    const detB = streetTexture('ground_detail_b.webp', false);
+    const p = vec2(e, nN);
+    const layer = (ph: N, k: number) => {
+      const q = p.sub(dir.mul(speed.mul(ph).mul(P))).add(k * 3.7);
+      return texture(detB, q.div(7)).b.mul(0.6).add(texture(detB, q.div(2.3).add(0.31)).g.mul(0.4));
+    };
+    const pat = layer(ph0, 0).mul(w0).add(layer(ph1, 1).mul(float(1).sub(w0)));
+    // whitewater density: large patches, and ledges (bands along the level contours, ~45 m
+    // apart on the Niagara rapids) where the river breaks white; faded before they alias
+    const macro = texture(detB, p.div(97)).b;
+    const lp = flow.h.div(0.55).add(macro.mul(2.5));
+    const ledge = pow(sin(lp.mul(TAU)).mul(0.5).add(0.5), 6).mul(smoothstep(0.4, 0.1, fwidth(lp))).mul(rap);
+    const dens = clamp(macro.mul(0.45).add(0.2).add(ledge.mul(0.5)).add(steep), 0, 1);
+    const far = smoothstep(2.5, 0.3, foot); // pattern detail -> its mean when a texel is sub-pixel
+    const cover = mix(dens.mul(0.6), smoothstep(float(1).sub(dens), float(1.25).sub(dens), pat), far);
+    wwFoam = ww.mul(cover);
+    calm = mix(calm, float(2.2), ww);
+  }
   const sw1 = cos(e.mul(TAU * 13 / 1024).add(nN.mul(TAU * 9 / 1024)).add(t.mul(0.5))).mul(0.005).mul(smoothstep(12, 2, foot));
   const sw2 = cos(e.mul(TAU * -7 / 1024).add(nN.mul(TAU * 16 / 1024)).add(t.mul(0.37))).mul(0.004).mul(smoothstep(12, 2, foot));
-  const sx = n1.r.sub(0.5).mul(2).mul(f1.mul(0.38)).add(n2.g.sub(0.5).mul(2).mul(f2.mul(0.22))).add(sw1.mul(0.82)).add(sw2.mul(-0.4)).mul(calm);
-  const sz = n1.g.sub(0.5).mul(2).mul(f1.mul(0.38)).sub(n2.r.sub(0.5).mul(2).mul(f2.mul(0.22))).add(sw1.mul(0.57)).add(sw2.mul(0.92)).mul(calm);
+  const sx: N = n1.r.sub(0.5).mul(2).mul(f1.mul(0.38)).add(n2.g.sub(0.5).mul(2).mul(f2.mul(0.22))).add(sw1.mul(0.82)).add(sw2.mul(-0.4)).mul(calm);
+  const sz: N = n1.g.sub(0.5).mul(2).mul(f1.mul(0.38)).sub(n2.r.sub(0.5).mul(2).mul(f2.mul(0.22))).add(sw1.mul(0.57)).add(sw2.mul(0.92)).mul(calm);
   // world normal (three axes: x = E, z = -N)
   const wN = normalize(vec3(sx.negate(), 1, sz));
   const shallow = smoothstep(14, 0, shoreD);
@@ -247,10 +292,13 @@ export function waterSurface(e: N, nN: N, dist: N, viewDir: N, kind: N, shoreD: 
   const lap = sin(t.mul(0.9).add(e.mul(0.05)).add(nN.mul(0.037))).mul(0.5).add(0.5);
   const foam = smoothstep(foamW.mul(mix(0.7, 1.2, lap)), float(0), shoreD).mul(smoothstep(0.35, 0.6, noise)).mul(f01(shoreT.greaterThan(0.5)));
   wcol = mix(wcol, vec3(0.8, 0.82, 0.8), foam.mul(0.65));
+  // rapids: aerated green water under the whitewater (Niagara's colour), then the foam itself
+  wcol = mix(wcol, vec3(0.13, 0.26, 0.22), ww.mul(0.7));
+  wcol = mix(wcol, vec3(0.84, 0.88, 0.86), wwFoam);
   // sky reflection (emission) with Schlick fresnel
   const cosT = max(dot(viewDir, wN), 0);
-  const fres = float(0.02).add(float(0.98).mul(pow(float(1).sub(cosT), 5))).mul(float(1).sub(foam));
+  const fres = float(0.02).add(float(0.98).mul(pow(float(1).sub(cosT), 5))).mul(float(1).sub(max(foam, wwFoam)));
   const rdir = reflect(viewDir.negate(), wN);
   const sky = mix(U.skyHorizon, U.skyZenith, pow(clamp(rdir.y, 0, 1), 0.5));
-  return { wN, wcol, fres, sky, foam };
+  return { wN, wcol, fres, sky, foam: max(foam, wwFoam) };
 }

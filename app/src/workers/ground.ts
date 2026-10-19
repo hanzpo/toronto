@@ -13,7 +13,7 @@
 // material (render/tiles/groundMaterial.ts):
 //   land     (class, 0, 0, 0)
 //   pitches  (class, u, v, hl·4·1024 + hw·4)   frame-local metres + frame size
-//   water    (1, shore distance m, nearest shore type, kind 0 lake · 1 pond · 2 river)
+//   water    (1, shore distance m, nearest shore type, kind 0 lake · 1 pond · 2 river · 3 rapids)
 //   banks    (30 + type-1, along m, height above water m, 0)
 //   portals  (34 wall · 35 floor · 36 mouth · 37 headwall, along m, height m, 0)
 import earcut from 'earcut';
@@ -325,9 +325,10 @@ export function buildGround(a: Record<string, TypedArray>, terr: TerrainSampler,
     const k0 = cls[p];
     if (k0 === G_WATER) {
       const lv = wLevel.get(p);
-      const flat = lv !== undefined && lv !== -32768;
+      // -32768 follows the level field (rivers); -32767 too, drawn as whitewater rapids
+      const flat = lv !== undefined && lv !== -32768 && lv !== -32767;
       const level = flat ? lv / 10 : 0;
-      const kind = !flat ? 2 : LAKE_LEVELS.some((x) => Math.abs(x - level) < 0.05) ? 0 : 1;
+      const kind = lv === -32767 ? 3 : !flat ? 2 : LAKE_LEVELS.some((x) => Math.abs(x - level) < 0.05) ? 0 : 1;
       const surf: Surface = { at(e, nn, o) { o[0] = flat ? level : fieldAt(e, nn); o[1] = 0; o[2] = 1; o[3] = 0; } };
       emitPolygon(b, ringBuf, n, S, 32, surf, (e, nn, o) => {
         shoreDist(shores, e, nn, sd);

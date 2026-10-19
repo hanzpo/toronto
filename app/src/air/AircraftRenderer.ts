@@ -25,7 +25,7 @@ import {
 } from 'three/tsl';
 import type { FrameContext } from '../engine/types';
 import { aircraftModel, aircraftDecalTexture, PART, ANIM, TYPE_CODES, type AircraftModel } from '../models/aircraft';
-import { liveryOf, tailArtTexture, ART_CELLS } from './liveries';
+import { liveryOf, tailArtTexture, titleTexture, ART_CELLS, TITLE_ROWS_N } from './liveries';
 import { U } from '../render/uniforms';
 import { FL_GEAR, FL_LANDING, FL_STROBE, FL_TAXI, PH } from './track';
 import type { AirPlane } from './AirSystem';
@@ -42,6 +42,8 @@ const GEAR_T = 9;
 type N = any;
 
 interface Lod {
+  /** painted cockpit mask regardless of airline (A350 / A330neo) */
+  typeMask: boolean;
   mesh: THREE.Mesh;
   geo: THREE.InstancedBufferGeometry;
   data: THREE.InstancedInterleavedBuffer;
@@ -131,10 +133,11 @@ export function aircraftMaterial(): THREE.MeshStandardNodeMaterial {
   // ---------------------------------------------------------------- paint
   const decal = aircraftDecalTexture();
   const art = tailArtTexture();
+  const titleTex = titleTexture();
   const rows = TYPE_CODES.length * 2;
   let winMask: N = float(0);
   {
-    const fuse = i0.xyz, tail = i1.xyz, belly = i2.xyz, accent = i3.xyz, engine = i4.xyz, stripe = i5.xyz;
+    const fuse = i0.xyz, tail = i1.xyz, belly = i2.xyz, engine = i4.xyz, stripe = i5.xyz;
     const bellyLine = i6.x, cheatY = i6.y, cheatW = i6.z, wrapCode = i6.w;
     // ---- fuselage
     const dy = surf.y, u = surf.z, vn = surf.w;
@@ -156,7 +159,8 @@ export function aircraftMaterial(): THREE.MeshStandardNodeMaterial {
     // windows + doors
     const v0 = row.mul(2).add(0.5).div(rows), v1 = row.mul(2).add(1.5).div(rows);
     const pat = texture(decal, vec2(u, v0));
-    const par = texture(decal, vec2(0.5, v1));
+    const par = texture(decal, vec2(0.25, v1));
+    const par2 = texture(decal, vec2(0.75, v1));
     const halfW = par.x.mul(0.5), halfH = par.y.mul(0.5), pitch = par.z, cargoH = par.w.mul(4);
     const dx = float(1).sub(pat.x).mul(pitch).mul(0.5);
     const rad = halfW.mul(0.95);
@@ -178,13 +182,32 @@ export function aircraftMaterial(): THREE.MeshStandardNodeMaterial {
     const dxIn = pat.y.mul(0.6);
     const dd = min(dxIn, dyIn);
     const inside = step(0, dyIn).mul(step(0.002, pat.y)).mul(step(0.5, dk)).mul(sideOk);
-    const line = inside.mul(float(1).sub(smoothstep(0.025, fp.add(0.03), dd)));
+    const line = inside.mul(float(1).sub(smoothstep(0.016, fp.add(0.02), dd)));
     const doorFade = float(1).sub(smoothstep(0.03, 0.12, fp));
-    c = mix(c, c.mul(0.5), line.mul(doorFade));
+    c = mix(c, c.mul(0.66), line.mul(doorFade));
+    // fuselage title above the forward cabin windows, reading left → right on both sides
+    {
+      const Lm = par2.x.mul(100), tu0 = par2.y, Ht = par2.z.mul(2);
+      const tAsp = floor(i5.w.div(1024)).div(4);
+      const tx = u.sub(tu0).mul(Lm), ty = dy.sub(halfH.add(0.14));
+      const tw = Ht.mul(tAsp);
+      const left = step(positionGeometry.z, 0);
+      const cx = mix(tw.sub(tx), tx, left).div(tw.max(0.01));
+      const inR = step(0, tx).mul(step(tx, tw)).mul(step(0, ty)).mul(step(ty, Ht)).mul(step(0.1, tAsp));
+      const w5t = i5.w.sub(floor(i5.w.div(1024)).mul(1024));
+      const wm = w5t.sub(step(511.5, w5t).mul(512));
+      const row = wm.sub(step(255.5, wm).mul(256));
+      const tv = float(1).sub(row.add(1).div(TITLE_ROWS_N)).add(ty.div(Ht.max(0.01)).div(TITLE_ROWS_N));
+      const tcol = texture(titleTex, vec2(cx.mul(tAsp.mul(32).div(1024)), tv));
+      c = mix(c, tcol.xyz, tcol.w.mul(inR));
+    }
     c = mix(c, vec3(0.035, 0.045, 0.06), win);
     const fus = c;
     // ---- tail fin with art
-    const artIdx = i5.w.sub(step(255.5, i5.w).mul(256));
+    const w5a = i5.w.sub(floor(i5.w.div(1024)).mul(1024));
+    const maskOn = step(511.5, w5a);
+    const w5 = w5a.sub(maskOn.mul(512));
+    const artIdx = w5.sub(step(255.5, w5).mul(256));
     const cell = vec2(artIdx.sub(floor(artIdx.div(ART_CELLS)).mul(ART_CELLS)), floor(artIdx.div(ART_CELLS)));
     const au = clamp(surf.y, 0.01, 0.99), av = clamp(surf.z, 0.01, 0.99);
     const tuv = vec2(cell.x.add(au).div(ART_CELLS), float(1).sub(cell.y.add(1).sub(av).div(ART_CELLS)));
@@ -197,7 +220,7 @@ export function aircraftMaterial(): THREE.MeshStandardNodeMaterial {
     out = mix(out, fin, is(PART.TAIL));
     out = mix(out, belly.mul(0.3).add(fuse.mul(0.7)), is(PART.BELLY).mul(step(bellyLine, -0.5)));
     out = mix(out, belly, is(PART.BELLY).mul(step(-0.5, bellyLine)));
-    out = mix(out, accent, is(PART.ACCENT));
+    out = mix(out, mix(fus, vec3(0.012, 0.013, 0.015), maskOn), is(PART.ACCENT));
     out = mix(out, engine, is(PART.ENGINE));
     // far icons: dark on the day map
     const farDay = vec3(0.02, 0.035, 0.08);
@@ -211,7 +234,8 @@ export function aircraftMaterial(): THREE.MeshStandardNodeMaterial {
   m.metalnessNode = mix(float(0.1), float(0.0), glassM).add(is(PART.FIXED).mul(0.15));
   {
     const farAn = vec3(0.45, 0.62, 1.0);
-    const lit = step(255.5, i5.w);
+    const w5e = i5.w.sub(floor(i5.w.div(1024)).mul(1024));
+    const lit = step(255.5, w5e.sub(step(511.5, w5e).mul(512)));
     // cabin windows glow at night (recomputed cheaply: dark window colour = window mask)
     const c = attribute('color', 'vec3');
     const f = pow(float(1).sub(clamp(dot(normalView, positionViewDirection), 0, 1)), 3);
@@ -277,7 +301,7 @@ export class AircraftRenderer {
     this.root.add(this.lights);
   }
 
-  private lod(g: THREE.BufferGeometry, name: string): Lod {
+  private lod(g: THREE.BufferGeometry, name: string, typeMask = false): Lod {
     const geo = new THREE.InstancedBufferGeometry();
     for (const [k, a] of Object.entries(g.attributes)) geo.setAttribute(k, a);
     geo.setIndex(g.index);
@@ -291,14 +315,15 @@ export class AircraftRenderer {
     mesh.receiveShadow = true;
     mesh.name = name;
     this.root.add(mesh);
-    return { mesh, geo, data, count: 0 };
+    return { typeMask, mesh, geo, data, count: 0 };
   }
 
   private typeMesh(code: string): TypeMesh {
     let t = this.types.get(code);
     if (t) return t;
     const model = aircraftModel(code);
-    t = { model, hi: this.lod(model.geometry, `aircraft-${code}`), lo: this.lod(model.low, `aircraft-${code}-far`), near: false };
+    const tm = code === 'A359' || code === 'A339';
+    t = { model, hi: this.lod(model.geometry, `aircraft-${code}`, tm), lo: this.lod(model.low, `aircraft-${code}-far`, tm), near: false };
     this.types.set(code, t);
     return t;
   }
@@ -335,7 +360,7 @@ export class AircraftRenderer {
     set(2, liv.belly, st.flaps);
     set(3, liv.accent, st.prop);
     set(4, liv.engine, st.spoiler);
-    set(5, liv.stripe, liv.art + (st.lit ? 256 : 0));
+    set(5, liv.stripe, liv.art + (st.lit ? 256 : 0) + (liv.mask || lod.typeMask ? 512 : 0) + 1024 * Math.round(liv.titleAspect * 4));
     arr[o + 24] = liv.bellyLine;
     arr[o + 25] = liv.cheatY;
     arr[o + 26] = liv.cheatW;

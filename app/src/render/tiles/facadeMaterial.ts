@@ -18,6 +18,7 @@ import {
 } from 'three/tsl';
 import { clock } from '../../state/clock';
 import { U } from '../uniforms';
+import { applyCutaway } from '../cutaway';
 import { baseTone } from './materials';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -470,6 +471,8 @@ export function facadeMaterial(): THREE.MeshLambertNodeMaterial {
   col = mix(col, mix(signC, letterC, cGlyph.mul(float(1).sub(shopFar))), cSign);
 
   m.colorNode = baseTone(col);
+  // buildings in the camera's line of sight dither away (render/cutaway.ts)
+  applyCutaway(m);
 
   // ---- emissive: glass reflections by day, lights at night
   const night = U.night;

@@ -159,7 +159,7 @@ class Segs {
 
 // ---------------------------------------------------------------------------- exclusion index
 
-const EX_ROAD = 0, EX_HIGHWAY = 1, EX_BRIDGE = 2, EX_RAIL = 3, EX_DISC = 4;
+const EX_ROAD = 0, EX_HIGHWAY = 1, EX_BRIDGE = 2, EX_RAIL = 3, EX_DISC = 4, EX_JBOX = 5;
 /** largest clearance a query adds beyond an item's half-width (crown radius + clear zone + bands) */
 const EX_PAD = 22;
 const ST = 13; // item stride
@@ -249,7 +249,7 @@ export class Exclusion {
     const it = this.it;
     for (const id of ids) {
       const q = id * ST, type = it[q + 12];
-      if (type === EX_RAIL || type === EX_DISC) continue;
+      if (type === EX_RAIL || type === EX_DISC || type === EX_JBOX) continue;
       const g = this.geom(q, x, y);
       best = Math.max(best, g.e - g.d);
     }
@@ -282,6 +282,8 @@ export class Exclusion {
           case EX_HIGHWAY: if (d < e + Math.max(t, c) + 2.5) return true; break;
           case EX_BRIDGE: if (d < e + Math.max(t, c) + 1) return true; break;
           case EX_RAIL: if (d < Math.max(3.2 + t, c + 1.0)) return true; break;
+          // coarse junction box (sight-line clearance for plants); furniture uses the exact surfaces
+          case EX_JBOX: if (!pit && d < e + t) return true; break;
           default: if (d < e + t) return true;
         }
       }
@@ -319,7 +321,8 @@ export function buildExclusion(a: Record<string, TypedArray>, _streets: StreetRo
     for (let i = 0; i < jxy.length / 2; i++) {
       let r = 0;
       for (let k = jao[i]; k < jao[i + 1]; k++) r = Math.max(r, jar[k]);
-      ex.disc(jxy[i * 2], jxy[i * 2 + 1], r * widen + 1.5);
+      const R = r * widen + 1.5;
+      ex.add(jxy[i * 2], jxy[i * 2 + 1], jxy[i * 2], jxy[i * 2 + 1], R, R, EX_JBOX);
     }
   }
   const js = a.js_xy as Float32Array | undefined, jt = a.js_tri as Uint32Array | undefined;

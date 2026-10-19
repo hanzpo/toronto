@@ -67,6 +67,7 @@ export default function App() {
         await engine.addLayer(new (await mods.props).PropsLayer());
         await engine.addLayer(new (await mods.urban).UrbanLayer());
         await engine.addLayer(new (await mods.crossings).CrossingsLayer());
+        if (/[?&]net=2\b/.test(location.search)) await engine.addLayer(new (await import('./net2/NetLayer')).NetLayer());
         const transit = new (await mods.transit).TransitLayer(engine.dataRoot);
         await engine.addLayer(transit);
         Object.assign(window as object, { __transit: transit });

@@ -21,6 +21,10 @@ geometry and z; these checks catch consumers that disagree with it or with each 
                             signalized member node's arm radius; a junction not clustered with its
                             twin draws a second set) -- the two halves of a divided crossing are on
                             different carriageways and are not counted
+  mapped_crossing_not_generated  a mapped level crossing (OSM railway=level_crossing / crossing,
+                            data/crossings.json) where the drawn street and track are not at one
+                            level (> 0.5 m apart) or one of them is missing -- a real crossing
+                            separated by mistake
   adjacent_track_z_step     parallel main-line / siding tracks within 8 m whose drawn levels differ
                             by more than 0.3 m (tracks in one corridor or yard share a bed level;
                             bridge / tunnel vertices -- real flyovers and dives -- are excluded)
@@ -41,8 +45,8 @@ from .core import finding
 
 MODEL_CATS = {"duplicate_track", "underpass_drawn_at_grade", "drawn_rail_vs_train_path", "graph_vs_model",
               "sidewalk_between_carriageways", "lane_count_jump", "duplicate_crosswalk",
-              "adjacent_track_z_step",
-              "surface_gap", "surface_overlap", "terrain_above_paving"}  # unified surface (qa/checks_surface.py)
+              "adjacent_track_z_step", "mapped_crossing_not_generated",
+              "surface_gap", "surface_overlap", "terrain_above_paving", "surface_off_model"}  # unified surface (qa/checks_surface.py)
 
 V_BRIDGE, V_TUNNEL, V_EMBED = 1, 2, 8
 ST_EXACT = 11
@@ -488,6 +492,44 @@ def check_adjacent_track_z(B) -> list[dict]:
     return out
 
 
+# ------------------------------------------------------------------ mapped_crossing_not_generated
+@functools.lru_cache(maxsize=1)
+def _crossings():
+    import json
+    for p in (geo.OUT / "crossings.json", geo.WORK / "crossings.json"):
+        if p.exists():
+            return json.loads(p.read_text()).get("crossings", [])
+    return []
+
+
+def check_mapped_crossings(B) -> list[dict]:
+    out = []
+    C = [c for c in _crossings() if B.in_core(c["e"], c["n"])]
+    if not C:
+        return out
+    R, L = B.roads, B.rails
+    rz = R.ZD if R.ZD is not None else R.Z
+    lz = L.ZD if L.ZD is not None else L.Z
+    rt = cKDTree(np.column_stack([R.X, R.Y])) if len(R.X) else None
+    lt = cKDTree(np.column_stack([L.X, L.Y])) if len(L.X) else None
+    for c in C:
+        p = (c["e"], c["n"])
+        dr, kr = rt.query(p) if rt is not None else (np.inf, -1)
+        dl, kl = lt.query(p) if lt is not None else (np.inf, -1)
+        if (dr > 4.0 and c.get("kind", 5) != 5) or dl > 8.0:
+            continue    # footway crossings on hidden (sidewalk-duplicate) paths / track outside the tiles
+        if dr > 4.0 or dl > 4.0:
+            sub, desc = "missing", f"mapped crossing {c.get('id')}: {'street' if dr > 4.0 else 'track'} not drawn within 4 m"
+        elif abs(float(rz[kr] - lz[kl])) > 0.5:
+            sub, desc = "separated", f"mapped crossing {c.get('id')}: street and track drawn {float(lz[kl] - rz[kr]):+.1f} m apart"
+        else:
+            continue
+        out.append(finding("mapped_crossing_not_generated", sub, 5, c["e"], c["n"], None,
+                           list(c.get("roads", []))[:1] + list(c.get("tracks", []))[:1], desc,
+                           key=("mapped_crossing_not_generated", c.get("id"))))
+    return out
+
+
 def run(B, cats: set) -> list[dict]:
     cats = cats & MODEL_CATS
     out = []
@@ -501,19 +543,17 @@ def run(B, cats: set) -> list[dict]:
         out += check_train_path(B)
     if "sidewalk_between_carriageways" in cats:
         out += check_sidewalk_between(B)
+    if "mapped_crossing_not_generated" in cats:
+        out += check_mapped_crossings(B)
     if "adjacent_track_z_step" in cats:
         out += check_adjacent_track_z(B)
     if "duplicate_crosswalk" in cats:
         out += check_duplicate_crosswalk(B)
     if "lane_count_jump" in cats:
         out += check_lane_jump(B)
-    if cats & {"surface_gap", "surface_overlap", "terrain_above_paving"}:
-        try:
-            from .checks_surface import run as run_surface
-        except ImportError:        # unified surface not built yet (docs/SURFACE.md)
-            run_surface = None
-        if run_surface:
-            out += run_surface(B, cats)
+    if cats & {"surface_gap", "surface_overlap", "terrain_above_paving", "surface_off_model"}:
+        from .checks_surface import run as run_surface
+        out += run_surface(B, cats)
     if "graph_vs_model" in cats:
         from .checks_graph import load_graph
         out += check_graph_model(B, load_graph(B.tiles))

@@ -26,7 +26,9 @@ Water level (datum m)
   Lake Ontario -0.3 (74.7 m ASL), Lake Erie 99.2. Other water: the terrain's
   local minimum (90 m min filter) along the shore -- flat for ponds and lakes,
   a sampled field for rivers (varies > 2 m along the shore). Nothing is lower
-  than Lake Ontario.
+  than Lake Ontario. Niagara Falls (tpipe.falls, curated/falls.json): river
+  water is cut at the crests; the gorge below is flat at the pool level and the
+  upper rapids follow a field graded down to each brink (flagged as rapids).
 
 Shores (edges of water against land, water on the left)
   1 dockwall (vertical concrete) · 2 revetment (armour stone) · 3 beach ·
@@ -55,7 +57,7 @@ from scipy import ndimage
 from scipy.spatial import cKDTree
 from shapely.strtree import STRtree
 
-from . import geo
+from . import falls, geo, rivers
 
 S0 = geo.TILE_SIZE[0]
 GRID = 33  # level-0 terrain samples per side (32 m)
@@ -78,6 +80,7 @@ SHORE_NAMES = {"dockwall": SH_DOCK, "revetment": SH_REVET, "beach": SH_BEACH, "n
 LAKE_ONTARIO = -0.3
 LAKE_ERIE = 99.2
 FIELD = -32768  # gw_level sentinel: level comes from the gw_field grid
+RAPIDS = -32767  # gw_level sentinel: follows the gw_field grid, drawn as whitewater rapids
 
 TIER0 = {C_FARM, C_RES, C_COM, C_IND, C_INST, C_AERO, C_CONS, C_RAIL, C_RUNWAY}
 SMOOTH = {C_WATER: 10.0, C_FOREST: 12.0, C_SAND: 8.0, C_WET: 10.0, C_GRASS: 3.0, C_GOLF: 6.0, C_CEM: 2.0}
@@ -463,6 +466,13 @@ def prepare(terrain, coast_water):
     wl = ndimage.grey_erosion(terrain.h, size=(3, 3))
     wl = ndimage.gaussian_filter(wl, 1.0)
     wl = np.maximum(wl, LAKE_ONTARIO).astype(np.float32)
+    inland = [g for g, c, lv in zip(geoms, cls, levels) if c == C_WATER and lv is None]
+    wl = _water_only_field(wl, inland, terrain.x0, terrain.y0, terrain.cell)
+    # rivers: smoothed downstream profiles along the centrelines, flat across (tpipe.rivers)
+    ww_idx = np.nonzero(lk == 2)[0]
+    lname = ln["name"]
+    wl, white = rivers.profile_field(wl, terrain.x0, terrain.y0, terrain.cell, inland,
+                                     ([lxy[loff[i]:loff[i + 1]] for i in ww_idx], [lname[i] for i in ww_idx]))
     W["wl"] = wl
     W["wl_x0"], W["wl_y0"], W["wl_cell"] = terrain.x0, terrain.y0, terrain.cell
 
@@ -482,6 +492,14 @@ def prepare(terrain, coast_water):
                 lvl = LAKE_ONTARIO  # harbours, lagoons, river mouths at lake level
             levels[k] = lvl
 
+    # Niagara Falls: gorge water flat at the pool level, upper rapids graded to the brinks (tpipe.falls)
+    geoms, cls, tier, frames, levels = falls.split_water(geoms, cls, tier, frames, levels, C_WATER)
+    geoms, cls, tier, frames, levels = rivers.flag_rapids(geoms, cls, tier, frames, levels, C_WATER, white)
+    falls.adjust_field(W["wl"], W["wl_x0"], W["wl_y0"], W["wl_cell"])
+    pool = [g for g, c, lv in zip(geoms, cls, levels) if c == C_WATER and lv == falls.load_pool_level()]
+    for g in falls.gorge_rock(terrain, pool, [g for g, c in zip(geoms, cls) if c == C_WATER]):  # gorge walls: rock / scree over the DEM's ramps (tier 2, no water)
+        geoms.append(g); cls.append(falls.C_GORGE); tier.append(2); frames.append(None); levels.append(None)
+
     W["geoms"] = np.array(geoms, dtype=object)
     W["cls"] = np.array(cls, np.int64)
     W["tier"] = np.array(tier, np.int64)
@@ -492,6 +510,32 @@ def prepare(terrain, coast_water):
     W["curated"] = _curated_shores()
     W["trench"] = _trenches(terrain)
     print(f"ground: prepared {len(geoms):,} polygons in {time.time() - t0:.0f}s")
+
+
+def _water_only_field(wl, water, x0, y0, cell, sigma=1.5):
+    """River level field built from water nodes only (normalized convolution).
+
+    The 90 m min filter still sees the valley walls at grid nodes beside a narrow river,
+    so the bilinear field tilted drawn water across the channel (slopes of 10-50 % on the
+    Humber and Don). Here every node near water takes the Gaussian-weighted level of the
+    nodes that touch water (sigma 1.5 cells ~ 45 m, also smoothing the along-river
+    profile); nodes with no water nearby keep the terrain field."""
+    from affine import Affine
+    from rasterio import features
+
+    tr = Affine(cell, 0, x0 - cell / 2, 0, cell, y0 - cell / 2)  # row index grows north, like the grid
+    m = features.rasterize(((g, 1) for g in water), out_shape=wl.shape, transform=tr, all_touched=True,
+                           dtype="uint8").astype(np.float32)
+    num = ndimage.gaussian_filter(wl * m, sigma)
+    den = ndimage.gaussian_filter(m, sigma)
+    ok = den > 0.02
+    out = wl.copy()
+    out[ok] = num[ok] / den[ok]
+    # fade back to the terrain field where water is barely within reach
+    t = np.clip((den - 0.02) / 0.1, 0, 1)
+    out = wl + (out - wl) * t
+    print(f"ground: river level field from {int(m.sum()):,} water nodes")
+    return np.maximum(out, LAKE_ONTARIO).astype(np.float32)
 
 
 def _curated_shores():
@@ -586,7 +630,8 @@ def build(tx: int, ty: int, terrain):
     land_tree = STRtree(land_geoms) if len(land_geoms) else None
 
     def level_of(src):
-        return W["levels"][src] if src >= 0 and W["levels"][src] is not None else FIELD
+        lv = W["levels"][src] if src >= 0 and W["levels"][src] is not None else FIELD
+        return FIELD if lv == RAPIDS else lv  # rapids follow the field too (flagged in the output)
 
     shores = []  # (xy (n,2) world, type, z (n,))
     if wu is not None and not wu.is_empty:
@@ -741,7 +786,7 @@ def build(tx: int, ty: int, terrain):
             wi.append(k)
             if lvl == FIELD:
                 field = True
-                wl.append(-32768)
+                wl.append(RAPIDS if src >= 0 and W["levels"][src] == RAPIDS else FIELD)
             else:
                 wl.append(int(round(lvl * 10)))
         if wi:

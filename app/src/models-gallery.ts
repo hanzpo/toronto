@@ -72,7 +72,7 @@ async function main() {
   const ground = new THREE.Mesh(new THREE.PlaneGeometry(6000, 6000), new THREE.MeshStandardMaterial({ color: '#8d9186', roughness: 1 }))
   ground.rotation.x = -Math.PI / 2
   ground.receiveShadow = true
-  scene.add(ground)
+  if (q.get('ground') !== '0') scene.add(ground)
 
   const labelRoot = document.getElementById('labels')!
   const labels: { el: HTMLDivElement; pos: THREE.Vector3 }[] = []
@@ -152,7 +152,7 @@ async function main() {
     list.forEach((code, i) => {
       const spec = AIRCRAFT[code]
       if (!spec) return
-      if (i > 0 && i % perRow === 0) { z += rowMaxSpan + 8; xCur = 0; rowMaxSpan = 0 }
+      if (i > 0 && i % perRow === 0) { z += rowMaxSpan + num('gap', 8); xCur = 0; rowMaxSpan = 0 }
       const al = q.get('airline') && q.get('airline') !== 'auto' ? q.get('airline')! : AUTO[code] ?? 'ACA'
       const m = new THREE.Matrix4().makeTranslation(xCur, 0, z + spec.span / 2)
       const h = airR.addStatic(code, al, m, st, lod)
@@ -161,7 +161,7 @@ async function main() {
       rows.push(`${code} ${spec.name} [${al}] L ${spec.length} span ${spec.span} H ${spec.height} · ${triangleCount(g)} tris (low ${triangleCount(h.model.low)})`)
       label(code, new THREE.Vector3(xCur, spec.height + 2, z + spec.span / 2))
       bounds.expandByPoint(new THREE.Vector3(xCur - spec.length * 0.5, 0, z)).expandByPoint(new THREE.Vector3(xCur + spec.length * 0.5, spec.height, z + spec.span))
-      xCur -= spec.length + 10
+      xCur -= spec.length + num('gap', 10)
       rowMaxSpan = Math.max(rowMaxSpan, spec.span)
     })
     ;(window as unknown as { __air: unknown }).__air = { airR, airStatics }
@@ -235,6 +235,19 @@ async function main() {
   const controls = new OrbitControls(camera, renderer.domElement)
   controls.target.copy(target)
   controls.update()
+  // aircraft contact sheets: aim at one type (az/el deg, distance in aircraft lengths, target offset along x in lengths)
+  ;(window as unknown as { __airCam: unknown }).__airCam = (code: string, azd: number, eld: number, kd: number, dx = 0, off?: [number, number, number]) => {
+    const h = airStatics.find((a) => a.model.spec.code === code)
+    if (!h) return false
+    const sp = h.model.spec
+    const L = sp.length
+    const tg = off ? h.pos.clone().add(new THREE.Vector3(off[0], off[1], off[2])) : h.pos.clone().add(new THREE.Vector3(dx * L, sp.fus.belly + sp.fus.h * 0.5, 0))
+    const a = (azd * Math.PI) / 180, e = (eld * Math.PI) / 180, d = kd * L
+    camera.position.set(tg.x + d * Math.cos(e) * Math.sin(a), tg.y + d * Math.sin(e), tg.z + d * Math.cos(e) * Math.cos(a))
+    controls.target.copy(tg)
+    controls.update()
+    return true
+  }
   const sr = Math.max(sz.x, sz.z) * 0.6 + 20
   const scam = sun.shadow.camera as THREE.OrthographicCamera
   scam.left = -sr; scam.right = sr; scam.top = sr; scam.bottom = -sr; scam.near = 1; scam.far = 4 * sr + 400
@@ -248,6 +261,7 @@ async function main() {
   })
   const hud = document.getElementById('hud')!
   hud.style.whiteSpace = 'pre'
+  if (q.get('hud') === '0') hud.style.display = 'none'
   hud.textContent = rows.join('\n')
   const v = new THREE.Vector3()
   const t0 = performance.now()

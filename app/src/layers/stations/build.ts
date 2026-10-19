@@ -94,7 +94,7 @@ export interface Built {
   /** label anchor elevation */
   labelH: number;
   /** clearance QA: platforms built, track centrelines found inside a platform envelope (edge − E) */
-  qa: { platforms: number; intrusions: { lat: number; e: number; n: number }[]; columns?: [number, number][] };
+  qa: { platforms: number; intrusions: { lat: number; e: number; n: number }[]; columns?: [number, number][]; plans?: { a: number; b: number; s0: number; s1: number; type: string }[] };
 }
 
 /**
@@ -114,6 +114,8 @@ export interface StationBox {
   floor: number;
   ceiling: number;
   platforms: { a: number; b: number; top: number }[];
+  /** lateral positions of the tracks through the box (same frame as left / right) */
+  tracks: number[];
   /** TTC wall tile colour (0xRRGGBB) */
   wall: number;
 }
@@ -130,6 +132,16 @@ export interface BuildEnv {
   brand: 'ttc' | 'go' | 'up' | 'via' | 'lrt';
 }
 
+/**
+ * Station box section (TTC cut-and-cover stations): walls BOX_SIDE m beyond the
+ * outer track centres (the running twin box is ~8.5 m wide over tracks 4.45 m
+ * apart, interact/tunnel.ts), floor below the rail, ceiling BOX_HEADROOM above
+ * the platform (≈ 3.8 m clear over the platform, 4.9 m over the rail).
+ */
+export const BOX_SIDE = 2.05;
+export const BOX_FLOOR = -0.35;
+export const BOX_HEADROOM = 3.85;
+
 const EDGE: Record<string, number> = { subway: 1.6, lrt: 1.45, commuter_rail: 1.65, airport_rail: 1.65, intercity_rail: 1.65 };
 
 function modeOk(lv: LevelRec): (p: Poly) => boolean {
@@ -144,7 +156,17 @@ interface PlatformPlan { ref: number; s0: number; s1: number; a: number; b: numb
 function parallelTracks(tr: TrackIndex, e: number, n: number, r: number, ok: (p: Poly) => boolean, ux: number, uy: number) {
   const hits = tr.near(e, n, r, ok);
   if (!hits.length) return null;
-  const ref = hits[0];
+  // Reference: among the polylines on the nearest track, the one running furthest
+  // both ways from the station. A pattern that starts or ends here (Wilson's
+  // short turns / pull-outs) would otherwise clamp the platform off the station.
+  let ref = hits[0];
+  let cover = -1;
+  for (const h of hits) {
+    if (h.d > hits[0].d + 1.5) break;
+    const s = tr.arc(h.poly, h.seg, h.t);
+    const c = Math.min(s, tr.length(h.poly) - s);
+    if (c > cover) { cover = c; ref = h; }
+  }
   const sRef = tr.arc(ref.poly, ref.seg, ref.t);
   const [tx, ty] = tr.tangent(ref.poly, sRef);
   if (Math.abs(tx * ux + ty * uy) < 0.8) {
@@ -370,6 +392,7 @@ export function buildStation(st: StationRec, env: BuildEnv, lineBullets: string[
       }
       plans[i] = pl;
       qa.platforms++;
+      (qa.plans ??= []).push({ a: +pl.a.toFixed(2), b: +pl.b.toFixed(2), s0: Math.round(pl.s0), s1: Math.round(pl.s1), type: pl.type });
       qa.intrusions.push(...intrusions(env, pl, EDGE[lv.mode] ?? 1.6));
     }
     if (!plans.length) continue;
@@ -387,6 +410,7 @@ export function buildStation(st: StationRec, env: BuildEnv, lineBullets: string[
     // box extents over all platforms of this level (in the first plan's frame)
     let boxA = Infinity, boxB = -Infinity, boxS0 = Infinity, boxS1 = -Infinity;
     const boxPlats: { a: number; b: number; top: number }[] = [];
+    const boxTracks: number[] = [];
     for (const pl of plans) {
       const S = samples(tr, pl.ref, pl.s0, pl.s1, heavy ? 12 : 8);
       const Q = (i: number, lat: number, dy: number): V3 => { const q = S[i]; return P(q.e + q.nx * lat, q.n + q.ny * lat, q.z + dy); };
@@ -432,12 +456,22 @@ export function buildStation(st: StationRec, env: BuildEnv, lineBullets: string[
           da = qm.lat;
           // the other track may run the opposite way: flip lateral order
           const [t0x, t0y] = tr.tangent(ref0, qm.s), [t1x, t1y] = tr.tangent(pl.ref, (pl.s0 + pl.s1) / 2);
-          if (t0x * t1x + t0y * t1y < 0) { const a = -pl.b, b = -pl.a; boxA = Math.min(boxA, da + a - (pl.trackB ? 2 * E + 0.6 : 0.2)); boxB = Math.max(boxB, da + b + (pl.trackA ? 2 * E + 0.6 : 0.2)); boxS0 = Math.min(boxS0, s0); boxS1 = Math.max(boxS1, s1); boxPlats.push({ a: da + a, b: da + b, top: H }); continue; }
+          if (t0x * t1x + t0y * t1y < 0) {
+            const a = -pl.b, b = -pl.a;
+            boxA = Math.min(boxA, da + a - (pl.trackB ? E + BOX_SIDE : 0.2)); boxB = Math.max(boxB, da + b + (pl.trackA ? E + BOX_SIDE : 0.2));
+            boxS0 = Math.min(boxS0, s0); boxS1 = Math.max(boxS1, s1); boxPlats.push({ a: da + a, b: da + b, top: H });
+            if (pl.trackB) boxTracks.push(da + a - E);
+            if (pl.trackA) boxTracks.push(da + b + E);
+            continue;
+          }
         }
-        boxA = Math.min(boxA, da + (pl.trackA ? pl.a - 2 * E - 0.6 : pl.a - 0.2));
-        boxB = Math.max(boxB, da + (pl.trackB ? pl.b + 2 * E + 0.6 : pl.b + 0.2));
+        // walls BOX_SIDE beyond the track centre (as the running tunnel, interact/tunnel.ts), or behind a side platform
+        boxA = Math.min(boxA, da + (pl.trackA ? pl.a - E - BOX_SIDE : pl.a - 0.2));
+        boxB = Math.max(boxB, da + (pl.trackB ? pl.b + E + BOX_SIDE : pl.b + 0.2));
         boxS0 = Math.min(boxS0, s0); boxS1 = Math.max(boxS1, s1);
         boxPlats.push({ a: da + pl.a, b: da + pl.b, top: H });
+        if (pl.trackA) boxTracks.push(da + pl.a - E);
+        if (pl.trackB) boxTracks.push(da + pl.b + E);
         continue;
       }
       surfacePlatformsAt.push({ e: pm.e, n: pm.n });
@@ -536,11 +570,15 @@ export function buildStation(st: StationRec, env: BuildEnv, lineBullets: string[
     if (isUnder && boxS1 - boxS0 > 400) { boxS1 = boxS0 + 400; }
     if (isUnder && boxA < boxB && boxB - boxA < 60) {
       const ref = plans[0].ref;
-      buildBox(under, signs, tr, ref, boxS0 - 6, boxS1 + 6, boxA - 0.6, boxB + 0.6, env.wall, H, P);
+      // tracks served by the box (deduplicated); two tracks with no platform between them
+      // (side-platform stations) get the row of clad steel columns down the middle
+      const tks = boxTracks.sort((x, y) => x - y).filter((t, i, a) => i === 0 || t - a[i - 1] > 1);
+      const mids = tks.length === 2 && !boxPlats.some((p) => p.a > tks[0] && p.b < tks[1]) && tks[1] - tks[0] > 3.6 ? [(tks[0] + tks[1]) / 2] : [];
+      buildBox(under, signs, tr, ref, boxS0 - 6, boxS1 + 6, boxA, boxB, env.wall, H, P, mids);
       const S4 = samples(tr, ref, boxS0 - 6, boxS1 + 6, 4);
       const path = new Float64Array(S4.length * 3);
       S4.forEach((q, i) => { path[3 * i] = q.e; path[3 * i + 1] = q.n; path[3 * i + 2] = q.z; });
-      boxes.push({ id: st.id, name: st.name, mode: lv.mode, line: lv.line, path, left: boxB + 0.6, right: boxA - 0.6, floor: -0.3, ceiling: 5.8, platforms: boxPlats, wall: env.wall });
+      boxes.push({ id: st.id, name: st.name, mode: lv.mode, line: lv.line, path, left: boxB, right: boxA, floor: BOX_FLOOR, ceiling: H + BOX_HEADROOM, platforms: boxPlats, tracks: tks, wall: env.wall });
     }
   }
 
@@ -670,13 +708,13 @@ function signQuad(sg: Geo, c: V3, d: V3, w: number, h: number, slot: Slot, _P: u
 
 /** underground station box: floor, walls with tile band + name tiles, lit ceiling, end walls */
 function buildBox(g: Geo, sg: Geo, tr: TrackIndex, ref: number, s0: number, s1: number, a: number, b: number, wall: number, H: number,
-  P: (e: number, n: number, z: number) => V3) {
+  P: (e: number, n: number, z: number) => V3, mids: number[]) {
   const S = samples(tr, ref, s0, s1, 6);
   const Q = (i: number, lat: number, dy: number): V3 => { const q = S[i]; return P(q.e + q.nx * lat, q.n + q.ny * lat, q.z + dy); };
   const wallRGB = lin(hex(wall));
   const lightWall: RGB = [0.62, 0.6, 0.56];
   const dark: RGB = [0.08, 0.08, 0.08];
-  const ceilY = 5.8, floorY = -0.3;
+  const ceilY = H + BOX_HEADROOM, floorY = BOX_FLOOR;
   const bandLo = H + 0.9, bandHi = H + 3.2;
   for (let i = 0; i < S.length - 1; i++) {
     const q = S[i];
@@ -697,11 +735,21 @@ function buildBox(g: Geo, sg: Geo, tr: TrackIndex, ref: number, s0: number, s1: 
       g.face(Q(i, lat, bandHi), Q(i + 1, lat, bandHi), Q(i + 1, lat, ceilY), Q(i, lat, ceilY), sc(lightWall), nrm);
     }
   }
-  // end walls
+  // No end walls: the cab-view tunnel (interact/tunnel.ts) closes the box ends with
+  // headwalls that have the openings of the running tunnels.
   const last = S.length - 1;
-  for (const [i, sgn] of [[0, 1], [last, -1]] as const) {
-    const q = S[i];
-    g.face(Q(i, a, floorY), Q(i, b, floorY), Q(i, b, ceilY), Q(i, a, ceilY), [0.2, 0.2, 0.2], [sgn * q.ny, 0, sgn * q.nx]);
+  // clad steel columns between the tracks of side-platform stations, ~4.6 m apart
+  for (const m of mids) {
+    const total = S[last].s - S[0].s;
+    for (let d = 4; d < total - 4; d += 4.6) {
+      const i = Math.min(last - 1, Math.floor((d / total) * last));
+      const f = (d / total) * last - i;
+      const q0 = S[i], q1 = S[i + 1];
+      const e = q0.e + (q1.e - q0.e) * f + q0.nx * m, n = q0.n + (q1.n - q0.n) * f + q0.ny * m, z = q0.z + (q1.z - q0.z) * f;
+      const c = P(e, n, z + floorY);
+      oriented(g, c, [q0.ny, 0, q0.nx], 0.45, 0.45, 0, ceilY - floorY, lin(hex(wall)).map((v) => v * 0.9) as RGB);
+      oriented(g, c, [q0.ny, 0, q0.nx], 0.5, 0.5, 0, 0.9, [0.16, 0.16, 0.16]);
+    }
   }
   // name tiles along both walls every ~18 m
   const perTile = Math.max(1, Math.round(18 / ((s1 - s0) / last)));

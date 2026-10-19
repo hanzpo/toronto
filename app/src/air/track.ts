@@ -217,9 +217,20 @@ function rwyVec(r: RunwayJson) {
   return { ux: Math.sin(hd), uy: Math.cos(hd) };
 }
 
+/**
+ * Parked pose. `stand.pos` is the OSM parking-position end at the head of the stand (usually
+ * within a few metres of the terminal glass), so the nose stops NOSE_CLEAR short of it — clear of
+ * the building, with room for the boarding bridge. The nose-wheel stop mark for a type is
+ * `standNoseWheel()`.
+ */
+export const NOSE_CLEAR = 4.5;
+export function standNoseWheel(stand: StandJson, spec: AircraftSpec): [number, number] {
+  const d = NOSE_CLEAR + spec.gear.nose;
+  return [stand.pos[0] - stand.hdg[0] * d, stand.pos[1] - stand.hdg[1] * d];
+}
 export function standPose(stand: StandJson, noseX: number, h: number): Pose {
   const [hx, hy] = stand.hdg;
-  const off = Math.max(2, noseX - 3);
+  const off = noseX + NOSE_CLEAR;
   return { e: stand.pos[0] - hx * off, n: stand.pos[1] - hy * off, h, yaw: Math.atan2(hy, hx), pitch: 0, bank: 0, v: 0, phase: PH.PARKED, flags: FL_GEAR };
 }
 

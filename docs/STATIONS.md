@@ -65,7 +65,45 @@ the TTC sign post, glass pavilions, sign posts at building entrances. Bus termin
 
 Tunnel API: `stationBoxesNear(e, n, r)` (exported from `layers/StationsLayer.ts`) returns the
 underground boxes: reference-track path (E, N, rail z every 4 m), lateral extents (left > 0 of
-the path direction), floor/ceiling relative to rail, platforms, TTC wall colour.
+the path direction), floor/ceiling relative to rail, platforms, track positions, TTC wall colour.
+
+Station box section (`BOX_SIDE`, `BOX_FLOOR`, `BOX_HEADROOM` in `stations/build.ts`): walls
+2.05 m beyond the outer track centres (or 0.2 m behind a side platform), floor 0.35 m below the
+rail, ceiling 3.85 m over the platform (≈ 4.9 m over the rail). Side-platform stations (two
+tracks, no platform between) get a row of clad columns down the middle, 4.6 m apart. The box
+has no end walls: the cab-view tunnel closes it with headwalls that have the running tunnels'
+openings. The platform's reference track is the route polyline running furthest both ways from
+the station (a pattern starting or ending there, e.g. Wilson short turns, would otherwise clamp
+the platform off the station).
+
+## Cab-view tunnel (`app/src/interact/tunnel.ts`)
+
+Built only around a player-attached train (cab / chase / window), ~220 m back and 650 m
+ahead, rebuilt every 90 m: one merged vertex-coloured mesh plus ≤ 7 instanced furniture meshes
+(≈ 15–19k triangles, 8–10 draws). The section follows the tracks, not a fixed width: the
+parallel tracks of the same kind through each cross-section come from `data/rail/network.bin.gz`
+(`interact/railNet.ts`).
+
+- **Shared cut-and-cover box**: tracks ≤ 6.8 m apart share a box, walls 2.05 m beyond the
+  outer track centres: 8.5 m wide over the usual 4.45 m spacing (OSM box sections measure
+  4.4–4.5 m), floor −0.35, soffit +4.3 (4.65 m inside), 0.35 m haunches, clad steel centre
+  columns every 4.5 m where the spacing is steady (4.0–5.6 m) and clear of switches.
+- **Bored tubes**: a lone track (its twin further than 6.8 m: OSM bored sections measure
+  9.6–10 m) in a bored section gets a single-track tube, invert 1.0 m below the rail, walkway
+  (+0.85 m) on the cross-passage side, 1.5 m rings with staggered segment joints (shader).
+  Diameters: North Yonge Eglinton–Lawrence–York Mills–Sheppard 4.9 m (Wikipedia: 16 ft ID,
+  0.6 m rings; shield/TBM per Transit Toronto), TYSSE Sheppard West–Vaughan 5.4 m (6.0–6.1 m
+  EPB bore), Line 4 5.2 m (TBM), Queen's Park–Museum 5.2 m (bored), Line 5 Keelesdale–Laird
+  5.75 m. Elsewhere a lone track gets a 4.3 m single-track box.
+- Headwalls where a box meets a tube and at station box ends (the openings of every track).
+- Furniture: rails + tie pattern, TTC covered third rail (cover board) away from the platform
+  with gaps within 22 m of a switch, 3 tiers of cable trays per wall, light fixtures every
+  10 m (warm white; the shader draws matching light pools, ~12 % light between them), box
+  construction joints every 9.14 m, wayside signals at the rail sim's block boundaries
+  (150 m per graph edge, restarting at every node, sim/src/rail.rs) with aspects from the other
+  trains' drawn positions (occupied block red, the one before yellow), emergency exits every
+  250 m (door, green EXIT sign, blue emergency-power light; cross-passage doors in tubes).
+- Colours match the portal trench walls (ground class 34).
 
 ## References
 

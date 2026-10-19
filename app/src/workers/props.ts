@@ -10,6 +10,8 @@ import type { StreetRoad, Terrain } from './roads';
 import type { HouseBuf, MeshBuf } from './meshing';
 import { district, obb, shopDistrict } from './buildings';
 import { era } from './houseFront';
+import { buildExclusion } from './vegetation';
+import { BLVD_L, BLVD_R, SW_L, SW_R } from './roads';
 
 /** prop kinds (PropsLayer pools) */
 export const K = {
@@ -20,12 +22,20 @@ export const K = {
 export const PROP_KINDS = 21;
 /** record stride: kind, x, n (local E,N), z (elevation), angle (rad CCW from +E, prop faces along it), sx, p0, p1 */
 export const PSTRIDE = 8;
+/** PropsBuf.segs stride */
+export const SEG_STRIDE = 7;
+/** kinds that stand on the sidewalk / roadside and must keep off every drawn carriageway, junction surface and crossing */
+const STREET_FURNITURE = new Set<number>([K.HYDRANT, K.BIN, K.NEWS, K.POSTBOX, K.BENCH, K.BIKERING, K.PAYSTATION, K.PLANTER,
+  K.BLADE, K.HOUSEBIN, K.HWYSIGN, K.BUSPOLE, K.SHELTER, K.LOTLIGHT]);
+/** footprint radius (m) per kind for the drawn-road test */
+const FOOT: Partial<Record<number, number>> = { [K.BENCH]: 0.9, [K.SHELTER]: 1.8, [K.PLANTER]: 0.7, [K.PAYSTATION]: 0.35, [K.HWYSIGN]: 0.6 };
 
 export interface PropsBuf {
   items: Float32Array;
   /** street names referenced by blades (p0 / p1 index this list, -1 = none) */
   names: string[];
-  /** road segments for snapping runtime transit stops: x0, y0, x1, y1, hw, cls */
+  /** road segments for snapping runtime transit stops (SEG_STRIDE): x0, y0, x1, y1, drawn pavement
+   *  half-width left, right (max over the segment's ends), cls */
   segs: Float32Array;
   /** draped ground paint: parking-lot asphalt, stall stripes, islands, driveways (tile-local three coords) */
   ground: MeshBuf | null;
@@ -104,23 +114,26 @@ export function buildProps(
   const off = a.r_off as Uint32Array | undefined, rxyz = a.r_xyz as Float32Array | undefined;
   const rcls = a.r_class as Uint8Array | undefined, rw = a.r_width as Float32Array | undefined, rfl = a.r_flags as Uint8Array | undefined;
   const rname = a.r_name as Uint16Array | undefined;
+  const rpl = a.r_pl as Float32Array | undefined, rpr = a.r_pr as Float32Array | undefined;
   if (off && rxyz && rcls) {
     for (let r = 0; r < off.length - 1; r++) {
       if (rfl && rfl[r] & 4) continue;
       const hw = (rw?.[r] ?? 8) / 2, c = rcls[r];
       for (let k = off[r]; k < off[r + 1] - 1; k++) {
-        const s: Seg = { x0: rxyz[k * 3], y0: rxyz[k * 3 + 1], x1: rxyz[k * 3 + 3], y1: rxyz[k * 3 + 4], hw, cls: c };
-        const m = hw + 3;
+        // drawn pavement edges per side (network-model tiles), else the symmetric piece width
+        const e = (A: Float32Array | undefined, j: number) => (A && A[j] > 0 ? A[j] : hw);
+        const hl = Math.max(e(rpl, k), e(rpl, k + 1)), hr = Math.max(e(rpr, k), e(rpr, k + 1));
+        const s: Seg = { x0: rxyz[k * 3], y0: rxyz[k * 3 + 1], x1: rxyz[k * 3 + 3], y1: rxyz[k * 3 + 4], hw: Math.max(hl, hr), cls: c };
+        const m = s.hw + 3;
         segs.add(Math.min(s.x0, s.x1) - m, Math.min(s.y0, s.y1) - m, Math.max(s.x0, s.x1) + m, Math.max(s.y0, s.y1) + m, s);
-        if (c <= 5 || c === 7) segList.push(s.x0, s.y0, s.x1, s.y1, hw, c);
+        if (c <= 5 || c === 7) segList.push(s.x0, s.y0, s.x1, s.y1, hl, hr, c);
       }
     }
   }
-  const onRoad = (x: number, y: number, margin: number) => {
-    const c = segs.at(x, y);
-    if (c) for (const s of c) if (s.cls <= 7 && segDist(s, x, y) < s.hw + margin) return true;
-    return false;
-  };
+  // the drawn road (per-vertex pavement edges, junction surfaces, crossings, tracks; workers/vegetation.ts
+  // Exclusion): furniture may stand on sidewalks and boulevards, never on a carriageway
+  const ex = buildExclusion(a, streets);
+  const onRoad = (x: number, y: number, margin: number) => ex.blocked(x, y, Math.max(0.3, margin), 0, true);
   const blds = new Grid<Poly>(32);
   const ro = a.b_ring_off as Uint32Array | undefined, vo = a.b_vert_off as Uint32Array | undefined, bxy = a.b_xy as Float32Array | undefined;
   if (ro && vo && bxy) {
@@ -180,6 +193,80 @@ export function buildProps(
     const t = Math.max(0, Math.min(1, ((x - best.x0) * dx + (y - best.y0) * dy) / l2));
     return { ang: Math.atan2(best.y0 + dy * t - y, best.x0 + dx * t - x), d: bd, s: best };
   };
+  /**
+   * Bike Share Toronto station: a row of docks (0.9 m pitch) along the curb of the street the node
+   * stands beside (the side it is on), in the sidewalk furniture zone / boulevard, kiosk at the end.
+   * The row slides along the curb away from junctions and crossings and shortens to fit; every dock
+   * must clear the drawn road (pavement edges, junction surfaces, crossings) and buildings.
+   */
+  const bikeShare = (x: number, y: number, n0: number, id: number) => {
+    let best: { r: StreetRoad; k: number; t: number; sd: number; score: number } | null = null;
+    for (const r of streets) {
+      if (r.cls < 2 || r.cls > 7 || r.x.length < 2) continue;
+      for (let k = 0; k < r.x.length - 1; k++) {
+        const dx = r.x[k + 1] - r.x[k], dy = r.y[k + 1] - r.y[k], l2 = dx * dx + dy * dy;
+        if (l2 < 1e-6) continue;
+        const t = Math.max(0, Math.min(1, ((x - r.x[k]) * dx + (y - r.y[k]) * dy) / l2));
+        const px = r.x[k] + dx * t, py = r.y[k] + dy * t;
+        const lat = (dx * (y - py) - dy * (x - px)) / Math.sqrt(l2); // > 0: left of travel
+        const sd = lat >= 0 ? 1 : -1;
+        const E = sd > 0 ? r.pl : r.pr;
+        const e = E ? E[k] + (E[k + 1] - E[k]) * t : r.hw;
+        const gap = Math.abs(lat) - e; // < 0: the node is on the pavement
+        const score = gap >= 0 ? gap : -gap * 2 + 1;
+        if (score < 25 && (!best || score < best.score)) best = { r, k, t, sd, score };
+      }
+    }
+    if (!best) return;
+    const { r, sd } = best;
+    const s0 = r.s[best.k] + (r.s[best.k + 1] - r.s[best.k]) * best.t;
+    const bit = sd > 0 ? SW_L : SW_R, blvdBit = sd > 0 ? BLVD_L : BLVD_R;
+    const at = (s: number) => {
+      let k = 0;
+      while (k < r.s.length - 2 && r.s[k + 1] < s) k++;
+      const t = Math.max(0, Math.min(1, (s - r.s[k]) / Math.max(1e-6, r.s[k + 1] - r.s[k])));
+      const ox = r.ox[k] + (r.ox[k + 1] - r.ox[k]) * t, oy = r.oy[k] + (r.oy[k + 1] - r.oy[k]) * t;
+      const l = Math.hypot(ox, oy) || 1;
+      const E = sd > 0 ? r.pl : r.pr;
+      const e = E ? E[k] + (E[k + 1] - E[k]) * t : r.hw;
+      const sw = r.sw ? r.sw[t < 0.5 ? k : k + 1] : r.side;
+      // furniture zone: mid-boulevard, or 0.8 m behind the curb on the walk, or 1.2 m off an unkerbed edge
+      const o = sw & bit ? (sw & blvdBit ? 0.9 : 0.8) : 1.2;
+      const cx = r.x[k] + (r.x[k + 1] - r.x[k]) * t + sd * ox * e, cy = r.y[k] + (r.y[k + 1] - r.y[k]) * t + sd * oy * e;
+      return { x: cx + sd * (ox / l) * o, y: cy + sd * (oy / l) * o, ang: Math.atan2(-sd * oy, -sd * ox) };
+    };
+    // the clear stretch (between junction boxes) holding the node, else the nearest one
+    let rng: [number, number] | null = null, rd = Infinity;
+    for (const [c0, c1] of r.clear) {
+      const d = s0 < c0 ? c0 - s0 : s0 > c1 ? s0 - c1 : 0;
+      if (d < rd) { rd = d; rng = [c0, c1]; }
+    }
+    if (!rng) return;
+    const lo = rng[0] + 3, hi = rng[1] - 3;
+    for (let n = Math.min(n0, Math.floor((hi - lo) / 0.9) + 1); n >= 4; n -= 3) {
+      const L = (n - 1) * 0.9;
+      for (const ds of [0, 2, -2, 4, -4, 6, -6, 9, -9, 12, -12]) {
+        const a0 = Math.max(lo, Math.min(hi - L, s0 - L / 2 + ds));
+        if (a0 < lo - 1e-6 || a0 + L > hi + 1e-6) continue;
+        const pts = [];
+        let good = true;
+        for (let d = 0; d < n && good; d++) {
+          const p = at(a0 + d * 0.9);
+          if (!inTile(p.x, p.y) || onRoad(p.x, p.y, 0.45) || inBuilding(p.x, p.y, 0.3)) good = false;
+          pts.push(p);
+        }
+        if (!good) continue;
+        // kiosk at the end of the row nearer the node's original position
+        const flip = Math.abs(a0 - s0) > Math.abs(a0 + L - s0);
+        pts.forEach((p, d) => {
+          const kiosk = flip ? d === n - 1 : d === 0;
+          push(K.BIKESHARE, p.x, p.y, p.ang, 1, kiosk ? 1 : 0, rnd(id, d) < 0.65 ? 1 : 0);
+          claim(p.x, p.y);
+        });
+        return;
+      }
+    }
+  };
   if (pk && pxy) {
     for (let i = 0; i < pk.length; i++) {
       const k = pk[i];
@@ -191,15 +278,7 @@ export function buildProps(
       const v = pv ? pv[i] : 0;
       claim(x, y);
       switch (k) {
-        case 20: { // bike-share dock: a row of docks parallel to the curb
-          const n = Math.max(6, Math.min(v || 15, 31));
-          const ex = -Math.sin(f.ang), ey = Math.cos(f.ang);
-          for (let d = 0; d < n; d++) {
-            const o = (d - (n - 1) / 2) * 0.9;
-            push(K.BIKESHARE, x + ex * o, y + ey * o, f.ang, 1, d === 0 ? 1 : 0, rnd(i, d) < 0.65 ? 1 : 0);
-          }
-          break;
-        }
+        case 20: bikeShare(x, y, Math.max(6, Math.min(v || 15, 31)), i); break;
         case 21: push(K.POSTBOX, x, y, f.ang); break;
         case 22: push(K.BENCH, x, y, f.ang); break;
         case 23: push(K.BIN, x, y, f.ang, 1, v); break;
@@ -226,7 +305,13 @@ export function buildProps(
       const t = Math.max(0, Math.min(1, (s - r.s[k]) / Math.max(1e-6, r.s[k + 1] - r.s[k])));
       const ox = r.ox[k] + (r.ox[k + 1] - r.ox[k]) * t, oy = r.oy[k] + (r.oy[k + 1] - r.oy[k]) * t;
       const l = Math.hypot(ox, oy) || 1;
-      return { x: r.x[k] + (r.x[k + 1] - r.x[k]) * t, y: r.y[k] + (r.y[k + 1] - r.y[k]) * t, nx: ox / l, ny: oy / l };
+      const eL = r.pl ? r.pl[k] + (r.pl[k + 1] - r.pl[k]) * t : r.hw, eR = r.pr ? r.pr[k] + (r.pr[k + 1] - r.pr[k]) * t : r.hw;
+      return { x: r.x[k] + (r.x[k + 1] - r.x[k]) * t, y: r.y[k] + (r.y[k + 1] - r.y[k]) * t, nx: ox / l, ny: oy / l, ox, oy, eL, eR };
+    };
+    /** point o m from the centreline measured as (r.hw + beyond): the drawn curb of side sd plus `beyond` */
+    const curbOff = (p: ReturnType<typeof at>, sd: number, o: number) => {
+      const e = sd > 0 ? p.eL : p.eR, beyond = o - r.hw;
+      return { x: p.x + sd * p.ox * e + sd * p.nx * beyond, y: p.y + sd * p.oy * e + sd * p.ny * beyond };
     };
     const mid = at(r.s[r.s.length - 1] / 2);
     const E0 = oE + mid.x, N0 = oN + mid.y;
@@ -239,7 +324,7 @@ export function buildProps(
       const hasSW = (r.side & (sd === 1 ? 1 : 2)) !== 0;
       const curb = r.hw + (hasSW ? 0.55 : 1.0); // furniture zone just behind the curb
       const back = r.hw + (hasSW ? Math.max(1.2, r.ws - 0.4) : 2.2);
-      const P = (s: number, o: number) => { const p = at(s); return { x: p.x + sd * p.nx * o, y: p.y + sd * p.ny * o, fa: Math.atan2(-sd * p.ny, -sd * p.nx) }; };
+      const P = (s: number, o: number) => { const p = at(s); const q = curbOff(p, sd, o); return { x: q.x, y: q.y, fa: Math.atan2(-sd * p.ny, -sd * p.nx) }; };
       for (const [c0, c1] of r.clear) {
         const len = c1 - c0;
         if (len < 6) continue;
@@ -293,8 +378,8 @@ export function buildProps(
         prev = null;
         for (let s = c0 + 4; s < c1 - 2; s += span) {
           const p = at(s);
-          const x = p.x + sd * p.nx * o, y = p.y + sd * p.ny * o;
-          if (!inTile(x, y) || inBuilding(x, y, 0.2) || onRoad(x, y, 0.1)) { prev = null; continue; }
+          const { x, y } = curbOff(p, sd, o);
+          if (!inTile(x, y) || inBuilding(x, y, 0.2) || onRoad(x, y, 0.3)) { prev = null; continue; }
           const z = terr.at(x, y);
           const fa = Math.atan2(-sd * p.ny, -sd * p.nx);
           push(K.HYDRO, x, y, fa, 1, rnd(seed, s | 0, 26) < 0.18 ? 1 : 0, 0, z);
@@ -424,7 +509,21 @@ export function buildProps(
   // ---- parking lots from the ground raster (class 11): rows of stalls along the lot's principal axis
   parkingLots(a, ground, S, inBuilding, onRoad, push, gm, tx, ty);
 
-  return { items: Float32Array.from(out), names: bladeNames, segs: Float32Array.from(segList), ground: gm.finish() };
+  // ---- last line of defence: every piece of street furniture must clear the drawn road; nudge to the
+  // nearest clear spot within 5 m, else drop (bike-share rows and hydro poles were placed against it)
+  const items: number[] = [];
+  const NUDGE: [number, number][] = [[0, 0]];
+  for (const rr of [0.5, 1, 2, 3.5, 5]) for (let q = 0; q < 8; q++) NUDGE.push([Math.cos(q * Math.PI / 4) * rr, Math.sin(q * Math.PI / 4) * rr]);
+  for (let i = 0; i < out.length; i += PSTRIDE) {
+    const k = out[i];
+    if (!STREET_FURNITURE.has(k)) { for (let q = 0; q < PSTRIDE; q++) items.push(out[i + q]); continue; }
+    const x = out[i + 1], y = out[i + 2], rad = FOOT[k] ?? 0.35;
+    const nd = NUDGE.find(([dx, dy]) => inTile(x + dx, y + dy) && !onRoad(x + dx, y + dy, rad) && !inBuilding(x + dx, y + dy, 0.2));
+    if (!nd) continue;
+    const z = nd[0] || nd[1] ? terr.at(x + nd[0], y + nd[1]) : out[i + 3];
+    items.push(k, x + nd[0], y + nd[1], z, out[i + 4], out[i + 5], out[i + 6], out[i + 7]);
+  }
+  return { items: Float32Array.from(items), names: bladeNames, segs: Float32Array.from(segList), ground: gm.finish() };
 }
 
 type RGBA = [number, number, number];
