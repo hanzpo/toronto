@@ -33,7 +33,7 @@ export interface ControllerHost {
   buildingTop?(e: number, n: number, h: number): number;
 }
 
-const MIN_DIST = 4;
+const MIN_DIST = 3;
 const MAX_DIST = 260000;
 const MIN_PITCH = 0.02;
 const MAX_PITCH = 1.55;
@@ -67,7 +67,6 @@ export class CameraController {
   private collLift = 0;
   /** camera collision: heading offset (rad) that slides the view past an obstacle */
   private collYaw = 0;
-  private slideTmp: CamState = { e: 0, n: 0, h: 0, dist: 1, heading: 0, pitch: 0 };
   /** collision on/off (e.g. cab views that place the camera themselves) */
   collide = true;
 
@@ -169,7 +168,7 @@ export class CameraController {
       this.keyboard(dt);
       g.dist = THREE.MathUtils.clamp(g.dist, MIN_DIST, MAX_DIST);
       g.pitch = THREE.MathUtils.clamp(g.pitch, MIN_PITCH, MAX_PITCH);
-      if (!this.followFn) g.h = this.host.heightAt(g.e, g.n, );
+      if (!this.followFn) g.h = this.host.heightAt(g.e, g.n);
       const k = 1 - Math.exp(-dt * 9);
       const kr = 1 - Math.exp(-dt * 14);
       const kf = this.followFn ? 1 - Math.exp(-dt * 20) : k;
@@ -184,13 +183,12 @@ export class CameraController {
     // focus and the camera, ease back out when it clears
     // (or, when pulling in would leave the eye right at the focus, lift the
     // view over the obstacle); ease back out when it clears
-    const r = this.resolveCollision(this.cur);
-    if (r.lift > this.collLift) this.collLift += (r.lift - this.collLift) * (1 - Math.exp(-dt * 12));
-    else this.collLift += (r.lift - this.collLift) * (1 - Math.exp(-dt * 1.5));
-    this.collYaw += (r.yaw - this.collYaw) * (1 - Math.exp(-dt * (Math.abs(r.yaw) > Math.abs(this.collYaw) ? 6 : 1.2)));
-    const fi = this.freeFraction(this.lifted(this.cur));
-    if (fi < this.collFrac) this.collFrac = fi;
-    else this.collFrac += (fi - this.collFrac) * (1 - Math.exp(-dt * 2.5));
+    this.holdZoomAnchor();
+    this.collLift = 0;
+    this.collYaw = 0;
+    const fi = this.freeFraction(this.cur);
+    if (fi < this.collFrac) this.collFrac += (fi - this.collFrac) * (1 - Math.exp(-dt * 30));
+    else this.collFrac += (fi - this.collFrac) * (1 - Math.exp(-dt * 3));
     this.apply();
   }
 
@@ -219,45 +217,6 @@ export class CameraController {
     t.e = c.e; t.n = c.n; t.h = c.h; t.dist = c.dist; t.heading = c.heading + this.collYaw;
     t.pitch = Math.min(MAX_PITCH, c.pitch + this.collLift);
     return t;
-  }
-
-  /**
-   * Obstruction response for orbit state c, least intrusive first:
-   * 1. slide: a nearby heading (≤ ±24°, same pitch and distance) with a clear view;
-   * 2. pull the eye in along the view ray while ≥ 8 m (or the whole orbit) remains;
-   * 3. last resort: tilt the view up over the obstacle (courtyards, a tower
-   *    right behind the camera). Chase cams only pull in.
-   */
-  private resolveCollision(c: CamState): { lift: number; yaw: number } {
-    if (!this.collide || !this.host.buildingTop) return { lift: 0, yaw: 0 };
-    const f0 = this.freeFraction(c);
-    if (f0 >= 0.999 || this.followFn) return { lift: 0, yaw: 0 };
-    const t = this.slideTmp;
-    t.e = c.e; t.n = c.n; t.h = c.h; t.dist = c.dist; t.pitch = c.pitch;
-    // try the side we are already sliding to first (no flip-flopping)
-    const sg = this.collYaw < 0 ? -1 : 1;
-    let yaw = 0, fy = f0;
-    for (const d of [0.07, 0.14, 0.24, 0.34, 0.42]) {
-      for (const s of [sg, -sg]) {
-        t.heading = c.heading + s * d;
-        const f = this.freeFraction(t);
-        if (f > fy + 0.08) { fy = f; yaw = s * d; }
-      }
-      if (fy >= 0.9) break;
-    }
-    if (fy >= 0.8) return { lift: 0, yaw };
-    const keep = Math.min(c.dist, 8);
-    if (f0 * c.dist >= keep) return { lift: 0, yaw: 0 };
-    const lt = this.slideTmp;
-    let best = 0, bestF = f0;
-    for (const dp of [0.12, 0.25, 0.4, 0.6, 0.85, 1.15]) {
-      lt.e = c.e; lt.n = c.n; lt.h = c.h; lt.dist = c.dist; lt.heading = c.heading;
-      lt.pitch = Math.min(MAX_PITCH, c.pitch + dp);
-      const f = this.freeFraction(lt);
-      if (f > bestF + 0.05) { best = lt.pitch - c.pitch; bestF = f; }
-      if (f * c.dist >= keep) break;
-    }
-    return { lift: best, yaw: 0 };
   }
 
   private occTmp: CamState = { e: 0, n: 0, h: 0, dist: 0, heading: 0, pitch: 0 };
@@ -331,6 +290,7 @@ export class CameraController {
     const rotate = e.button === 2 || e.button === 1 || e.shiftKey || e.ctrlKey || e.altKey;
     const grab = rotate ? null : this.host.pickGround(e.clientX, e.clientY);
     if (!rotate) this.followFn = null;
+    this.zoomAnchor = null;
     this.drag = { mode: rotate ? 'rotate' : 'pan', x: e.clientX, y: e.clientY, grab, id: e.pointerId };
     this.host.dom.setPointerCapture?.(e.pointerId);
   };
@@ -386,19 +346,28 @@ export class CameraController {
     const g = this.goal;
     const nd = THREE.MathUtils.clamp(g.dist * f, MIN_DIST, MAX_DIST);
     const ef = nd / g.dist;
-    const p = this.host.pickGround(e.clientX, e.clientY);
-    if (p && !this.followFn) {
-      // move the focus toward the cursor point so it stays under the cursor
-      const maxMove = g.dist * 3;
-      let me = (p.e - g.e) * (1 - ef), mn = (p.n - g.n) * (1 - ef);
-      const m = Math.hypot(me, mn);
-      if (m > maxMove) { me *= maxMove / m; mn *= maxMove / m; }
-      g.e += me; g.n += mn;
+    void ef;
+    if (!this.followFn) {
+      const keep = this.zoomAnchor && this.time < this.zoomAnchor.until && Math.hypot(e.clientX - this.zoomAnchor.x, e.clientY - this.zoomAnchor.y) < 4;
+      const p = keep ? this.zoomAnchor!.p : this.host.pickGround(e.clientX, e.clientY);
+      this.zoomAnchor = p ? { p, x: e.clientX, y: e.clientY, until: this.time + 0.9 } : null;
     }
     g.dist = nd;
-    // tilt toward the horizon when getting close to the ground, like map apps
-    if (dy < 0 && nd < 250) g.pitch = Math.max(MIN_PITCH + 0.1, g.pitch - (1 - ef) * 0.35);
   };
+
+  private zoomAnchor: { p: GroundHit; x: number; y: number; until: number } | null = null;
+
+  private holdZoomAnchor() {
+    const z = this.zoomAnchor;
+    if (!z || this.drag || this.followFn || this.flight) return;
+    if (this.time > z.until) { this.zoomAnchor = null; return; }
+    this.apply();
+    const hit = this.rayPlane(z.x, z.y, z.p.h);
+    if (!hit) return;
+    const de = z.p.e - hit.e, dn = z.p.n - hit.n;
+    this.goal.e += de; this.goal.n += dn;
+    this.cur.e += de; this.cur.n += dn;
+  }
 
   private onDbl = (e: MouseEvent) => {
     const p = this.host.pickGround(e.clientX, e.clientY);

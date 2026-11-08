@@ -237,6 +237,14 @@ export class Engine {
     for (let i = 0; i < 400 && t < maxT; i++) {
       const px = o.x + d.x * t, py = o.y + d.y * t, pz = o.z + d.z * t;
       const above = py - this.heightAt(px, -pz);
+      if (above > 0 && above < 500 && this.buildings && this.buildings.topAt(px, -pz, py) > py) {
+        let a = prevT, b = t;
+        for (let k = 0; k < 16; k++) {
+          const m = (a + b) / 2;
+          if (this.buildings.topAt(o.x + d.x * m, -(o.z + d.z * m), o.y + d.y * m) > o.y + d.y * m) b = m; else a = m;
+        }
+        return { e: o.x + d.x * a, n: -(o.z + d.z * a), h: o.y + d.y * a };
+      }
       if (above <= 0) {
         // bisect between prevT and t
         let a = prevT, b = t;
@@ -250,7 +258,7 @@ export class Engine {
       }
       if (d.y >= 0 && py > 3000) return null;
       prevT = t;
-      t += Math.max(above * 0.7, 1, t * 0.004);
+      t += above < 500 ? Math.min(Math.max(above * 0.7, 1, t * 0.004), 3 + t * 0.004) : Math.max(above * 0.7, 1, t * 0.004);
     }
     return null;
   }
