@@ -73,6 +73,15 @@ export class World {
     /**
      * @returns {Float32Array}
      */
+    export_state() {
+        const ret = wasm.world_export_state(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {Float32Array}
+     */
     frame2() {
         const ret = wasm.world_frame2(this.__wbg_ptr);
         var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
@@ -103,6 +112,26 @@ export class World {
     has_trip(trip) {
         const ret = wasm.world_has_trip(this.__wbg_ptr, trip);
         return ret !== 0;
+    }
+    /**
+     * @param {Float32Array | number[]} data
+     * @param {Int32Array | number[]} map
+     * @returns {number}
+     */
+    import_state(data, map) {
+        let ptr0, len0, ptr1, len1;
+        try {
+            ptr0 = passArrayF32ToWasm0(data, wasm.__wbindgen_malloc);
+            len0 = WASM_VECTOR_LEN;
+            ptr1 = passArray32ToWasm0(map, wasm.__wbindgen_malloc);
+            len1 = WASM_VECTOR_LEN;
+        } catch (e) {
+            if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 4, 4); }
+            if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 4, 4); }
+            throw e;
+        }
+        const ret = wasm.world_import_state(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        return ret >>> 0;
     }
     /**
      * @param {string} json
@@ -157,6 +186,16 @@ export class World {
      */
     set_player_input(throttle, brake, steer, handbrake, ground) {
         wasm.world_set_player_input(this.__wbg_ptr, throttle, brake, steer, handbrake, ground);
+    }
+    /**
+     * @param {number} cars
+     * @param {number} buses
+     * @param {number} trams
+     * @param {number} trains
+     * @param {number} peds
+     */
+    set_targets(cars, buses, trams, trains, peds) {
+        wasm.world_set_targets(this.__wbg_ptr, cars, buses, trams, trains, peds);
     }
     /**
      * @param {number} x
@@ -218,6 +257,15 @@ export class World {
     time() {
         const ret = wasm.world_time(this.__wbg_ptr);
         return ret;
+    }
+    /**
+     * @returns {Uint32Array}
+     */
+    trips() {
+        const ret = wasm.world_trips(this.__wbg_ptr);
+        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
     }
 }
 if (Symbol.dispose) World.prototype[Symbol.dispose] = World.prototype.free;

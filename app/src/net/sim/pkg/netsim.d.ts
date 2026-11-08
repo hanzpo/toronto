@@ -8,16 +8,19 @@ export class World {
     clear_walker(): void;
     clock(): number;
     count(): number;
+    export_state(): Float32Array;
     frame2(): Float32Array;
     frame(): Float32Array;
     gate(node: number): number;
     has_trip(trip: number): boolean;
+    import_state(data: Float32Array | number[], map: Int32Array | number[]): number;
     constructor(json: string, seed: number);
     player(): Float32Array;
     populate(cars: number, buses: number, trams: number, trains: number, peds: number): void;
     release_player(): void;
     set_clock(service_seconds: number): void;
     set_player_input(throttle: number, brake: number, steer: number, handbrake: boolean, ground: number): void;
+    set_targets(cars: number, buses: number, trams: number, trains: number, peds: number): void;
     set_walker(x: number, y: number, z: number): void;
     signal(node: number, group: number): number;
     solids_near(x: number, y: number, r: number): Float32Array;
@@ -25,6 +28,7 @@ export class World {
     take_done(): Uint32Array;
     take_over_nearest(x: number, y: number, r: number): boolean;
     time(): number;
+    trips(): Uint32Array;
 }
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -36,16 +40,19 @@ export interface InitOutput {
     readonly world_clear_walker: (a: number) => void;
     readonly world_clock: (a: number) => number;
     readonly world_count: (a: number) => number;
+    readonly world_export_state: (a: number) => [number, number];
     readonly world_frame: (a: number) => [number, number];
     readonly world_frame2: (a: number) => [number, number];
     readonly world_gate: (a: number, b: number) => number;
     readonly world_has_trip: (a: number, b: number) => number;
+    readonly world_import_state: (a: number, b: number, c: number, d: number, e: number) => number;
     readonly world_new: (a: number, b: number, c: number) => [number, number, number];
     readonly world_player: (a: number) => [number, number];
     readonly world_populate: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly world_release_player: (a: number) => void;
     readonly world_set_clock: (a: number, b: number) => void;
     readonly world_set_player_input: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly world_set_targets: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly world_set_walker: (a: number, b: number, c: number, d: number) => void;
     readonly world_signal: (a: number, b: number, c: number) => number;
     readonly world_solids_near: (a: number, b: number, c: number, d: number) => [number, number];
@@ -53,6 +60,7 @@ export interface InitOutput {
     readonly world_take_done: (a: number) => [number, number];
     readonly world_take_over_nearest: (a: number, b: number, c: number, d: number) => number;
     readonly world_time: (a: number) => number;
+    readonly world_trips: (a: number) => [number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;

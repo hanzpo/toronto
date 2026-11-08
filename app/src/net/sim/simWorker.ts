@@ -18,6 +18,7 @@ export type SimIn =
   | { type: 'clearWalker' };
 
 export interface SimReply { type: 'reply'; id: number; ok: boolean }
+export interface SimRegion { type: 'region'; trips: number[] }
 
 export interface SimTrips { type: 'trips'; accepted: number[]; done: number[] }
 
@@ -25,6 +26,12 @@ export interface SimFrame { type: 'frame'; agents: Float32Array; nodes: string[]
 
 let world: World | null = null;
 let index: LaneIndex | null = null;
+let keys: string[] = [];
+
+const laneKey = (l: { kind: string; pts: { x: number; y: number }[] }) => {
+  const a = l.pts[0], b = l.pts[l.pts.length - 1];
+  return `${l.kind}|${a.x.toFixed(1)},${a.y.toFixed(1)}|${b.x.toFixed(1)},${b.y.toFixed(1)}`;
+};
 let nodes: string[] = [];
 let groupsPer: number[] = [];
 let speed = 1;
@@ -45,9 +52,19 @@ async function region(root: string, tiles: [number, number][], seed: number) {
   const b = build(desc, { lanesOnly: true });
   await ready;
   if (my !== gen) return;
-  world?.free();
+  const old = world;
+  const oldKeys = keys;
   world = new World(simJson(b), seed);
   index = new LaneIndex(b.lanes);
+  keys = b.lanes.map(laneKey);
+  let carried = 0;
+  if (old) {
+    const at = new Map(keys.map((k, i) => [k, i]));
+    const map = Int32Array.from(oldKeys, (k) => at.get(k) ?? -1);
+    world.set_clock(old.clock());
+    carried = world.import_state(old.export_state(), map);
+    old.free();
+  }
   nodes = b.nodes.map((n) => n.id);
   groupsPer = nodes.map((id) => b.signals.find((s) => s.node === id)?.groups.length ?? 0);
   let drive = 0, walk = 0;
@@ -57,8 +74,13 @@ async function region(root: string, tiles: [number, number][], seed: number) {
     for (let i = 1; i < l.pts.length; i++) len += Math.hypot(l.pts[i].x - l.pts[i - 1].x, l.pts[i].y - l.pts[i - 1].y);
     if (l.kind === 'drive') drive += len; else if (l.kind === 'walk') walk += len;
   }
-  world.populate(Math.round(drive / 70), Math.round(drive / 2500), 0, 0, Math.round(walk / 60));
-  for (let i = 0; i < 300; i++) world.step(0.1);
+  const target = [Math.round(drive / 70), Math.round(drive / 2500), 0, 0, Math.round(walk / 60)] as const;
+  if (carried) world.set_targets(...target);
+  else {
+    world.populate(...target);
+    for (let i = 0; i < 300; i++) world.step(0.1);
+  }
+  (self as unknown as Worker).postMessage({ type: 'region', trips: [...world.trips()] } satisfies SimRegion);
 }
 
 self.onmessage = (ev: MessageEvent<SimIn>) => {

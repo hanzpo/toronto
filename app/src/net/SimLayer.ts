@@ -1,7 +1,7 @@
 import type { Engine } from '../engine/Engine';
 import type { FrameContext, Layer } from '../engine/types';
 import { simSpeed } from '../state/store';
-import type { SimFrame, SimReply, SimTrips, TripIn } from './sim/simWorker';
+import type { SimFrame, SimRegion, SimReply, SimTrips, TripIn } from './sim/simWorker';
 import { clock } from '../state/clock';
 import type { TransitLayer } from '../layers/TransitLayer';
 import { NetVehicles, bodies, type TripMeta } from './view/vehicles';
@@ -30,7 +30,8 @@ export class SimLayer implements Layer {
     this.engine = engine;
     this.have = engine.tiles.netTiles;
     this.worker = new Worker(new URL('./sim/simWorker.ts', import.meta.url), { type: 'module' });
-    this.worker.onmessage = (ev: MessageEvent<SimFrame | SimTrips | SimReply>) => {
+    this.worker.onmessage = (ev: MessageEvent<SimFrame | SimTrips | SimReply | SimRegion>) => {
+      if (ev.data.type === 'region') { this.keepOnly(new Set(ev.data.trips)); return; }
       if (ev.data.type === 'trips') { this.onTrips(ev.data); return; }
       if (ev.data.type === 'reply') { this.replies.get(ev.data.id)?.(ev.data.ok); this.replies.delete(ev.data.id); return; }
       if (ev.data.type !== 'frame') return;
@@ -72,7 +73,6 @@ export class SimLayer implements Layer {
       }
       if (tiles.length) {
         this.centre = { e: E, n: N };
-        this.releaseAll();
         this.worker.postMessage({ type: 'region', root: `${this.engine.dataRoot}/net`, tiles, seed: (Math.random() * 1e9) | 0, speed: sp });
       }
     }
@@ -179,12 +179,13 @@ export class SimLayer implements Layer {
     return (this.engine.layers.find((l) => l.id === 'transit') as unknown as TransitLayer) ?? null;
   }
 
-  private releaseAll() {
+  private keepOnly(keep: Set<number>) {
     const tr = this.transit();
-    for (const t of this.handed) tr?.overrides.delete(t);
-    this.handed.clear();
+    for (const t of [...this.handed]) if (!keep.has(t)) { tr?.overrides.delete(t); this.handed.delete(t); }
     this.pending.clear();
   }
+
+
 
   private onTrips(m: SimTrips) {
     const tr = this.transit();

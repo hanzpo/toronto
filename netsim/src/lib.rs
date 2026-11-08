@@ -515,6 +515,10 @@ impl World {
         Ok(World { net, agents: Vec::new(), rng: Rng::new(seed as u64), t: 0.0, occ: vec![Vec::new(); n], owner: vec![-1; n], gate: vec![0.0; nn], out: Vec::new(), target: [0; 5], done: Vec::new(), clock0: 0.0, next_id: 0 })
     }
 
+    pub fn set_targets(&mut self, cars: u32, buses: u32, trams: u32, trains: u32, peds: u32) {
+        self.target = [cars, buses, trams, trains, peds];
+    }
+
     pub fn populate(&mut self, cars: u32, buses: u32, trams: u32, trains: u32, peds: u32) {
         self.target = [cars, buses, trams, trains, peds];
         for _ in 0..trains {
@@ -934,6 +938,74 @@ impl World {
 
     pub fn take_done(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.done)
+    }
+
+    pub fn export_state(&self) -> Vec<f32> {
+        let mut out = Vec::new();
+        for a in &self.agents {
+            if a.free.is_some() || !a.alive || a.lane == OFF_NET {
+                continue;
+            }
+            out.extend_from_slice(&[a.id as f32, a.kind as u8 as f32, a.variant as f32, a.trip as f32, a.lane as f32, a.dir as f32, a.d, a.v, a.len, a.lat, a.route.len() as f32, a.stops.len() as f32]);
+            for s in &a.route {
+                out.extend_from_slice(&[s.lane as f32, s.dir as f32]);
+            }
+            for &(l, d, dep) in &a.stops {
+                out.extend_from_slice(&[l as f32, d, (dep - self.clock0 - self.t) as f32]);
+            }
+        }
+        out
+    }
+
+    pub fn import_state(&mut self, data: Vec<f32>, map: Vec<i32>) -> u32 {
+        let mut i = 0;
+        let mut n = 0;
+        let clock = self.clock0 + self.t;
+        let m = |l: f32| -> i32 { map.get(l as usize).copied().unwrap_or(-1) };
+        while i + 12 <= data.len() {
+            let h = &data[i..i + 12];
+            let (nr, ns) = (h[10] as usize, h[11] as usize);
+            let body = &data[i + 12..i + 12 + nr * 2 + ns * 3];
+            i += 12 + nr * 2 + ns * 3;
+            let lane = m(h[4]);
+            if lane < 0 {
+                continue;
+            }
+            let mut route = VecDeque::new();
+            for k in 0..nr {
+                let l = m(body[k * 2]);
+                if l < 0 {
+                    break;
+                }
+                route.push_back(Step { lane: l as u32, dir: body[k * 2 + 1] as i8 });
+            }
+            let mut stops = VecDeque::new();
+            for k in 0..ns {
+                let o = nr * 2 + k * 3;
+                let l = m(body[o]);
+                if l >= 0 {
+                    stops.push_back((l as u32, body[o + 1], clock + body[o + 2] as f64));
+                }
+            }
+            let kind = match h[1] as u8 { 1 => AKind::Bus, 2 => AKind::Tram, 3 => AKind::Train, 4 => AKind::Ped, _ => AKind::Car };
+            let trip = h[3] as i32;
+            if trip >= 0 && route.is_empty() {
+                continue;
+            }
+            let id = h[0] as u32;
+            self.next_id = self.next_id.max(id);
+            self.agents.push(Agent {
+                kind, lane: lane as u32, dir: h[5] as i8, d: h[6], v: h[7], len: h[8], v0: self.net.lanes[lane as usize].speed.max(1.0), route, hist: VecDeque::new(),
+                stopped: 0.0, arrived: 0.0, variant: h[2] as u8, lat: h[9], dwell: 0.0, reserved: Vec::new(), alive: true, trip, stops, stop_wait: 0.0,
+                free: None, id, acc: 0.0,
+            });
+            n += 1;
+        }
+        n
+    }
+
+    pub fn trips(&self) -> Vec<u32> {
+        self.agents.iter().filter(|a| a.trip >= 0).map(|a| a.trip as u32).collect()
     }
 
     pub fn frame2(&mut self) -> Vec<f32> {
