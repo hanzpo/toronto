@@ -6,8 +6,6 @@
 // from the props road segments.
 import type { Engine } from '../engine/Engine';
 import type { Tile } from '../render/tiles/TileManager';
-import { K, PSTRIDE } from '../workers/props';
-import { VEG_STRIDE } from '../layers/vegetation/species';
 
 /** oriented box: centre, heading (rad CCW from +E), half length (along heading), half width */
 export interface Box { e: number; n: number; h: number; hl: number; hw: number }
@@ -24,27 +22,6 @@ interface TileSolids {
   n0: number;
 }
 
-/** radius of round props, or box half sizes [hl, hw] (heading = prop angle) */
-function propShape(k: number): number | [number, number] | null {
-  switch (k) {
-    case K.HYDRANT: return 0.22;
-    case K.BIN: case K.HOUSEBIN: return 0.3;
-    case K.NEWS: return [0.28, 0.3];
-    case K.POSTBOX: return [0.3, 0.3];
-    case K.BENCH: return [0.26, 0.92];
-    case K.BIKERING: return 0.12;
-    case K.PAYSTATION: return 0.2;
-    case K.PLANTER: return 0.55;
-    case K.BLADE: return 0.1;
-    case K.HYDRO: return 0.2;
-    case K.LOTLIGHT: return 0.16;
-    case K.CAR: return [2.3, 0.92];
-    case K.BIKESHARE: return 0.35;
-    case K.BUSPOLE: return 0.08;
-    case K.SHELTER: return [0.9, 1.95];
-    default: return null;
-  }
-}
 
 const gkey = (e: number, n: number) => Math.floor(e / CELL) * 1000003 + Math.floor(n / CELL);
 
@@ -58,46 +35,23 @@ export class WalkCollider {
   }
 
   private tileSolids(t: Tile): TileSolids | null {
-    if (!t.props && !t.street) return null;
     let ts = this.cache.get(t);
     if (ts) return ts;
+    const src = this.engine.tiles.netSolids;
+    if (!src) return null;
     const e0 = t.tx * t.S, n0 = t.ty * t.S;
     const grid = new Map<number, Solid[]>();
-    const add = (s: Solid) => {
-      const R = (s.r || Math.hypot(s.hl, s.hw)) + 0.5;
+    for (const p of src(e0 + t.S / 2, n0 + t.S / 2, t.S)) {
+      const s: Solid = { e: p.e, n: p.n, r: p.r, h: 0, hl: 0, hw: 0 };
+      const R = s.r + 0.5;
       for (let gx = Math.floor((s.e - R) / CELL); gx <= Math.floor((s.e + R) / CELL); gx++)
         for (let gy = Math.floor((s.n - R) / CELL); gy <= Math.floor((s.n + R) / CELL); gy++) {
           const k = gx * 1000003 + gy;
           const l = grid.get(k);
           if (l) l.push(s); else grid.set(k, [s]);
         }
-    };
-    const it = t.props?.items;
-    if (it) for (let i = 0; i + PSTRIDE <= it.length; i += PSTRIDE) {
-      const sh = propShape(it[i]);
-      if (sh === null) continue;
-      const e = e0 + it[i + 1], n = n0 + it[i + 2];
-      if (typeof sh === 'number') add({ e, n, r: sh, h: 0, hl: 0, hw: 0 });
-      else add({ e, n, r: 0, h: it[i + 4], hl: sh[0], hw: sh[1] });
     }
-    const st = t.street;
-    if (st) {
-      for (let i = 0; i + 5 <= st.lamps.length; i += 5) add({ e: e0 + st.lamps[i], n: n0 + st.lamps[i + 1], r: 0.16, h: 0, hl: 0, hw: 0 });
-      for (let i = 0; i + 7 <= st.signals.length; i += 7) add({ e: e0 + st.signals[i], n: n0 + st.signals[i + 1], r: 0.2, h: 0, hl: 0, hw: 0 });
-      const v = st.veg;
-      for (let i = 0; i + VEG_STRIDE <= v.length; i += VEG_STRIDE) {
-        const sp = v[i + 6], ht = v[i + 4];
-        if (sp === 12 || sp === 13 || ht < 3) continue; // shrubs, hedges
-        add({ e: e0 + v[i], n: n0 + v[i + 1], r: Math.min(0.45, 0.15 + ht * 0.012), h: 0, hl: 0, hw: 0 });
-      }
-    }
-    const ls = t.props?.segs ?? new Float32Array(0);
-    const segs = new Float32Array(ls.length);
-    for (let i = 0; i + 6 <= ls.length; i += 6) {
-      segs[i] = e0 + ls[i]; segs[i + 1] = n0 + ls[i + 1]; segs[i + 2] = e0 + ls[i + 2]; segs[i + 3] = n0 + ls[i + 3];
-      segs[i + 4] = ls[i + 4]; segs[i + 5] = ls[i + 5];
-    }
-    ts = { grid, segs, e0, n0 };
+    ts = { grid, segs: new Float32Array(0), e0, n0 };
     this.cache.set(t, ts);
     return ts;
   }

@@ -11,7 +11,7 @@ const RADIUS = 1700;
 const KEEP = 2600;
 const MAX_ALT = 3500;
 
-interface NetTile { key: string; tx: number; ty: number; state: 'loading' | 'ready' | 'empty'; view?: NetView; group?: THREE.Group; nodeIds?: string[]; terrain?: Built['terrain'] }
+interface NetTile { key: string; tx: number; ty: number; state: 'loading' | 'ready' | 'empty'; view?: NetView; group?: THREE.Group; nodeIds?: string[]; terrain?: Built['terrain']; solids?: { e: number; n: number; r: number }[] }
 
 export interface SignalSource { signal(node: string, group: number): 'red' | 'amber' | 'green'; gate(node: string): number }
 
@@ -37,6 +37,7 @@ export class NetLayer implements Layer {
     for (const t of idx.tiles) this.have.add(`${t.tile[0]}_${t.tile[1]}`);
     engine.tiles.netTiles = this.have;
     engine.tiles.netHeight = (e, n) => this.heightAt(e, n);
+    engine.tiles.netSolids = (e, n) => this.tiles.get(`${Math.floor(e / S)}_${Math.floor(n / S)}`)?.solids ?? [];
     this.group.name = 'net';
     engine.tiles.root.add(this.group);
     const n = Math.max(1, Math.min(2, (navigator.hardwareConcurrency || 4) - 2));
@@ -107,6 +108,8 @@ export class NetLayer implements Layer {
     t.group = g;
     t.nodeIds = b.nodes.map((n) => n.id);
     t.terrain = b.terrain;
+    const R: Record<string, number> = { lamp: 0.16, lamp_res: 0.18, tree: 0.3, hydrant: 0.22, bin: 0.3, bench: 0.5, signal_pole: 0.2, stop_sign: 0.06, ocs_pole: 0.18, gate: 0.35, crossbuck: 0.08, shelter: 1.2, pier: 1.0 };
+    t.solids = b.props.filter((p) => R[p.kind]).map((p) => ({ e: p.x, n: p.y, r: R[p.kind] }));
     t.state = 'ready';
     this.engine.tiles.netReady.add(t.key);
   }

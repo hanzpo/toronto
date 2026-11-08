@@ -14,8 +14,7 @@ import type { TransitLayer } from '../layers/TransitLayer';
 import { MODES, STATE_DWELL, type Mode, type TripInfo, type VehicleState } from '../transit';
 import { pathForTrip, type PatternPath, type Pose } from './path';
 import { DYN, EB, MAX_NOTCH, TrainOperator } from './operate';
-import { RAILP } from '../sim/protocol';
-import { TunnelBuilder } from './tunnel';
+import { RAILP } from '../transit/protocol';
 import { Walker, WALKER_R } from './walker';
 import { WalkCollider, type Box } from './walkCollide';
 import { useInteract, type CamMode, type WalkInfo } from './state';
@@ -75,7 +74,6 @@ export class InteractLayer implements Layer {
   private routeHi!: LineOverlay;
   private routeHiUnder!: LineOverlay;
   private hiRoute: number | null = null;
-  readonly tunnel: TunnelBuilder;
   private walker: Walker | null = null;
   private walkerLook = '';
   private collider: WalkCollider | null = null;
@@ -125,7 +123,6 @@ export class InteractLayer implements Layer {
   private walkNear: { trip: number; label: string } | null = null;
 
   constructor() {
-    this.tunnel = new TunnelBuilder({ heightAt: (e, n) => this.engine.heightAt(e, n), dataRoot: () => this.engine?.dataRoot ?? '', trains: (out) => this.trainsNear(out) });
   }
 
   async init(engine: Engine) {
@@ -134,7 +131,6 @@ export class InteractLayer implements Layer {
     if (!t) throw new Error('InteractLayer needs the TransitLayer');
     this.transit = t;
     this.dom = engine.renderer.domElement;
-    engine.scene.add(this.tunnel.group);
 
     const discGeo = new THREE.CylinderGeometry(0.5, 0.5, 1, 16).translate(0, 0.5, 0);
     this.stopMarks = new MarkerOverlay(engine, { name: 'stops', capacity: 4000, shape: discGeo, size: [3, 0.4, 3], minPixels: 5, lift: 0.3 });
@@ -245,7 +241,6 @@ export class InteractLayer implements Layer {
     st.setSpeedIndex(1);
     if (!st.playing) st.togglePlay();
     this.selectVehicle(trip);
-    this.tunnel.setPath(path, info.mode, op.dyn.length);
     useInteract.getState().set({ mode: 'operate', trip, ride: null, walk: null });
     op.flash(vs.state === STATE_DWELL ? 'You have control — close doors (C) when ready' : 'You have control — W/S to notch, O/C doors', 5);
     // trains run in the signalled rail sim: the player's train becomes an agent there
@@ -453,22 +448,7 @@ export class InteractLayer implements Layer {
 
   // ======================================================================= internals
 
-  /** Other trains of the attached vehicle's mode within 1.2 km, as drawn (tunnel signal aspects). */
-  private trainsNear(out: { e: number; n: number; heading: number; length: number }[]): number {
-    const v = this.system.vehicles, me = this.trip, mode = this.tripInfo?.mode;
-    const c = this.camSmooth;
-    if (!c || !mode) return 0;
-    let k = 0;
-    for (let i = 0; i < v.count && k < 64; i++) {
-      if (v.trip[i] === me || MODES[v.mode[i]] !== mode || Math.hypot(v.x[i] - c.e, v.y[i] - c.n) > 1200) continue;
-      const d = this.transit.drawnVehicle(v.trip[i]);
-      if (!d) continue;
-      const o = out[k] ?? (out[k] = { e: 0, n: 0, heading: 0, length: 0 });
-      o.e = d.x; o.n = d.y; o.heading = d.heading; o.length = d.length;
-      k++;
-    }
-    return k;
-  }
+
 
   private traffic(): TrafficApi | null {
     return (this.engine.layers.find((l) => l.id === 'traffic') as unknown as TrafficApi) ?? null;
@@ -487,7 +467,6 @@ export class InteractLayer implements Layer {
     this.yaw = 0; this.pitch = 0.3;
     this.dist = Math.max(45, DYN[info.mode].length * 0.9);
     this.enterRig();
-    this.tunnel.setPath(this.path, info.mode, DYN[info.mode].length);
     this.selectVehicle(trip);
     useInteract.getState().set({ mode, trip, op: null, walk: null });
     // a rail trip: ride the sim's train (placed now if it is not yet) and keep it
@@ -535,7 +514,6 @@ export class InteractLayer implements Layer {
     }
     if (!keepWalker) this.hideWalker();
     this.boardedFromWalk = false;
-    this.tunnel.setPath(null, 'subway', 0);
     const cam = this.engine.camera;
     this.mode = 'free';
     this.trip = null;
@@ -617,7 +595,6 @@ export class InteractLayer implements Layer {
     this.trip = trip;
     this.tripInfo = info;
     this.path = pathForTrip(this.system, info);
-    this.tunnel.setPath(this.path, info.mode, DYN[info.mode].length);
     this.selectVehicle(trip);
     useInteract.getState().set({ trip });
   }
@@ -822,7 +799,6 @@ export class InteractLayer implements Layer {
     }
     this.syncCtl(pose.e, pose.n, pose.z, this.dist);
     // local track/tunnel geometry (in timetable-path coordinates)
-    this.tunnel.update(at ? this.transit.displayDist(this.trip!, this.vsTmp?.dist ?? 0) : s);
   }
 
   /**
@@ -1056,7 +1032,7 @@ export class InteractLayer implements Layer {
             ? op.atcTrip ? 'ATP: penalty brake — stop, then brake to release' : op.atpWarn >= 0 ? `ATP: overspeed — brake now (${op.atpWarn.toFixed(0)} s)` : op.message
             : op.atcTrip ? 'ATC: emergency brake — train ahead!' : op.overspeed ? 'ATC: overspeed — brakes applied' : op.message,
           progress: op.path.length ? op.s / op.path.length : 0, finished: op.finished,
-          inTunnel: this.tunnel.isUnder(op.s), view: this.view === 'cab' ? 'cab' : 'chase',
+          inTunnel: false, view: this.view === 'cab' ? 'cab' : 'chase',
         },
       });
     } else if (ui.op) ui.set({ op: null });
@@ -1498,7 +1474,6 @@ export class InteractLayer implements Layer {
     this.stopMarks.dispose();
     this.transit.highlight.clear();
     this.routeHi.dispose(); this.routeHiUnder.dispose();
-    this.tunnel.dispose();
     this.walker?.dispose();
     this.tip.remove();
     this.selTag.remove();

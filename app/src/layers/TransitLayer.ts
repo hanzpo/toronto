@@ -23,7 +23,7 @@ import { LANE_OFFSET, layoutFor, placeCar, type CarPose, type ConsistLayout } fr
 import type { GroundVeh } from './transit/ground';
 import { CarPools, FLAG_BRAKE, FLAG_OFF } from './transit/pools';
 import { PatternShape } from '../transit/shape';
-import { BUS_FLAG, BUS_STRIDE, RAIL_FLAG, RAIL_STRIDE } from '../sim/protocol';
+import { BUS_FLAG, BUS_STRIDE, RAIL_FLAG, RAIL_STRIDE } from '../transit/protocol';
 
 /** The traffic layer's view of the rail agents (sim/src/rail.rs, via the shared buffer). */
 interface BusSnap { count: number; oe: number; on: number; simMs: number; f: Float32Array; u: Uint32Array; path: Float32Array }

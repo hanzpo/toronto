@@ -34,6 +34,7 @@ class Edge:
     off_a: float = 0.0
     off_b: float = 0.0
     dead: bool = False
+    tile: tuple[int, int] = (0, 0)
 
 
 @dataclass
@@ -86,9 +87,22 @@ def _len(pts: list[tuple[float, float]]) -> float:
     return sum(math.dist(pts[i], pts[i + 1]) for i in range(len(pts) - 1))
 
 
+TILE = 1024.0
+
+
+def tile_of(p: tuple[float, float]) -> tuple[int, int]:
+    return (math.floor(p[0] / TILE), math.floor(p[1] / TILE))
+
+
+def splits_family(t: dict[str, str]) -> bool:
+    f = family(t)
+    return f is not None and f != "platform"
+
+
 class Builder:
-    def __init__(self, osm: OsmNet) -> None:
+    def __init__(self, osm: OsmNet, splits: np.ndarray | None = None) -> None:
         self.osm = osm
+        self.splits = splits
         self.xy = osm.xy
         self.edges: list[Edge] = []
         self.table = A.AssetTable()
@@ -120,14 +134,19 @@ class Builder:
                 nodes = nodes[::-1]
                 w = Way(w.id, {**w.tags, "oneway": "yes"}, nodes)
             ways.append((Way(w.id, w.tags, nodes), f))
-        ref: dict[int, int] = defaultdict(int)
-        for w, f in ways:
-            if f == "platform":
-                continue
-            for n in set(w.nodes):
-                ref[n] += 1
-            ref[w.nodes[0]] += 1
-            ref[w.nodes[-1]] += 1
+        if self.splits is not None:
+            cand = np.fromiter({n for w, f in ways if f != "platform" for n in w.nodes}, dtype=np.int64)
+            split = set(cand[np.isin(cand, self.splits)].tolist())
+        else:
+            ref: dict[int, int] = defaultdict(int)
+            for w, f in ways:
+                if f == "platform":
+                    continue
+                for n in set(w.nodes):
+                    ref[n] += 1
+                ref[w.nodes[0]] += 1
+                ref[w.nodes[-1]] += 1
+            split = {n for n, c in ref.items() if c >= 2}
         for w, f in ways:
             if f == "platform":
                 if w.nodes[0] == w.nodes[-1]:
@@ -136,16 +155,19 @@ class Builder:
                 continue
             cur = [w.nodes[0]]
             k = 0
-            for n in w.nodes[1:]:
+            last = len(w.nodes) - 1
+            for i in range(1, len(w.nodes)):
+                n = w.nodes[i]
                 cur.append(n)
-                if ref[n] >= 2 and n != w.nodes[-1]:
+                if i < last and n != w.nodes[-1] and (n in split or tile_of(self.xy[n]) != tile_of(self.xy[w.nodes[i - 1]])):
                     self.edges.append(Edge(f"w{w.id}_{k}", w.id, f, w.tags, cur))
-                    k += 1
+                    k = i
                     cur = [n]
             if len(cur) >= 2:
                 self.edges.append(Edge(f"w{w.id}_{k}", w.id, f, w.tags, cur))
         for e in self.edges:
             e.pts = [self.xy[n] for n in e.nodes]
+            e.tile = tile_of(e.pts[0])
         self.edges = [e for e in self.edges if _len(e.pts) > 0.3 or e.fam != "path"]
 
     def road_index(self) -> tuple[cKDTree, list[tuple[Edge, int]]]:
@@ -274,11 +296,10 @@ class Builder:
                 adj[e.nodes[-1]].append(e)
         def junctionish(n: int) -> bool:
             return deg[n] >= 3 or n in rail_at
+        pairs: set[tuple[int, int]] = set()
         def union(a: int, b: int) -> None:
-            ra, rb = self.find(a), self.find(b)
-            if ra != rb and math.dist(self.xy[ra], self.xy[rb]) < 70:
-                self.uf[rb] = ra
-        for start in [n for n in adj if junctionish(n)]:
+            pairs.add((min(a, b), max(a, b)))
+        for start in sorted(n for n in adj if junctionish(n)):
             for e0 in adj[start]:
                 rank = A.ROAD_RANK.get(e0.tags.get("highway", ""), 5)
                 lim = 28.0 if rank <= 4 else 10.0
@@ -305,6 +326,11 @@ class Builder:
                     e = others[0]
                     cur = nxt
                     chain.append(e)
+        for a, b in sorted(pairs):
+            ra, rb = self.find(a), self.find(b)
+            if ra != rb and math.dist(self.xy[ra], self.xy[rb]) < 70:
+                lo, hi = min(ra, rb), max(ra, rb)
+                self.uf[hi] = lo
         for e in self.edges:
             if not e.dead and e.nodes[0] == e.nodes[-1] and e.fam == "road":
                 e.dead = True
@@ -323,31 +349,73 @@ class Builder:
                 continue
             at[self.find(e.nodes[0])].append(e)
             at[self.find(e.nodes[-1])].append(e)
-        for n in list(at.keys()):
-            live = [e for e in at[n] if not e.dead]
+        link: dict[str, list[tuple[int, Edge]]] = defaultdict(list)
+        for n in sorted(at):
+            live = at[n]
             if len(live) != 2 or len(self.members.get(n, [n])) > 1:
                 continue
             e1, e2 = live
-            if e1 is e2 or e1.fam != e2.fam or e1.tags != e2.tags:
+            if e1 is e2 or e1.fam != e2.fam or e1.tags != e2.tags or e1.tile != e2.tile:
                 continue
-            if self.find(e1.nodes[-1]) != n:
-                if A.is_oneway(e1.tags):
+            if A.is_oneway(e1.tags):
+                ends1 = self.find(e1.nodes[-1]) == n
+                ends2 = self.find(e2.nodes[-1]) == n
+                if ends1 == ends2:
                     continue
-                e1.nodes.reverse(); e1.pts.reverse()
-            if self.find(e2.nodes[0]) != n:
-                if A.is_oneway(e2.tags):
-                    continue
-                e2.nodes.reverse(); e2.pts.reverse()
-            if self.find(e1.nodes[-1]) != n or self.find(e2.nodes[0]) != n:
+            link[e1.id].append((n, e2))
+            link[e2.id].append((n, e1))
+        byid = {e.id: e for e in self.edges if e.id in link}
+        seen: set[str] = set()
+        for eid in sorted(link):
+            if eid in seen:
                 continue
-            e1.nodes = e1.nodes + e2.nodes[1:]
-            e1.pts = e1.pts + e2.pts[1:]
-            if e2.tracks:
-                e1.tracks = e1.tracks or e2.tracks
-            e2.dead = True
-            far = self.find(e2.nodes[-1])
-            at[far] = [e1 if x is e2 else x for x in at[far]]
-            at[n] = []
+            comp: dict[str, Edge] = {}
+            stack = [byid[eid]]
+            while stack:
+                e = stack.pop()
+                if e.id in comp:
+                    continue
+                comp[e.id] = e
+                stack.extend(o for _, o in link[e.id])
+            seen.update(comp)
+            ends = sorted((e for e in comp.values() if len(link[e.id]) == 1), key=lambda e: e.id)
+            if len(ends) != 2:
+                continue
+            one = A.is_oneway(ends[0].tags) != 0
+            start = ends[0]
+            if one:
+                up = [e for e in ends if self.find(e.nodes[-1]) == link[e.id][0][0]]
+                if len(up) != 1:
+                    continue
+                start = up[0]
+            elif self.find(start.nodes[-1]) != link[start.id][0][0]:
+                start.nodes.reverse()
+                start.pts.reverse()
+            chain = [start]
+            prev = start
+            n = link[start.id][0][0]
+            while True:
+                nxt = [o for m, o in link[prev.id] if m == n and o is not prev and o.id not in {c.id for c in chain}]
+                if not nxt:
+                    break
+                e = nxt[0]
+                if self.find(e.nodes[0]) != n:
+                    e.nodes.reverse()
+                    e.pts.reverse()
+                chain.append(e)
+                rest = [m for m, o in link[e.id] if m != n]
+                if not rest:
+                    break
+                prev, n = e, rest[0]
+            if len(chain) != len(comp):
+                continue
+            head = chain[0]
+            head.nodes = head.nodes + [x for c in chain[1:] for x in c.nodes[1:]]
+            head.pts = head.pts + [x for c in chain[1:] for x in c.pts[1:]]
+            head.tracks = next((c.tracks for c in chain if c.tracks), [])
+            head.id = min(comp)
+            for c in chain[1:]:
+                c.dead = True
 
     def trim_paths(self) -> None:
         deg: dict[int, int] = defaultdict(int)
@@ -517,5 +585,5 @@ def _leg_angle(e: Edge, key: str) -> float:
     return math.atan2(b[1] - a[1], b[0] - a[0])
 
 
-def build(osm: OsmNet) -> Network:
-    return Builder(osm).run()
+def build(osm: OsmNet, splits: np.ndarray | None = None) -> Network:
+    return Builder(osm, splits).run()

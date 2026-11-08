@@ -34,8 +34,6 @@ export interface TileMeshes {
   vground?: MeshBuf | null;
   /** open cuts / portal approaches (level 0): floor query for heightAt */
   cuts?: import('./ground').CutBuf | null;
-  /** unified surface (`?surf=1`, workers/surface.ts): top-surface triangle index for heightAt */
-  surf?: import('./surface').SurfIndex | null;
   /** embankment fills (level 0, ground.ts buildGround `emb`): surface queries */
   emb?: Float32Array | null;
   heights: Float32Array; // G*G metres
@@ -54,11 +52,8 @@ export interface TileMeshes {
   /** levels 1–2: start of the half-resolution index range appended to `terrain` (0 = none) */
   terrainCoarse?: number;
   houses: HouseBuf | null;
-  street: import('./street').StreetBuf | null;
   /** far-field canopy clumps (level 1; VEG_STRIDE records, tile-local) */
   canopy: Float32Array | null;
-  /** street props / parking lots (level 0), consumed by PropsLayer */
-  props: import('./props').PropsBuf | null;
   /** rooftop equipment, construction sites, laneways (level 0), consumed by UrbanLayer */
   urban?: import('./urban').UrbanBuf | null;
   counts: { buildings: number; houses: number; roads: number; rails: number };

@@ -17,7 +17,6 @@ import type { Engine } from '../../engine/Engine';
 import type { FrameContext } from '../../engine/types';
 import type { ViewCull } from '../../engine/view';
 import { releaseObject } from '../../engine/dispose';
-import { VEG_CELLS } from '../../workers/vegetation';
 import { VEG_STRIDE } from './species';
 import { impostorQuad, lobedHigh, lobedMid, tieredHigh, tieredMid } from './geometry';
 import { FADE_S, impostorMaterial, lobedMaterial, tieredMaterial, VU } from './material';
@@ -317,13 +316,7 @@ export class Vegetation {
       for (const t of eng.tiles.drawn) {
         const dx = Math.max(0, Math.abs(E - (t.tx + 0.5) * t.S) - t.S / 2), dy = Math.max(0, Math.abs(Nn - (t.ty + 0.5) * t.S) - t.S / 2);
         const d = Math.hypot(dx, dy, Math.max(0, alt - 60));
-        if (t.L === 0 && t.street && t.street.veg.length) {
-          if (d > far + 100) continue;
-          want0.add(t.key);
-          let rec = this.tiles.get(t.key);
-          if (!rec) { rec = this.makeTile(t.key, t.tx * t.S, t.ty * t.S, t.street.veg, t.street.vegCells, t.S); this.tiles.set(t.key, rec); changed = true; }
-          rec.dist = d;
-        } else if (t.L === 1 && t.canopy && t.canopy.length) {
+        if (t.L === 1 && t.canopy && t.canopy.length) {
           if (d > far + (this.canopies.has(t.key) ? 400 : 0)) continue;
           if (!ctx.view.wideBoxEN(t.tx * t.S, t.ty * t.S, t.minH - 5, (t.tx + 1) * t.S, (t.ty + 1) * t.S, t.maxH + 40)) continue;
           want1.add(t.key);
@@ -411,29 +404,6 @@ export class Vegetation {
     }
     c.mask = want;
     return writes + 8;
-  }
-
-  private makeTile(key: string, e0: number, n0: number, src: Float32Array, buckets: Uint32Array, S: number): VegTile {
-    const cells: Cell[] = [];
-    const cs = S / VEG_CELLS;
-    for (let b = 0; b < VEG_CELLS * VEG_CELLS; b++) {
-      const l0 = buckets[b * 2], l1 = buckets[b * 2 + 1], t1 = buckets[b * 2 + 2];
-      if (t1 <= l0) continue;
-      const i = b % VEG_CELLS, j = Math.floor(b / VEG_CELLS);
-      const cx = e0 + (i + 0.5) * cs, cy = n0 + (j + 0.5) * cs;
-      let zs = 0;
-      for (let r = l0; r < t1; r++) zs += src[r * VEG_STRIDE + 2] + src[r * VEG_STRIDE + 4] * 0.5;
-      const cz = zs / (t1 - l0);
-      let rr = 0;
-      for (let r = l0; r < t1; r++) {
-        const q = r * VEG_STRIDE;
-        rr = Math.max(rr, Math.hypot(e0 + src[q] - cx, n0 + src[q + 1] - cy, src[q + 2] + src[q + 4] * 0.5 - cz));
-      }
-      cells.push({ l0, l1, t0: l1, t1, cx, cy, cz, r: rr + 1, mask: 0, own: [null, null, null, null, null, null, null] });
-    }
-    const t: VegTile = { key, e0, n0, src, cells, dist: 0, st: new Float32Array((src.length / VEG_STRIDE) * 3) };
-    this.hardStates(t, this.last.x, this.last.y, this.last.z);
-    return t;
   }
 
   /** LOD a tree at distance d should show, staying at `cur` inside the hysteresis margins */
