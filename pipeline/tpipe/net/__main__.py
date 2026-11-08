@@ -66,6 +66,8 @@ def seg_json(e: model.Edge) -> dict[str, object]:
         d["dir"] = "both"
     if e.tags.get("name"):
         d["name"] = e.tags["name"]
+    if e.events:
+        d["events"] = [{"kind": k, "s": round(f, 4), "side": sd} for k, f, sd in e.events]
     return d
 
 

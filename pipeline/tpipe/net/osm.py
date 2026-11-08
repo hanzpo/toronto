@@ -69,7 +69,11 @@ class _Handler(osmium.SimpleHandler):
             return
         t = {k: v for k, v in n.tags if k in NODE_KEYS or k.startswith("traffic_signals")}
         if t:
-            self.out.ntags[self.nid(n.id)] = t
+            oid = self.nid(n.id)
+            self.out.ntags[oid] = t
+            if t.get("highway") == "bus_stop" and n.location.valid() and oid not in self.out.xy:
+                x, y = geo.project(n.location.lon, n.location.lat)
+                self.out.xy[oid] = (float(x), float(y))
 
 
 def network_pbf() -> Path:
@@ -78,7 +82,7 @@ def network_pbf() -> Path:
     if out.exists() and out.stat().st_mtime >= src.stat().st_mtime:
         return out
     out.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["osmium", "tags-filter", str(src), "w/highway", "w/railway", "w/public_transport=platform", "-o", str(out), "--overwrite"], check=True)
+    subprocess.run(["osmium", "tags-filter", str(src), "w/highway", "w/railway", "w/public_transport=platform", "n/highway=bus_stop", "-o", str(out), "--overwrite"], check=True)
     return out
 
 

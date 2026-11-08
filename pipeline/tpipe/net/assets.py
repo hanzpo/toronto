@@ -137,15 +137,21 @@ def road(t: dict[str, str], ctx: RoadCtx) -> Json:
     bands: list[Json] = []
     sw_w = 2.4 if rank <= 3 else 1.8
     def walk_side(left: bool) -> list[Json]:
-        out: list[Json] = [{"kind": "sidewalk", "w": sw_w, "h": 0.15, "mat": "concrete", "lanes": [{"dir": 1, "cls": ["ped"]}]}]
+        sw_slots: list[Json] = []
+        if rank <= 3 and ctx.dense:
+            sw_slots = [{"kind": "bin", "spacing": 55, "phase": 20 if left else 47, "at": 0.3 if left else -0.3},
+                        {"kind": "bench", "spacing": 140, "phase": 70 if left else 105, "at": 0.3 if left else -0.3}]
+        out: list[Json] = [{"kind": "sidewalk", "w": sw_w, "h": 0.15, "mat": "concrete", "lanes": [{"dir": 1, "cls": ["ped"]}], "slots": sw_slots}]
         if rank <= 3 and ctx.dense:
             out.append({"kind": "furniture", "w": 1.5, "h": 0.15, "mat": "pavers", "slots": [
                 {"kind": "tree", "spacing": 12, "phase": 4 if left else 10, "at": 0},
-                {"kind": "lamp", "spacing": 32, "phase": 15 if left else 0, "at": 0}]})
+                {"kind": "lamp", "spacing": 32, "phase": 15 if left else 0, "at": 0},
+                {"kind": "hydrant", "spacing": 95, "phase": 40 if left else 85, "at": 0.25}]})
         elif rank <= 5:
             out.append({"kind": "boulevard", "w": 2.2 if rank >= 4 else 2.8, "h": 0.15, "mat": "grass", "slots": [
                 {"kind": "tree", "spacing": 11, "phase": 4 if left else 9, "at": 0},
-                {"kind": "lamp_res", "spacing": 38, "phase": 12 if left else 31, "at": 0.3}]})
+                {"kind": "lamp_res", "spacing": 38, "phase": 12 if left else 31, "at": 0.3},
+                {"kind": "hydrant", "spacing": 110, "phase": 55 if left else 5, "at": -0.3}]})
         return out if left else list(reversed(out))
 
     def extras(side: str) -> list[Json]:

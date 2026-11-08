@@ -34,6 +34,7 @@ class Edge:
     off_a: float = 0.0
     off_b: float = 0.0
     dead: bool = False
+    events: list[tuple[str, float, int]] = field(default_factory=list)
     tile: tuple[int, int] = (0, 0)
 
 
@@ -118,6 +119,7 @@ class Builder:
         self.merge_chains()
         self.trim_paths()
         self.assign_assets()
+        self.stops()
         nodes = self.make_nodes()
         return Network([e for e in self.edges if not e.dead], nodes, self.table)
 
@@ -461,6 +463,35 @@ class Builder:
                         e.pts = keep[::-1]
                         e.nodes = e.nodes[::-1][: cut + 1][::-1]
                     self.deadends.add(e.nodes[end])
+
+    def stops(self) -> None:
+        ids = [n for n, t in self.osm.ntags.items() if t.get("highway") == "bus_stop" and n in self.xy]
+        if not ids or not any(e.fam == "road" and not e.dead for e in self.edges):
+            return
+        tree, ref = self.road_index()
+        for n in ids:
+            x, y = self.xy[n]
+            best = None
+            for j in tree.query_ball_point((x, y), 25.0):
+                e, i = ref[j]
+                if e.dead:
+                    continue
+                a, b = e.pts[i], e.pts[i + 1]
+                d = _seg_dist((x, y), a, b)
+                if best is None or d < best[0]:
+                    best = (d, e, i)
+            if not best:
+                continue
+            _, e, i = best
+            a, b = e.pts[i], e.pts[i + 1]
+            L = math.dist(a, b) or 1.0
+            ux, uy = (b[0] - a[0]) / L, (b[1] - a[1]) / L
+            t = max(0.0, min(1.0, ((x - a[0]) * ux + (y - a[1]) * uy) / L))
+            lat = ux * (y - a[1]) - uy * (x - a[0])
+            s_ = sum(math.dist(e.pts[k], e.pts[k + 1]) for k in range(i)) + t * L
+            tot = _len(e.pts)
+            side = -1 if lat < -0.5 or abs(lat) <= 0.5 else 1
+            e.events.append(("bus_stop", s_ / max(tot, 1e-6), side))
 
     def assign_assets(self) -> None:
         import json

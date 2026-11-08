@@ -331,7 +331,32 @@ function lanes(ctx: Ctx, seg: Seg, sa: number, sb: number) {
   ctx.legLanes.set(legB, regB);
 }
 
+function events(ctx: Ctx, seg: Seg, sa: number, sb: number) {
+  const L = seg.path.length;
+  for (const ev of seg.desc.events ?? []) {
+    if (ev.kind !== 'bus_stop') continue;
+    const s = Math.min(sb - 2, Math.max(sa + 2, ev.s <= 1 ? ev.s * L : ev.s));
+    const side = ev.side ?? -1;
+    const walk = seg.lay.filter((b) => b.band.kind === 'sidewalk' && (side > 0 ? b.l > 0 : b.r < 0));
+    const carr = seg.lay.filter((b) => b.band.kind === 'lane');
+    if (!walk.length || !carr.length) continue;
+    const b = side > 0 ? walk[0] : walk[walk.length - 1];
+    const curb = side > 0 ? b.r : b.l;
+    const f = seg.path.at(s);
+    const nx = -f.ty, ny = f.tx;
+    const tang = Math.atan2(f.ty, f.tx);
+    const face = side > 0 ? tang - Math.PI / 2 : tang + Math.PI / 2;
+    const pole = curb + side * 0.5, shelter = (b.l + b.r) / 2 + side * 0.2;
+    ctx.props.push({ kind: 'bus_stop', x: f.x + nx * pole, y: f.y + ny * pole, z: f.z + b.hl, h: face });
+    if (b.band.w >= 2.2) {
+      const g = seg.path.at(Math.max(sa + 2, s - 6));
+      ctx.props.push({ kind: 'shelter', x: g.x - g.ty * shelter, y: g.y + g.tx * shelter, z: g.z + b.hl, h: face + Math.PI });
+    }
+  }
+}
+
 function slots(ctx: Ctx, seg: Seg, sa: number, sb: number) {
+  events(ctx, seg, sa, sb);
   const vars = ctx.variants.get(seg) ?? [];
   for (const b of seg.lay) {
     for (const slot of b.band.slots ?? []) {
