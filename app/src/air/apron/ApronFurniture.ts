@@ -132,7 +132,6 @@ export class ApronFurniture {
   private staticN: Record<GseKind, number>;
   private mastMesh: THREE.InstancedMesh | null = null;
   private glow: THREE.Object3D[] = [];
-  private siblings: number[][] = [];
   private lastSim = NaN;
   private svcKey = '';
   private service: Placed[] = [];
@@ -232,18 +231,6 @@ export class ApronFurniture {
     out[3] = (dx / dl) * sg; out[4] = (dz / dl) * sg;
   }
 
-  /** stand siblings (MARS variants share a base number) for bridge docking */
-  private sibs(sys: AirSystem): number[][] {
-    if (this.siblings.length || !this.d.icao) return this.siblings;
-    const ap = sys.airports.get(this.d.icao);
-    if (!ap) return this.siblings;
-    const base = (r: string) => (/^[A-Z]?\d+[A-Z]$/.test(r) ? r.slice(0, -1) : r);
-    const by = new Map<string, number[]>();
-    ap.j.stands.forEach((s, i) => { const b = base(s.ref); by.set(b, [...(by.get(b) ?? []), i]); });
-    this.siblings = ap.j.stands.map((s) => by.get(base(s.ref)) ?? []);
-    return this.siblings;
-  }
-
   /** frustum-cull every pool against one sphere (origin-relative three coords) around the apron */
   setBounds(sphere: THREE.Sphere) {
     this.root.traverse((o) => {
@@ -279,7 +266,6 @@ export class ApronFurniture {
   update(ctx: FrameContext, sys: AirSystem | null) {
     const night = 1 - ctx.daylight;
     for (const g of this.glow) g.visible = night > 0.05;
-    const [ox, on] = this.d.origin;
     // parked / pushing-back aircraft of this airport by stand (+ time to pushback from the
     // departure track the air system has already built for it)
     const parked = new Map<number, Parked>();

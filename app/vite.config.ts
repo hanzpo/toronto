@@ -46,7 +46,7 @@ function publicWithoutData(): Plugin {
     configResolved(c) { root = c.publicDir; outDir = c.build.outDir },
     closeBundle() {
       for (const f of readdirSync(root)) {
-        if (!DATA_DIRS.has(f)) cpSync(join(root, f), join(outDir, f), { recursive: true })
+        if (!DATA_DIRS.has(f) && !f.startsWith('data-')) cpSync(join(root, f), join(outDir, f), { recursive: true })
       }
     },
   }
