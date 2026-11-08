@@ -129,3 +129,31 @@ fn diag_one() {
         }
     }
 }
+
+fn crossing_safety(id: &str, kind: AKind) {
+    let mut w = load(id);
+    w.populate(14, 0, if kind == AKind::Tram { 4 } else { 0 }, if kind == AKind::Train { 2 } else { 0 }, 0);
+    let xn = w.net.node_kind.iter().position(|k| k.ends_with("crossing")).unwrap() as u16;
+    let mut downs = 0;
+    let mut clashes = 0;
+    let mut passes = 0;
+    let mut was_on = false;
+    for _ in 0..6000 {
+        w.step(0.1);
+        if w.gate[xn as usize] > 0.98 { downs += 1; }
+        let on = |k: AKind| w.agents.iter().any(|a| a.kind == k && w.net.lanes[a.lane as usize].node == Some(xn));
+        let t_on = on(kind);
+        if t_on && !was_on { passes += 1; }
+        was_on = t_on;
+        if t_on && (on(AKind::Car)) { clashes += 1; }
+    }
+    println!("{id}: passes {passes}, gate-down steps {downs}, steps with a car and a {kind:?} in the crossing {clashes}");
+    assert!(passes > 0);
+    assert_eq!(clashes, 0);
+}
+
+#[test]
+fn crossings_are_safe() {
+    crossing_safety("level-crossing", AKind::Train);
+    crossing_safety("tram-crossing", AKind::Tram);
+}

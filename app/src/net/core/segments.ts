@@ -2,6 +2,7 @@ import type { Mat } from './assets';
 import type { Ctx, Variant } from './ctx';
 import type { Seg } from './model';
 import { offsetLine, type PathPt } from './path';
+import { PORTAL, crown } from './terrain';
 
 const MARK_Z = 0.012;
 
@@ -61,9 +62,10 @@ export function buildSegment(ctx: Ctx, seg: Seg) {
   const vars = ctx.variants.get(seg) ?? [];
   const outerL = lay[0], outerR = lay[lay.length - 1];
   const gradeRanges = complement(vars.filter((v) => v.kind === 'bridge' || v.kind === 'tunnel'), sa, sb);
+  const skirtMat: Mat = a.family === 'platform' ? 'platform' : a.family === 'rail' || a.family === 'subway' ? 'ballast' : 'dirt';
   for (const [s0, s1] of gradeRanges) {
-    sink.wall('dirt', edge(seg, outerL.l, outerL.hl, s0, s1), a.skirt, false);
-    sink.wall('dirt', edge(seg, outerR.r, outerR.hr, s0, s1), a.skirt, true);
+    sink.wall(skirtMat, edge(seg, outerL.l, outerL.hl, s0, s1), a.skirt, false);
+    sink.wall(skirtMat, edge(seg, outerR.r, outerR.hr, s0, s1), a.skirt, true);
   }
   for (const v of vars) {
     const s0 = Math.max(sa, v.s0), s1 = Math.min(sb, v.s1);
@@ -128,8 +130,9 @@ function bridge(ctx: Ctx, seg: Seg, s0: number, s1: number) {
     const g = ctx.terrainAt(f.x, f.y) ?? f.z - 8;
     const top = f.z - dd;
     if (top - g < 0.5) continue;
-    if (blockedBelow(ctx, seg, f.x, f.y)) continue;
-    ctx.props.push({ kind: 'pier', x: f.x, y: f.y, z: g, h: Math.atan2(f.ty, f.tx), p: { height: top - g, width: W * 0.8 } });
+    const below = blockedBelow(ctx, seg, f.x, f.y);
+    if (below === 'lane') continue;
+    ctx.props.push({ kind: 'pier', x: f.x, y: f.y, z: g, h: Math.atan2(f.ty, f.tx), p: { height: top - g, width: W * 0.8, thin: below === 'median' ? 1 : 0 } });
   }
   for (const s of [s0, s1]) {
     const f = seg.path.at(s);
@@ -145,22 +148,25 @@ function bridge(ctx: Ctx, seg: Seg, s0: number, s1: number) {
   }
 }
 
-function blockedBelow(ctx: Ctx, seg: Seg, x: number, y: number) {
+function blockedBelow(ctx: Ctx, seg: Seg, x: number, y: number): 'lane' | 'median' | null {
   for (const o of ctx.segs) {
     if (o === seg) continue;
     const w = (o.lay[0].l - o.lay[o.lay.length - 1].r) / 2 + 1.5;
     const bx = Math.min(...[o.path.x[0], o.path.x[o.path.n - 1]]) - 200, ex = Math.max(o.path.x[0], o.path.x[o.path.n - 1]) + 200;
     if (x < bx || x > ex) continue;
     const pr = o.path.project({ x, y });
-    if (pr.d < w) return true;
+    if (pr.d >= w) continue;
+    const band = o.lay.find((b) => pr.lat <= b.l && pr.lat >= b.r);
+    if (band && (band.band.kind === 'barrier' || band.band.kind === 'median') && band.band.w >= 0.8) return 'median';
+    return 'lane';
   }
-  return false;
+  return null;
 }
 
 function tunnel(ctx: Ctx, seg: Seg, s0: number, s1: number) {
-  const a = seg.asset, lay = seg.lay, sink = ctx.sink;
+  const lay = seg.lay, sink = ctx.sink;
   const L = lay[0], R = lay[lay.length - 1];
-  const H = a.family === 'road' ? 5.5 : a.family === 'subway' ? 4.6 : 6.5;
+  const H = crown(seg);
   const le = edge(seg, L.l + 0.3, 0, s0, s1), re = edge(seg, R.r - 0.3, 0, s0, s1);
   const lt = le.map((p) => ({ ...p, z: p.z + H })), rt = re.map((p) => ({ ...p, z: p.z + H }));
   sink.wall('tunnel', lt, H + 1.2, true);
@@ -182,7 +188,9 @@ function tunnel(ctx: Ctx, seg: Seg, s0: number, s1: number) {
     const top = pts.map((p, i) => ({ ...p, z: g + 0.6, s: i * W }));
     const bot = pts.map((p, i) => ({ ...p, z: f.z + H, s: i * W }));
     sink.wallBetween('wall', end === 0 ? [...top].reverse() : top, end === 0 ? [...bot].reverse() : bot, true);
-    ctx.props.push({ kind: 'portal', x: f.x, y: f.y, z: f.z, h: Math.atan2(f.ty, f.tx) + (end === 0 ? Math.PI : 0), p: { width: W, height: H } });
+    const r0 = end === 0 ? s : s - PORTAL - 1.5, r1 = end === 0 ? s + PORTAL + 1.5 : s;
+    const rl = edge(seg, W / 2 + 0.8, H + 0.45, r0, r1, false), rr = edge(seg, -(W / 2 + 0.8), H + 0.45, r0, r1, false);
+    sink.strip('wall', rr, rl, 0, 1);
   }
 }
 

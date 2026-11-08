@@ -202,8 +202,13 @@ export class PropsView {
       const r = new THREE.Group();
       r.rotation.y = p.h;
       g.add(r);
-      add(box(1.4, h, w, 0, h / 2, 0), M.concrete, r);
-      add(box(1.8, 0.8, w + 0.6, 0, h - 0.4, 0), M.concrete, r);
+      if (P.thin) {
+        for (const z of [-w * 0.3, 0, w * 0.3]) add(cyl(0.45, 0.45, h, 0, 0, z, 12), M.concrete, r);
+        add(box(1.2, 1.0, w, 0, h - 0.5, 0), M.concrete, r);
+      } else {
+        add(box(1.4, h, w, 0, h / 2, 0), M.concrete, r);
+        add(box(1.8, 0.8, w + 0.6, 0, h - 0.4, 0), M.concrete, r);
+      }
       return g;
     }
     return null;

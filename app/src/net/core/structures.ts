@@ -53,7 +53,26 @@ export function resolveStructures(ctx: Ctx) {
       res.push(...f.filter((q) => q.kind !== 'grade'));
       ranges = res.sort((p, q) => p.s0 - q.s0);
     }
-    ctx.variants.set(s, ranges.filter((r) => r.s1 - r.s0 > 1));
+    ranges = ranges.filter((r) => r.s1 - r.s0 > 1);
+    const extra: Variant[] = [];
+    for (const r of ranges) {
+      if (r.kind !== 'tunnel') continue;
+      for (const [from, dirn] of [[r.s0, -1], [r.s1, 1]] as const) {
+        if ((dirn < 0 && from <= 0.5) || (dirn > 0 && from >= L - 0.5)) continue;
+        let reach = 0;
+        for (let d = 2; d <= 120; d += 2) {
+          const t = from + dirn * d;
+          if (t < 0 || t > L) break;
+          const f = s.path.at(t);
+          const g = ctx.terrainAt(f.x, f.y);
+          if (g === null || f.z - g > -2.5) break;
+          if (ranges.some((q) => q !== r && t >= q.s0 && t <= q.s1)) break;
+          reach = d;
+        }
+        if (reach > 0) extra.push(dirn < 0 ? { s0: from - reach, s1: from, kind: 'wall' } : { s0: from, s1: from + reach, kind: 'wall' });
+      }
+    }
+    ctx.variants.set(s, [...ranges, ...extra].sort((p, q) => p.s0 - q.s0));
   }
 }
 

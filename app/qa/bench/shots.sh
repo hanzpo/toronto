@@ -11,7 +11,7 @@ $PW resize "${BENCH_W:-1280}" "${BENCH_H:-800}" >/dev/null
 for spec in "$@"; do
   id="${spec%%:*}"; cam=""; name="$id"
   if [[ "$spec" == *:* ]]; then cam="&cam=${spec#*:}"; name="${id}_$(echo "${spec#*:}" | tr ',' '_')"; fi
-  $PW goto "$BASE/bench.html?l=$id&ui=${BENCH_UI:-0}$cam" >/dev/null
+  $PW goto "$BASE/bench.html?l=$id&ui=${BENCH_UI:-0}$cam${BENCH_Q:-}" >/dev/null
   for i in $(seq 1 40); do
     r=$($PW eval "window.__bench ? window.__bench.frames() : 0" 2>/dev/null | grep -Eo '^[0-9]+' | head -1 || echo 0)
     [ "${r:-0}" -gt 20 ] && break

@@ -8,6 +8,23 @@ const SINK = 0.05;
 const SLOPE = 0.5;
 const REACH = 40;
 
+export const PORTAL = 4.5;
+
+export function crown(s: Seg) {
+  return s.asset.family === 'road' ? 5.5 : s.asset.family === 'subway' ? 4.6 : 6.5;
+}
+
+export function portalDist(ctx: Ctx, s: Seg, at: number) {
+  let best = Infinity;
+  for (const v of ctx.variants.get(s) ?? []) {
+    if (v.kind !== 'tunnel' || at < v.s0 || at > v.s1) continue;
+    const a = v.s0 > 0.5 ? at - v.s0 : Infinity;
+    const b = v.s1 < s.path.length - 0.5 ? v.s1 - at : Infinity;
+    best = Math.min(best, a, b);
+  }
+  return best;
+}
+
 export function conformTerrain(ctx: Ctx, t: TerrainDesc) {
   const N = t.nx * t.ny;
   const lo = new Float32Array(N).fill(-Infinity);
@@ -75,14 +92,17 @@ function stampSeg(ctx: Ctx, t: TerrainDesc, s: Seg, apply: (i: number, l: number
       const s_ = s0 + along;
       if (s_ < sa - 0.5 || s_ > sb + 0.5) continue;
       const kind = variantAt(ctx, s, s_);
-      if (kind === 'bridge' || kind === 'tunnel') {
-        const near = Math.min(Math.abs(s_ - sa), Math.abs(s_ - sb));
-        void near;
-        continue;
-      }
       const lat = -px * uy + py * ux;
       const z = P.z[k] + (P.z[k + 1] - P.z[k]) * (along / l);
       const idx = j * t.nx + i;
+      if (kind === 'bridge') continue;
+      if (kind === 'tunnel') {
+        if (lat > Lw + 1.5 || lat < Rw - 1.5) continue;
+        const dp = portalDist(ctx, s, s_);
+        if (dp < PORTAL) apply(idx, -Infinity, z + minH - SINK);
+        else apply(idx, z + crown(s) + 0.7, Infinity);
+        continue;
+      }
       if (lat <= Lw + pad && lat >= Rw - pad) {
         apply(idx, -Infinity, z + minH - SINK);
         continue;

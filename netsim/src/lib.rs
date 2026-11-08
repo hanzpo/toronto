@@ -112,7 +112,7 @@ impl World {
             }
             return if r < sg.green { 2 } else if r < sg.green + sg.amber { 1 } else { 0 };
         }
-        if self.net.node_kind.get(node as usize).map(|k| k == "level_crossing").unwrap_or(false) {
+        if self.net.node_kind.get(node as usize).map(|k| k == "level_crossing" || k == "tram_crossing").unwrap_or(false) {
             return if self.gate.get(node as usize).copied().unwrap_or(0.0) > 0.0 { 0 } else { 2 };
         }
         2
@@ -403,7 +403,7 @@ impl World {
         let nn = self.net.node_kind.len();
         let mut want = vec![false; nn];
         for (i, a) in self.agents.iter().enumerate() {
-            if !a.alive || a.kind != AKind::Train {
+            if !a.alive || !(a.kind == AKind::Train || a.kind == AKind::Tram) {
                 continue;
             }
             let _ = i;
@@ -418,7 +418,8 @@ impl World {
             for (k, (s, _)) in steps.iter().enumerate() {
                 let ln = &self.net.lanes[s.lane as usize];
                 if let Some(n) = ln.node {
-                    if self.net.node_kind[n as usize] == "level_crossing" {
+                    let nk = &self.net.node_kind[n as usize];
+                    if (nk == "level_crossing" && a.kind == AKind::Train) || (nk == "tram_crossing" && a.kind == AKind::Tram) {
                         let ahead = if k == 0 { 0.0 } else { acc };
                         let eta = ahead / a.v.max(3.0);
                         if ahead < 400.0 && eta < 28.0 {
@@ -434,12 +435,16 @@ impl World {
                     break;
                 }
                 if let Some(n) = self.net.lanes[s.lane as usize].node {
-                    want[n as usize] = true;
+                    if self.net.node_kind[n as usize].ends_with("crossing") {
+                        want[n as usize] = true;
+                    }
                 }
                 back -= self.net.lanes[s.lane as usize].len;
             }
             if let Some(n) = self.net.lanes[a.lane as usize].node {
-                want[n as usize] = true;
+                if self.net.node_kind[n as usize].ends_with("crossing") {
+                    want[n as usize] = true;
+                }
             }
         }
         for n in 0..nn {
@@ -454,14 +459,15 @@ impl World {
 
     fn crossing_ok(&self, i: usize, l: u32) -> bool {
         let a = &self.agents[i];
-        if a.kind != AKind::Train {
-            return true;
-        }
         let ln = &self.net.lanes[l as usize];
-        if let Some(n) = ln.node {
-            if self.net.node_kind[n as usize] == "level_crossing" {
-                return self.gate[n as usize] >= 0.98 || a.v > 2.0;
-            }
+        let Some(n) = ln.node else { return true };
+        let nk = &self.net.node_kind[n as usize];
+        if a.kind == AKind::Train && nk == "level_crossing" {
+            return self.gate[n as usize] >= 0.98 || a.v > 2.0;
+        }
+        if a.kind == AKind::Tram && nk == "tram_crossing" {
+            let clear = ln.conflicts.iter().all(|c| self.occ[c.lane as usize].is_empty());
+            return (self.gate[n as usize] >= 0.45 && clear) || a.v > 2.0;
         }
         true
     }

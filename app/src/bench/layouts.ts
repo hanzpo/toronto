@@ -218,8 +218,8 @@ export const LAYOUTS: Layout[] = [
       const b = new NetBuilder();
       b.seg('rail', b.node(-250, -2.25, 0), b.node(250, -2.25, 0), { id: 't1' });
       b.seg('rail', b.node(-250, 2.25, 0), b.node(250, 2.25, 0), { id: 't2' });
-      b.seg('platform_go', b.node(-90, -7.4, 0.25), b.node(90, -7.4, 0.25), { id: 'p1' });
-      b.seg('platform_go', b.node(-90, 7.4, 0.25), b.node(90, 7.4, 0.25), { id: 'p2' });
+      b.seg('platform_go_l', b.node(-90, -7.15, 0.25), b.node(90, -7.15, 0.25), { id: 'p1' });
+      b.seg('platform_go_r', b.node(-90, 7.15, 0.25), b.node(90, 7.15, 0.25), { id: 'p2' });
       return b.desc(flat());
     },
     cam: [0, 0, 60, 20, 30],

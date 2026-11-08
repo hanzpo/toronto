@@ -260,17 +260,22 @@ def({
     slots: [{ kind: 'lamp', spacing: 35, phase: 10, at: 0.7 }] }],
 });
 
-def({
-  id: 'platform_go', family: 'platform', rank: 7, speed: 5, radius: 0, crosswalk: 'none', laneLines: 'none', skirt: 1.2,
-  bands: [{ kind: 'platform', w: 7.0, h: 0, mat: 'platform', lanes: [{ dir: 1, cls: ['ped'] }],
-    slots: [{ kind: 'canopy', spacing: 12, phase: 6, at: 0 }, { kind: 'bench', spacing: 24, phase: 12, at: 0.25 }] }],
+const tactile = (): BandDef => ({ kind: 'platform', w: 0.6, h: 0, mat: 'tactile' });
+const platformAsset = (id: string, w: number, edges: 'both' | 'left' | 'right', slots: PropSlot[]) => def({
+  id, family: 'platform', rank: 7, speed: 5, radius: 0, crosswalk: 'none', laneLines: 'none', skirt: 1.2,
+  bands: [
+    ...(edges !== 'right' ? [tactile()] : []),
+    { kind: 'platform', w: w - (edges === 'both' ? 1.2 : 0.6), h: 0, mat: 'platform', lanes: [{ dir: 1, cls: ['ped'] }], slots },
+    ...(edges !== 'left' ? [tactile()] : []),
+  ],
 });
-
-def({
-  id: 'platform_subway', family: 'platform', rank: 7, speed: 5, radius: 0, crosswalk: 'none', laneLines: 'none', skirt: 1.2,
-  bands: [{ kind: 'platform', w: 10.0, h: 0, mat: 'platform', lanes: [{ dir: 1, cls: ['ped'] }],
-    slots: [{ kind: 'platform_lamp', spacing: 10, phase: 5, at: 0 }, { kind: 'bench', spacing: 30, phase: 15, at: 0.3 }] }],
-});
+const goSlots: PropSlot[] = [{ kind: 'canopy', spacing: 12, phase: 6, at: 0 }, { kind: 'bench', spacing: 24, phase: 12, at: 0.25 }];
+const subSlots: PropSlot[] = [{ kind: 'platform_lamp', spacing: 10, phase: 5, at: 0 }, { kind: 'bench', spacing: 30, phase: 15, at: 0.3 }];
+platformAsset('platform_go', 7, 'both', goSlots);
+platformAsset('platform_go_l', 7, 'left', goSlots);
+platformAsset('platform_go_r', 7, 'right', goSlots);
+platformAsset('platform_subway', 10, 'both', subSlots);
+platformAsset('platform_tram', 3, 'both', [{ kind: 'shelter', spacing: 30, phase: 10, at: 0.1 }]);
 
 export function asset(id: string): Asset {
   const a = ASSETS[id];

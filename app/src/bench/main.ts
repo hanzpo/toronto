@@ -59,6 +59,11 @@ const agents = new AgentsView();
 scene.add(agents.group);
 const warm = Number(q.get('warm') ?? 40);
 for (let i = 0; i < warm * 10; i++) world.step(0.1);
+if (q.get('until') === 'gate') {
+  const xs = built.nodes.map((n, i) => (n.kind.endsWith('crossing') ? i : -1)).filter((i) => i >= 0);
+  for (let i = 0; i < 9000 && !xs.some((x) => world.gate(x) > 0.99); i++) world.step(0.1);
+  for (let i = 0; i < 30; i++) world.step(0.1);
+}
 const speed = Number(q.get('speed') ?? 1);
 const paused = q.get('pause') === '1';
 const lights = ['red', 'amber', 'green'] as const;
