@@ -4,7 +4,7 @@ import { build } from '../net/core/build';
 import { NetView } from '../net/view/NetView';
 import { LAYOUTS } from './layouts';
 import { loadTile } from '../net/tiles';
-import { AgentsView } from '../net/view/agents';
+import { NetVehicles } from '../net/view/vehicles';
 import { simJson } from '../net/sim/encode';
 import initSim, { World } from '../net/sim/pkg/netsim';
 
@@ -51,7 +51,7 @@ const mapArg = q.get('map');
 let desc = layout.desc();
 if (mapArg) {
   const [tx, ty] = mapArg.split(',').map(Number);
-  const t = await loadTile('/data-net/net', tx, ty);
+  const t = await loadTile('/data/net', tx, ty);
   if (t) desc = t;
 }
 const built = build(desc);
@@ -63,7 +63,8 @@ await initSim();
 const world = new World(simJson(built), 11);
 const pop = layout.pop ?? [10, 0, 0, 0, 10];
 world.populate(pop[0], pop[1], pop[2], pop[3], pop[4]);
-const agents = new AgentsView();
+const agents = new NetVehicles();
+const anchor = { origin: new THREE.Vector3(), version: 1, toLocal: (e: number, n: number, z: number, o: THREE.Vector3) => o.set(e, z, -n) };
 scene.add(agents.group);
 const warm = Number(q.get('warm') ?? 40);
 for (let i = 0; i < warm * 10; i++) world.step(0.1);
@@ -76,7 +77,7 @@ const speed = Number(q.get('speed') ?? 1);
 const paused = q.get('pause') === '1';
 const lights = ['red', 'amber', 'green'] as const;
 function syncSim() {
-  agents.update(world.frame());
+  agents.push(performance.now(), new Float32Array(world.frame2()));
   view.props.setSignals((node, group) => lights[world.signal(node, group)] ?? 'green');
   view.props.setGates((node) => { const g = world.gate(node); return { down: Math.min(1, g * 1.4), flash: g > 0 && Math.floor(performance.now() / 500) % 2 === 0 }; });
 }
@@ -111,6 +112,7 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min(0.1, (now - last) / 1000) * speed;
   last = now;
   if (!paused && dt > 0) { let left = dt; while (left > 1e-4) { const h = Math.min(0.05, left); world.step(h); left -= h; } syncSim(); }
+  agents.update(performance.now() + 100, anchor, camera.position.x, -camera.position.z, dt, () => null);
   controls.update();
   renderer.render(scene, camera);
   frames++;

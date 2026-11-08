@@ -21,7 +21,7 @@ export interface SimReply { type: 'reply'; id: number; ok: boolean }
 
 export interface SimTrips { type: 'trips'; accepted: number[]; done: number[] }
 
-export interface SimFrame { type: 'frame'; agents: Float32Array; nodes: string[]; sig: Uint8Array; groups: Uint8Array; gates: Float32Array; t: number; player: number[] }
+export interface SimFrame { type: 'frame'; agents: Float32Array; nodes: string[]; sig: Uint8Array; groups: Uint8Array; gates: Float32Array; t: number; player: number[]; stamp: number }
 
 let world: World | null = null;
 let index: LaneIndex | null = null;
@@ -92,11 +92,11 @@ setInterval(() => {
   if (!world) return;
   let left = dt;
   while (left > 1e-4) { const h = Math.min(0.05, left); world.step(h); left -= h; }
-  const agents = new Float32Array(world.frame());
+  const agents = new Float32Array(world.frame2());
   const sig = new Uint8Array(nodes.length * 4);
   for (let n = 0; n < nodes.length; n++) for (let g = 0; g < Math.min(4, groupsPer[n] || 1); g++) sig[n * 4 + g] = world.signal(n, g);
   const gates = new Float32Array(nodes.length);
   for (let n = 0; n < nodes.length; n++) gates[n] = world.gate(n);
-  const msg: SimFrame = { type: 'frame', agents, nodes, sig, groups: Uint8Array.from(groupsPer), gates, t: world.time(), player: [...world.player()] };
+  const msg: SimFrame = { type: 'frame', agents, nodes, sig, groups: Uint8Array.from(groupsPer), gates, t: world.time(), player: [...world.player()], stamp: performance.timeOrigin + performance.now() };
   (self as unknown as Worker).postMessage(msg, [agents.buffer, sig.buffer, gates.buffer]);
 }, 33);

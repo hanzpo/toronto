@@ -73,6 +73,15 @@ export class World {
     /**
      * @returns {Float32Array}
      */
+    frame2() {
+        const ret = wasm.world_frame2(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {Float32Array}
+     */
     frame() {
         const ret = wasm.world_frame(this.__wbg_ptr);
         var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();

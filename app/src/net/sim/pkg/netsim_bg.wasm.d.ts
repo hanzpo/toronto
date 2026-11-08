@@ -7,6 +7,7 @@ export const world_clear_walker: (a: number) => void;
 export const world_clock: (a: number) => number;
 export const world_count: (a: number) => number;
 export const world_frame: (a: number) => [number, number];
+export const world_frame2: (a: number) => [number, number];
 export const world_gate: (a: number, b: number) => number;
 export const world_has_trip: (a: number, b: number) => number;
 export const world_new: (a: number, b: number, c: number) => [number, number, number];

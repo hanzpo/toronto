@@ -43,6 +43,8 @@ pub struct Agent {
     stops: VecDeque<(u32, f32, f64)>,
     stop_wait: f32,
     free: Option<Free>,
+    id: u32,
+    acc: f32,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -74,6 +76,7 @@ pub struct World {
     target: [u32; 5],
     done: Vec<u32>,
     clock0: f64,
+    next_id: u32,
 }
 
 const LOOK: f32 = 90.0;
@@ -311,7 +314,7 @@ impl World {
             let probe = Agent {
                 kind, lane: l, dir: 1, d: 0.0, v: 0.0, len: 0.0, v0: 0.0, route: VecDeque::new(), hist: VecDeque::new(),
                 stopped: 0.0, arrived: 0.0, variant: 0, lat: 0.0, dwell: 0.0, reserved: Vec::new(), alive: true,
-                trip: -1, stops: VecDeque::new(), stop_wait: 0.0, free: None,
+                trip: -1, stops: VecDeque::new(), stop_wait: 0.0, free: None, id: 0, acc: 0.0,
             };
             if !self.lane_ok(&probe, l) {
                 continue;
@@ -339,10 +342,12 @@ impl World {
             let agent = Agent {
                 kind, lane: l, dir, d, v: 0.0, len, v0, route: VecDeque::new(), hist: VecDeque::new(), stopped: 0.0, arrived: 0.0,
                 variant: self.rng.below(8) as u8, lat, dwell: 0.0, reserved: vec![l], alive: true,
-                trip: -1, stops: VecDeque::new(), stop_wait: 0.0, free: None,
+                trip: -1, stops: VecDeque::new(), stop_wait: 0.0, free: None, id: 0, acc: 0.0,
             };
             let idx = self.agents.len();
             self.agents.push(agent);
+            self.next_id += 1;
+            self.agents.last_mut().unwrap().id = self.next_id;
             if kind == AKind::Train {
                 self.owner[l as usize] = idx as i32;
             }
@@ -507,7 +512,7 @@ impl World {
         let net = Net::from_json(json).map_err(|e| JsValue::from_str(&e))?;
         let n = net.lanes.len();
         let nn = net.node_kind.len();
-        Ok(World { net, agents: Vec::new(), rng: Rng::new(seed as u64), t: 0.0, occ: vec![Vec::new(); n], owner: vec![-1; n], gate: vec![0.0; nn], out: Vec::new(), target: [0; 5], done: Vec::new(), clock0: 0.0 })
+        Ok(World { net, agents: Vec::new(), rng: Rng::new(seed as u64), t: 0.0, occ: vec![Vec::new(); n], owner: vec![-1; n], gate: vec![0.0; nn], out: Vec::new(), target: [0; 5], done: Vec::new(), clock0: 0.0, next_id: 0 })
     }
 
     pub fn populate(&mut self, cars: u32, buses: u32, trams: u32, trains: u32, peds: u32) {
@@ -627,6 +632,7 @@ impl World {
             };
             let v0 = a.v0.min(self.net.lanes[a.lane as usize].speed * 1.05).max(1.0);
             let acc = idm::accel(&p, a.v, v0, gap, a.v - lv);
+            a.acc = acc;
             let nv = (a.v + acc * dt).max(0.0);
             let mv = ((a.v + nv) * 0.5 * dt).min(gap.max(0.0) + 0.05).max(0.0);
             a.v = nv;
@@ -864,8 +870,10 @@ impl World {
         self.agents.push(Agent {
             kind: AKind::Ped, lane: OFF_NET, dir: 1, d: 0.0, v: 0.0, len: 0.8, v0: 0.0, route: VecDeque::new(), hist: VecDeque::new(), stopped: 0.0,
             arrived: 0.0, variant: 0, lat: 0.0, dwell: 0.0, reserved: Vec::new(), alive: true, trip: -1, stops: VecDeque::new(), stop_wait: 0.0,
-            free: Some(Free { x, y, z, ..Default::default() }),
+            free: Some(Free { x, y, z, ..Default::default() }), id: 0, acc: 0.0,
         });
+        self.next_id += 1;
+        self.agents.last_mut().unwrap().id = self.next_id;
     }
 
     pub fn clear_walker(&mut self) {
@@ -912,9 +920,11 @@ impl World {
         let a = Agent {
             kind, lane: first.lane, dir: first.dir, d: d.clamp(0.0, lane_len), v, len, v0: self.net.lanes[first.lane as usize].speed.max(8.0),
             route, hist: VecDeque::new(), stopped: 0.0, arrived: 0.0, variant, lat: 0.0, dwell: 0.0, reserved: Vec::new(), alive: true,
-            trip: trip as i32, stops, stop_wait: 0.0, free: None,
+            trip: trip as i32, stops, stop_wait: 0.0, free: None, id: 0, acc: 0.0,
         };
         self.agents.push(a);
+        self.next_id += 1;
+        self.agents.last_mut().unwrap().id = self.next_id;
         true
     }
 
@@ -924,6 +934,37 @@ impl World {
 
     pub fn take_done(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.done)
+    }
+
+    pub fn frame2(&mut self) -> Vec<f32> {
+        let mut out = Vec::with_capacity(self.agents.len() * 14);
+        for a in &self.agents {
+            let flags = if a.acc < -0.6 || a.v < 0.2 { 1.0 } else { 0.0 };
+            if let Some(f) = a.free {
+                let (c, s) = (f.h.cos(), f.h.sin());
+                let half = if a.kind == AKind::Ped { 0.2 } else { a.len * 0.5 };
+                out.extend_from_slice(&[a.id as f32, a.kind as u8 as f32, a.variant as f32, a.trip as f32, a.v, flags, 2.0]);
+                out.extend_from_slice(&[f.x + c * half, f.y + s * half, f.z, f.x - c * half, f.y - s * half, f.z]);
+                continue;
+            }
+            let (n, step) = match a.kind {
+                AKind::Car | AKind::Ped => (2usize, if a.kind == AKind::Ped { 0.4 } else { a.len }),
+                _ => ((a.len / 3.0).ceil() as usize + 2, 3.0),
+            };
+            out.extend_from_slice(&[a.id as f32, a.kind as u8 as f32, a.variant as f32, a.trip as f32, a.v, flags, n as f32]);
+            for k in 0..n {
+                let p = self.sample(a, k as f32 * step);
+                let (mut x, mut y) = (p[0], p[1]);
+                if a.lat != 0.0 {
+                    let q = self.sample(a, k as f32 * step + 0.5);
+                    let h = (p[1] - q[1]).atan2(p[0] - q[0]);
+                    x += -h.sin() * a.lat;
+                    y += h.cos() * a.lat;
+                }
+                out.extend_from_slice(&[x, y, p[2]]);
+            }
+        }
+        out
     }
 
     pub fn time(&self) -> f64 {

@@ -4,7 +4,8 @@ import { simSpeed } from '../state/store';
 import type { SimFrame, SimReply, SimTrips, TripIn } from './sim/simWorker';
 import { clock } from '../state/clock';
 import type { TransitLayer } from '../layers/TransitLayer';
-import { AgentsView } from './view/agents';
+import { NetVehicles, bodies, type TripMeta } from './view/vehicles';
+import * as THREE from 'three/webgpu';
 
 const S = 1024;
 const RADIUS = 1200;
@@ -15,7 +16,8 @@ export class SimLayer implements Layer {
   private engine!: Engine;
   private worker: Worker | null = null;
   private centre: { e: number; n: number } | null = null;
-  private agents = new AgentsView(6000);
+  private agents = new NetVehicles();
+  private metaCache = new Map<number, TripMeta | null>();
   private frame: SimFrame | null = null;
   private nodeIdx = new Map<string, number>();
   private have: Set<string> = new Set();
@@ -36,8 +38,9 @@ export class SimLayer implements Layer {
         this.nodeIdx = new Map(ev.data.nodes.map((id, i) => [id, i]));
       }
       this.frame = ev.data;
+      this.agents.push(ev.data.stamp, ev.data.agents);
     };
-    engine.tiles.root.add(this.agents.group);
+    engine.scene.add(this.agents.group);
   }
 
   signal(node: string, group: number): 'red' | 'amber' | 'green' {
@@ -78,7 +81,7 @@ export class SimLayer implements Layer {
       this.handoff();
     }
     if (this.frame) {
-      this.agents.update(this.frame.agents);
+      this.agents.update(performance.timeOrigin + performance.now(), ctx.anchor, ctx.cameraPos.x, -ctx.cameraPos.z, ctx.dt, (trip) => this.meta(trip));
       this.agents.group.visible = ctx.altitude < 3000;
     }
   }
@@ -106,15 +109,15 @@ export class SimLayer implements Layer {
   pickCar(e: number, n: number, radius = 8): number | null {
     const f = this.frame?.agents;
     if (!f) return null;
-    let best = -1, bd = radius;
-    for (let i = 0; i + 9 <= f.length; i += 9) {
-      if (f[i + 5] !== 0) continue;
-      const d = Math.hypot(f[i] - e, f[i + 1] - n);
-      if (d < bd) { bd = d; best = i; }
+    let best: { e: number; n: number; id: number } | null = null, bd = radius;
+    for (const b of bodies(f)) {
+      if (b.kind !== 0) continue;
+      const d = Math.hypot(b.e - e, b.n - n);
+      if (d < bd) { bd = d; best = b; }
     }
-    if (best < 0) return null;
-    this.picked = { e: f[best], n: f[best + 1] };
-    return best / 9;
+    if (!best) return null;
+    this.picked = { e: best.e, n: best.n };
+    return best.id;
   }
 
   pickCarMajor(e: number, n: number, radius = 150): number | null {
@@ -124,10 +127,7 @@ export class SimLayer implements Layer {
   pickPed(e: number, n: number, radius = 3): { e: number; n: number; z: number; heading: number; colour: number } | null {
     const f = this.frame?.agents;
     if (!f) return null;
-    for (let i = 0; i + 9 <= f.length; i += 9) {
-      if (f[i + 5] !== 4) continue;
-      if (Math.hypot(f[i] - e, f[i + 1] - n) < radius) return { e: f[i], n: f[i + 1], z: f[i + 2], heading: f[i + 3], colour: 0x6b7a8f };
-    }
+    for (const b of bodies(f)) if (b.kind === 4 && Math.hypot(b.e - e, b.n - n) < radius) return { e: b.e, n: b.n, z: b.z, heading: b.h, colour: 0x6b7a8f };
     return null;
   }
 
@@ -157,13 +157,22 @@ export class SimLayer implements Layer {
     const f = this.frame?.agents;
     if (!f) return out;
     const W = [1.9, 2.6, 2.6, 3.0, 0];
-    for (let i = 0; i + 9 <= f.length; i += 9) {
-      const k = f[i + 5];
-      if (k === 4) continue;
-      if (Math.hypot(f[i] - e, f[i + 1] - n) > r + f[i + 6]) continue;
-      out.push({ e: f[i], n: f[i + 1], h: f[i + 3], hl: f[i + 6] / 2, hw: W[k] / 2 });
+    for (const b of bodies(f)) {
+      if (b.kind === 4 || Math.hypot(b.e - e, b.n - n) > r + b.len) continue;
+      out.push({ e: b.e, n: b.n, h: b.h, hl: b.len / 2, hw: W[b.kind] / 2 });
     }
     return out;
+  }
+
+
+  private meta(trip: number): TripMeta | null {
+    let m = this.metaCache.get(trip);
+    if (m !== undefined) return m;
+    const sys = this.transit()?.system;
+    const info = sys?.tripInfo(trip);
+    m = info ? { mode: info.mode, route: info.routeMeta, color: new THREE.Color(info.routeMeta.color || '#ffffff') } : null;
+    this.metaCache.set(trip, m);
+    return m;
   }
 
   private transit(): TransitLayer | null {
@@ -229,6 +238,6 @@ export class SimLayer implements Layer {
 
   dispose() {
     this.worker?.terminate();
-    this.engine.tiles.root.remove(this.agents.group);
+    this.agents.dispose();
   }
 }
