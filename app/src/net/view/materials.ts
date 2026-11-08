@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { Fn, float, vec2, vec3, texture, positionWorld, mix, fract, abs, smoothstep, max, sin, floor, uv, normalWorld, attribute } from 'three/tsl';
+import { Fn, float, vec2, vec3, texture, positionWorld, mix, fract, abs, smoothstep, max, sin, floor, uv, normalWorld, attribute, normalMap } from 'three/tsl';
 import type { Mat } from '../core/assets';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -29,8 +29,8 @@ const vnoise = (p: N): N => {
 interface Spec { color: number; tex?: string; scale?: number; rough?: number; metal?: number; detail?: number; joints?: 'sidewalk' | 'slab' | 'deck'; offset?: number }
 
 const SPECS: Record<Mat, Spec> = {
-  asphalt: { color: 0x5e5e5b, tex: 'asphalt_color.webp', scale: 0.25, rough: 0.92, detail: 0.25 },
-  asphalt_dark: { color: 0x4c4c4a, tex: 'asphalt_color.webp', scale: 0.25, rough: 0.92, detail: 0.25 },
+  asphalt: { color: 0x6c6c68, tex: 'asphalt_color.webp', scale: 0.25, rough: 0.92, detail: 0.25 },
+  asphalt_dark: { color: 0x5e5e5a, tex: 'asphalt_color.webp', scale: 0.25, rough: 0.92, detail: 0.25 },
   concrete: { color: 0xb3afa6, tex: 'concrete_color.webp', scale: 0.3, rough: 0.85, joints: 'sidewalk' },
   pavers: { color: 0x8a5a44, tex: 'pavers_color.webp', scale: 0.5, rough: 0.85 },
   grass: { color: 0x6f8f4a, tex: 'grass_color.webp', scale: 0.2, rough: 1, detail: 0.35 },
@@ -72,7 +72,8 @@ export function material(m: Mat): THREE.MeshStandardNodeMaterial {
     if (s.tex) {
       const t = texture(tex(s.tex), wp.mul(s.scale ?? 0.25)).rgb;
       const lum = t.dot(vec3(0.299, 0.587, 0.114));
-      c = c.mul(mix(float(1), lum.mul(2.2), 0.55));
+      const avg = ({ 'asphalt_color.webp': 0.02, 'concrete_color.webp': 0.49, 'grass_color.webp': 0.122, 'pavers_color.webp': 0.257 } as Record<string, number>)[s.tex] ?? 0.2;
+      c = c.mul(mix(float(1), lum.div(avg).min(2.5), 0.55));
     }
     if (s.detail) {
       const n1 = vnoise(wp.mul(0.35)), n2 = vnoise(wp.mul(2.3));
@@ -92,8 +93,17 @@ export function material(m: Mat): THREE.MeshStandardNodeMaterial {
       const slope = float(1).sub(normalWorld.y);
       c = mix(c, vec3(0.42, 0.36, 0.27), smoothstep(0.25, 0.6, slope).mul(0.6));
     }
+    if (m === 'asphalt' || m === 'asphalt_dark') {
+      const patch = vnoise(wp.mul(0.08));
+      const fine = vnoise(wp.mul(1.7));
+      c = c.mul(mix(float(0.86), float(1.1), patch)).mul(mix(float(0.94), float(1.04), fine));
+    }
     return c;
   })();
+  if (m === 'asphalt' || m === 'asphalt_dark' || m === 'concrete' || m === 'row_slab' || m === 'platform') {
+    mat.normalNode = normalMap(texture(tex('asphalt_normal.webp', false), wp.mul(m.startsWith('asphalt') ? 0.3 : 0.5)), vec2(m.startsWith('asphalt') ? 0.55 : 0.25));
+    mat.roughnessNode = float(s.rough ?? 0.9).sub(vnoise(wp.mul(0.15)).mul(0.12));
+  }
   cache.set(m, mat);
   return mat;
 }

@@ -83,6 +83,23 @@ function syncSim() {
 }
 syncSim();
 
+if (q.get('lanes') === '1') {
+  const pos: number[] = [], col: number[] = [];
+  const C: Record<string, [number, number, number]> = { drive: [1, 0.2, 0.2], tram: [1, 0.8, 0], rail: [0.2, 0.6, 1], walk: [0.2, 1, 0.3], bike: [1, 0, 1] };
+  for (const l of built.lanes) {
+    const c = l.node ? [1, 1, 1] as [number, number, number] : C[l.kind] ?? [1, 1, 1];
+    for (let i = 0; i < l.pts.length - 1; i++) {
+      const a = l.pts[i], b = l.pts[i + 1];
+      pos.push(a.x, a.z + 0.3, -a.y, b.x, b.z + 0.3, -b.y);
+      col.push(...c, ...c);
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  scene.add(new THREE.LineSegments(g, new THREE.LineBasicNodeMaterial({ vertexColors: true, depthTest: false })));
+}
+
 const controls = new OrbitControls(camera, renderer.domElement);
 const cam = (q.get('cam') ?? '').split(',').map(Number);
 const [tx, ty, dist, hd, pt] = cam.length === 5 && cam.every((v) => !isNaN(v)) ? cam : layout.cam;
