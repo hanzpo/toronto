@@ -12,6 +12,55 @@ export class World {
         wasm.__wbg_world_free(ptr, 0);
     }
     /**
+     * @param {number} kind
+     * @param {number} variant
+     * @param {number} trip
+     * @param {Uint32Array | number[]} lanes
+     * @param {Int8Array | number[]} dirs
+     * @param {number} d
+     * @param {number} v
+     * @param {Uint32Array | number[]} stop_step
+     * @param {Float32Array | number[]} stop_d
+     * @param {Float64Array | number[]} stop_dep
+     * @returns {boolean}
+     */
+    add_trip(kind, variant, trip, lanes, dirs, d, v, stop_step, stop_d, stop_dep) {
+        const val6 = +kind;
+        const val7 = +variant;
+        const val8 = +trip;
+        const val9 = +d;
+        const val10 = +v;
+        let ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4;
+        try {
+            ptr0 = passArray32ToWasm0(lanes, wasm.__wbindgen_malloc);
+            len0 = WASM_VECTOR_LEN;
+            ptr1 = passArray8ToWasm0(dirs, wasm.__wbindgen_malloc);
+            len1 = WASM_VECTOR_LEN;
+            ptr2 = passArray32ToWasm0(stop_step, wasm.__wbindgen_malloc);
+            len2 = WASM_VECTOR_LEN;
+            ptr3 = passArrayF32ToWasm0(stop_d, wasm.__wbindgen_malloc);
+            len3 = WASM_VECTOR_LEN;
+            ptr4 = passArrayF64ToWasm0(stop_dep, wasm.__wbindgen_malloc);
+            len4 = WASM_VECTOR_LEN;
+        } catch (e) {
+            if (ptr4) { wasm.__wbindgen_free(ptr4, len4 * 8, 8); }
+            if (ptr3) { wasm.__wbindgen_free(ptr3, len3 * 4, 4); }
+            if (ptr2) { wasm.__wbindgen_free(ptr2, len2 * 4, 4); }
+            if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+            if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 4, 4); }
+            throw e;
+        }
+        const ret = wasm.world_add_trip(this.__wbg_ptr, val6, val7, val8, ptr0, len0, ptr1, len1, val9, val10, ptr2, len2, ptr3, len3, ptr4, len4);
+        return ret !== 0;
+    }
+    /**
+     * @returns {number}
+     */
+    clock() {
+        const ret = wasm.world_clock(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * @returns {number}
      */
     count() {
@@ -34,6 +83,14 @@ export class World {
     gate(node) {
         const ret = wasm.world_gate(this.__wbg_ptr, node);
         return ret;
+    }
+    /**
+     * @param {number} trip
+     * @returns {boolean}
+     */
+    has_trip(trip) {
+        const ret = wasm.world_has_trip(this.__wbg_ptr, trip);
+        return ret !== 0;
     }
     /**
      * @param {string} json
@@ -62,6 +119,12 @@ export class World {
         wasm.world_populate(this.__wbg_ptr, cars, buses, trams, trains, peds);
     }
     /**
+     * @param {number} service_seconds
+     */
+    set_clock(service_seconds) {
+        wasm.world_set_clock(this.__wbg_ptr, service_seconds);
+    }
+    /**
      * @param {number} node
      * @param {number} group
      * @returns {number}
@@ -75,6 +138,15 @@ export class World {
      */
     step(dt) {
         wasm.world_step(this.__wbg_ptr, dt);
+    }
+    /**
+     * @returns {Uint32Array}
+     */
+    take_done() {
+        const ret = wasm.world_take_done(this.__wbg_ptr);
+        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
     }
     /**
      * @returns {number}
@@ -120,6 +192,11 @@ function getArrayF32FromWasm0(ptr, len) {
     return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
 }
 
+function getArrayU32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
 let cachedFloat32ArrayMemory0 = null;
 function getFloat32ArrayMemory0() {
     if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.byteLength === 0) {
@@ -128,9 +205,25 @@ function getFloat32ArrayMemory0() {
     return cachedFloat32ArrayMemory0;
 }
 
+let cachedFloat64ArrayMemory0 = null;
+function getFloat64ArrayMemory0() {
+    if (cachedFloat64ArrayMemory0 === null || cachedFloat64ArrayMemory0.byteLength === 0) {
+        cachedFloat64ArrayMemory0 = new Float64Array(wasm.memory.buffer);
+    }
+    return cachedFloat64ArrayMemory0;
+}
+
 function getStringFromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return decodeText(getUint8ArrayMemory0().subarray(ptr, ptr + len));
+}
+
+let cachedUint32ArrayMemory0 = null;
+function getUint32ArrayMemory0() {
+    if (cachedUint32ArrayMemory0 === null || cachedUint32ArrayMemory0.byteLength === 0) {
+        cachedUint32ArrayMemory0 = new Uint32Array(wasm.memory.buffer);
+    }
+    return cachedUint32ArrayMemory0;
 }
 
 let cachedUint8ArrayMemory0 = null;
@@ -139,6 +232,34 @@ function getUint8ArrayMemory0() {
         cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
     }
     return cachedUint8ArrayMemory0;
+}
+
+function passArray32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getUint32ArrayMemory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArrayF32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getFloat32ArrayMemory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArrayF64ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 8, 8) >>> 0;
+    getFloat64ArrayMemory0().set(arg, ptr / 8);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
 }
 
 function passStringToWasm0(arg, malloc, realloc) {
@@ -219,6 +340,8 @@ function __wbg_finalize_init(instance, module) {
     wasm = instance.exports;
     wasmModule = module;
     cachedFloat32ArrayMemory0 = null;
+    cachedFloat64ArrayMemory0 = null;
+    cachedUint32ArrayMemory0 = null;
     cachedUint8ArrayMemory0 = null;
     wasm.__wbindgen_start();
     return wasm;

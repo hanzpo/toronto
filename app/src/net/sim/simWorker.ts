@@ -3,14 +3,21 @@ import type { NetDesc } from '../core/desc';
 import { loadTile } from '../tiles';
 import { simJson } from './encode';
 import initSim, { World } from './pkg/netsim';
+import { LaneIndex, matchTrip, type TripKind } from './match';
+
+export interface TripIn { trip: number; kind: TripKind; variant: number; pts: Float32Array; dist: Float32Array; at: number; v: number; stops: { dist: number; dep: number }[] }
 
 export type SimIn =
   | { type: 'region'; root: string; tiles: [number, number][]; seed: number; speed: number }
-  | { type: 'speed'; speed: number };
+  | { type: 'speed'; speed: number }
+  | { type: 'trips'; clock: number; trips: TripIn[] };
+
+export interface SimTrips { type: 'trips'; accepted: number[]; done: number[] }
 
 export interface SimFrame { type: 'frame'; agents: Float32Array; nodes: string[]; sig: Uint8Array; groups: Uint8Array; gates: Float32Array; t: number }
 
 let world: World | null = null;
+let index: LaneIndex | null = null;
 let nodes: string[] = [];
 let groupsPer: number[] = [];
 let speed = 1;
@@ -33,6 +40,7 @@ async function region(root: string, tiles: [number, number][], seed: number) {
   if (my !== gen) return;
   world?.free();
   world = new World(simJson(b), seed);
+  index = new LaneIndex(b.lanes);
   nodes = b.nodes.map((n) => n.id);
   groupsPer = nodes.map((id) => b.signals.find((s) => s.node === id)?.groups.length ?? 0);
   let drive = 0, walk = 0;
@@ -50,6 +58,18 @@ self.onmessage = (ev: MessageEvent<SimIn>) => {
   const m = ev.data;
   if (m.type === 'region') void region(m.root, m.tiles, m.seed);
   if (m.type === 'speed') speed = m.speed;
+  if (m.type === 'trips' && world && index) {
+    world.set_clock(m.clock);
+    const accepted: number[] = [];
+    for (const t of m.trips) {
+      if (world.has_trip(t.trip)) { accepted.push(t.trip); continue; }
+      const r = matchTrip(index, t.kind, t.pts, t.dist, t.at, t.stops);
+      if (!r || r.lanes.length < 2) continue;
+      if (world.add_trip(t.kind, t.variant, t.trip, Uint32Array.from(r.lanes), Int8Array.from(r.dirs), r.d, t.v, Uint32Array.from(r.stopStep), Float32Array.from(r.stopD), Float64Array.from(r.stopDep))) accepted.push(t.trip);
+    }
+    const out: SimTrips = { type: 'trips', accepted, done: [...world.take_done()] };
+    (self as unknown as Worker).postMessage(out);
+  }
 };
 
 let last = performance.now();

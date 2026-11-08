@@ -39,6 +39,9 @@ pub struct Agent {
     dwell: f32,
     reserved: Vec<u32>,
     alive: bool,
+    trip: i32,
+    stops: VecDeque<(u32, f32, f64)>,
+    stop_wait: f32,
 }
 
 #[wasm_bindgen]
@@ -52,6 +55,8 @@ pub struct World {
     gate: Vec<f32>,
     out: Vec<f32>,
     target: [u32; 5],
+    done: Vec<u32>,
+    clock0: f64,
 }
 
 const LOOK: f32 = 90.0;
@@ -75,6 +80,9 @@ impl World {
     }
 
     fn plan(&mut self, i: usize) {
+        if self.agents[i].trip >= 0 {
+            return;
+        }
         loop {
             let a = &self.agents[i];
             if a.route.len() >= 4 {
@@ -286,6 +294,7 @@ impl World {
             let probe = Agent {
                 kind, lane: l, dir: 1, d: 0.0, v: 0.0, len: 0.0, v0: 0.0, route: VecDeque::new(), hist: VecDeque::new(),
                 stopped: 0.0, arrived: 0.0, variant: 0, lat: 0.0, dwell: 0.0, reserved: Vec::new(), alive: true,
+                trip: -1, stops: VecDeque::new(), stop_wait: 0.0,
             };
             if !self.lane_ok(&probe, l) {
                 continue;
@@ -313,6 +322,7 @@ impl World {
             let agent = Agent {
                 kind, lane: l, dir, d, v: 0.0, len, v0, route: VecDeque::new(), hist: VecDeque::new(), stopped: 0.0, arrived: 0.0,
                 variant: self.rng.below(8) as u8, lat, dwell: 0.0, reserved: vec![l], alive: true,
+                trip: -1, stops: VecDeque::new(), stop_wait: 0.0,
             };
             let idx = self.agents.len();
             self.agents.push(agent);
@@ -480,7 +490,7 @@ impl World {
         let net = Net::from_json(json).map_err(|e| JsValue::from_str(&e))?;
         let n = net.lanes.len();
         let nn = net.node_kind.len();
-        Ok(World { net, agents: Vec::new(), rng: Rng::new(seed as u64), t: 0.0, occ: vec![Vec::new(); n], owner: vec![-1; n], gate: vec![0.0; nn], out: Vec::new(), target: [0; 5] })
+        Ok(World { net, agents: Vec::new(), rng: Rng::new(seed as u64), t: 0.0, occ: vec![Vec::new(); n], owner: vec![-1; n], gate: vec![0.0; nn], out: Vec::new(), target: [0; 5], done: Vec::new(), clock0: 0.0 })
     }
 
     pub fn populate(&mut self, cars: u32, buses: u32, trams: u32, trains: u32, peds: u32) {
@@ -547,6 +557,46 @@ impl World {
                 gap = (limit - 8.0).max(0.0);
                 lv = 0.0;
             }
+            if let Some(&(sl, sd, dep)) = self.agents[i].stops.front() {
+                let a = &self.agents[i];
+                let mut ahead = None;
+                if a.lane == sl {
+                    ahead = Some(sd - a.d);
+                } else {
+                    let mut acc = self.net.lanes[a.lane as usize].len - a.d;
+                    for s in a.route.iter() {
+                        if s.lane == sl {
+                            ahead = Some(acc + sd);
+                            break;
+                        }
+                        acc += self.net.lanes[s.lane as usize].len;
+                        if acc > 400.0 {
+                            break;
+                        }
+                    }
+                }
+                if let Some(dist) = ahead {
+                    let clock = self.clock0 + self.t;
+                    if dist < 1.5 && a.v < 0.3 {
+                        let a = &mut self.agents[i];
+                        a.stop_wait += dt;
+                        let min = match a.kind { AKind::Train => 30.0, AKind::Tram => 12.0, _ => 8.0 };
+                        if a.stop_wait >= min && clock >= dep {
+                            a.stops.pop_front();
+                            a.stop_wait = 0.0;
+                        } else {
+                            gap = 0.0;
+                            lv = 0.0;
+                        }
+                    } else if dist < gap + 0.5 {
+                        gap = (dist - 0.3).max(0.0);
+                        lv = 0.0;
+                    }
+                    if dist < -5.0 {
+                        self.agents[i].stops.pop_front();
+                    }
+                }
+            }
             let a = &mut self.agents[i];
             let p = match kind {
                 AKind::Train => idm::IdmParams { a: 0.7, b: 0.9, t: 2.0, s0: 8.0 },
@@ -573,7 +623,9 @@ impl World {
         self.agents.retain(|a| a.alive);
         let mut have = [0u32; 5];
         for a in &self.agents {
-            have[a.kind as usize] += 1;
+            if a.trip < 0 {
+                have[a.kind as usize] += 1;
+            }
         }
         for (k, kind) in [AKind::Car, AKind::Bus, AKind::Tram, AKind::Train, AKind::Ped].into_iter().enumerate() {
             if have[k] < self.target[k] {
@@ -616,6 +668,11 @@ impl World {
             }
             let Some(nx) = self.agents[i].route.pop_front() else {
                 let a = &mut self.agents[i];
+                if a.trip >= 0 {
+                    a.alive = false;
+                    self.done.push(a.trip as u32);
+                    return;
+                }
                 if a.kind == AKind::Train || a.kind == AKind::Tram {
                     a.d = len;
                     a.v = 0.0;
@@ -667,6 +724,42 @@ impl World {
         }
     }
 
+    pub fn set_clock(&mut self, service_seconds: f64) {
+        self.clock0 = service_seconds - self.t;
+    }
+
+    pub fn clock(&self) -> f64 {
+        self.clock0 + self.t
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_trip(&mut self, kind: u8, variant: u8, trip: u32, lanes: Vec<u32>, dirs: Vec<i8>, d: f32, v: f32, stop_step: Vec<u32>, stop_d: Vec<f32>, stop_dep: Vec<f64>) -> bool {
+        if lanes.is_empty() {
+            return false;
+        }
+        let kind = match kind { 1 => AKind::Bus, 2 => AKind::Tram, 3 => AKind::Train, _ => AKind::Car };
+        let len = match kind { AKind::Bus => 12.0, AKind::Tram => 30.0, AKind::Train => if variant == 1 { 6.0 * 23.0 } else { 10.0 * 26.0 }, _ => 4.5 };
+        let mut route: VecDeque<Step> = lanes.iter().zip(dirs.iter()).map(|(&lane, &dir)| Step { lane, dir }).collect();
+        let first = route.pop_front().unwrap();
+        let stops = stop_step.iter().zip(stop_d.iter()).zip(stop_dep.iter()).map(|((&k, &sd), &dep)| (lanes[k as usize], sd, dep)).collect();
+        let lane_len = self.net.lanes[first.lane as usize].len;
+        let a = Agent {
+            kind, lane: first.lane, dir: first.dir, d: d.clamp(0.0, lane_len), v, len, v0: self.net.lanes[first.lane as usize].speed.max(8.0),
+            route, hist: VecDeque::new(), stopped: 0.0, arrived: 0.0, variant, lat: 0.0, dwell: 0.0, reserved: Vec::new(), alive: true,
+            trip: trip as i32, stops, stop_wait: 0.0,
+        };
+        self.agents.push(a);
+        true
+    }
+
+    pub fn has_trip(&self, trip: u32) -> bool {
+        self.agents.iter().any(|a| a.trip == trip as i32)
+    }
+
+    pub fn take_done(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.done)
+    }
+
     pub fn time(&self) -> f64 {
         self.t
     }
@@ -689,7 +782,10 @@ impl World {
         for a in &self.agents {
             let sections: Vec<(f32, f32)> = match a.kind {
                 AKind::Tram => vec![(0.0, 10.0), (10.4, 9.4), (20.2, 9.6)],
-                AKind::Train => (0..4).map(|k| (k as f32 * 26.0, 25.6)).collect(),
+                AKind::Train => {
+                    let (n, l) = if a.trip >= 0 && a.variant == 1 { (6, 23.0) } else if a.trip >= 0 { (10, 26.0) } else { (4, 26.0) };
+                    (0..n).map(|k| (k as f32 * l, l - 0.4)).collect()
+                }
                 _ => vec![(0.0, a.len)],
             };
             for (k, (off, slen)) in sections.iter().enumerate() {

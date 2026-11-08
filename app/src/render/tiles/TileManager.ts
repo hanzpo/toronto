@@ -389,6 +389,10 @@ export class TileManager {
           sliver = px < 0.6;
         }
         const net = t.L === 0 && this.netReady.has(`${t.tx}_${t.ty}`);
+        if (t.L > 0 && t.terrain) {
+          const sink = this.netReady.size > 0 && this.coversNet(t) ? -4 : 0;
+          if (t.terrain.position.y !== sink) { t.terrain.position.y = sink; t.terrain.updateMatrix(); }
+        }
         if (t.terrainFar) {
           // vector ground near, raster beyond ring 1 (same surface, cheaper)
           const far = d > ctx.view.r1 || net;
@@ -524,6 +528,15 @@ export class TileManager {
    * Off-screen children don't block refinement — they load at low priority so
    * rotating the camera rarely reveals anything missing.
    */
+  private coversNet(t: Tile): boolean {
+    const n = t.S / 1024;
+    for (const k of this.netReady) {
+      const [x, y] = k.split('_').map(Number);
+      if (x >= t.tx * n && x < (t.tx + 1) * n && y >= t.ty * n && y < (t.ty + 1) * n) return true;
+    }
+    return false;
+  }
+
   private visit(t: Tile, E: number, N: number, H: number): boolean {
     t.lastUsed = this.now;
     const d = this.tileDist(t, E, N, H);
