@@ -61,8 +61,6 @@ export class CameraController {
   private time = 0;
   private ray = new THREE.Raycaster();
   private ndc = new THREE.Vector2();
-  /** camera collision: smoothed fraction of the orbit distance that is free (1 = unobstructed) */
-  private collFrac = 1;
   /** camera collision: extra pitch (rad) that lifts the view over an obstacle */
   private collLift = 0;
   /** camera collision: heading offset (rad) that slides the view past an obstacle */
@@ -186,9 +184,6 @@ export class CameraController {
     this.holdZoomAnchor();
     this.collLift = 0;
     this.collYaw = 0;
-    const fi = this.freeFraction(this.cur);
-    if (fi < this.collFrac) this.collFrac += (fi - this.collFrac) * (1 - Math.exp(-dt * 30));
-    else this.collFrac += (fi - this.collFrac) * (1 - Math.exp(-dt * 3));
     this.apply();
   }
 
@@ -196,12 +191,16 @@ export class CameraController {
   apply() {
     const c = this.lifted(this.cur);
     const cp = Math.cos(c.pitch);
-    const dist = c.dist * Math.min(this.collFrac, this.freeFraction(c));
+    const dist = c.dist;
     const camE = c.e - Math.sin(c.heading) * cp * dist;
     const camN = c.n - Math.cos(c.heading) * cp * dist;
     let camH = c.h + Math.sin(c.pitch) * dist;
     const ground = this.host.heightAt(camE, camN);
     if (camH < ground + MIN_ALTITUDE) camH = ground + MIN_ALTITUDE;
+    if (this.collide && this.host.buildingTop) {
+      const top = this.host.buildingTop(camE, camN, camH);
+      if (top > camH - 1.5) camH = top + 1.5;
+    }
     const cam = this.host.camera;
     cam.position.set(camE, camH, -camN);
     cam.up.set(0, 1, 0);
