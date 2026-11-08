@@ -50,16 +50,19 @@ export class Ctx {
     this.props.push({ kind, x: p.x, y: p.y, z: p.z, h, p: extra });
   }
 
-  finish(): Built {
+  finish(origin?: { x: number; y: number }): Built {
     const meshes: Built['meshes'] = new Map();
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    const ox = origin?.x ?? 0, oy = origin?.y ?? 0;
     for (const [m, b] of this.sink.bufs) {
       if (!b.idx.length) continue;
-      meshes.set(m, { pos: new Float32Array(b.pos), uv: new Float32Array(b.uv), idx: new Uint32Array(b.idx) });
+      const pos = new Float32Array(b.pos.length);
       for (let i = 0; i < b.pos.length; i += 3) {
         x0 = Math.min(x0, b.pos[i]); x1 = Math.max(x1, b.pos[i]);
         y0 = Math.min(y0, b.pos[i + 1]); y1 = Math.max(y1, b.pos[i + 1]);
+        pos[i] = b.pos[i] - ox; pos[i + 1] = b.pos[i + 1] - oy; pos[i + 2] = b.pos[i + 2];
       }
+      meshes.set(m, { pos, uv: new Float32Array(b.uv), idx: new Uint32Array(b.idx) });
     }
     return {
       meshes, props: this.props, lanes: this.lanes, tracks: this.tracks, linear: this.linear, signals: this.signals,

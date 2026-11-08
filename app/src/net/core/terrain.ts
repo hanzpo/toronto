@@ -1,12 +1,30 @@
 import type { Ctx } from './ctx';
 import type { TerrainDesc } from './desc';
-import { pointInPoly, polyDist } from './geom';
 import type { Seg } from './model';
 import { segRange, variantAt } from './segments';
 
 const SINK = 0.05;
 const SLOPE = 0.5;
 const REACH = 40;
+const NODE_REACH = 14;
+
+function polyDistFast(x: number, y: number, px: number[], py: number[]): number {
+  let inside = false;
+  let best = Infinity;
+  const n = px.length;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const ax = px[j], ay = py[j], bx = px[i], by = py[i];
+    if ((by > y) !== (ay > y) && x < ((ax - bx) * (y - by)) / (ay - by) + bx) inside = !inside;
+    const dx = bx - ax, dy = by - ay;
+    const l2 = dx * dx + dy * dy;
+    let t = l2 > 0 ? ((x - ax) * dx + (y - ay) * dy) / l2 : 0;
+    t = t < 0 ? 0 : t > 1 ? 1 : t;
+    const ex = ax + dx * t - x, ey = ay + dy * t - y;
+    const d2 = ex * ex + ey * ey;
+    if (d2 < best) best = d2;
+  }
+  return inside ? 0 : Math.sqrt(best);
+}
 
 export const PORTAL = 4.5;
 
@@ -41,13 +59,13 @@ export function conformTerrain(ctx: Ctx, t: TerrainDesc) {
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, zmin = Infinity, zsum = 0;
     for (const p of f.pts) { x0 = Math.min(x0, p.x); x1 = Math.max(x1, p.x); y0 = Math.min(y0, p.y); y1 = Math.max(y1, p.y); zmin = Math.min(zmin, p.z); zsum += p.z; }
     const zm = zsum / f.pts.length;
-    const r = REACH;
+    const r = NODE_REACH;
+    const px = f.pts.map((q) => q.x), py = f.pts.map((q) => q.y);
     const i0 = Math.max(0, Math.floor((x0 - r - t.x0) / t.cell)), i1 = Math.min(t.nx - 1, Math.ceil((x1 + r - t.x0) / t.cell));
     const j0 = Math.max(0, Math.floor((y0 - r - t.y0) / t.cell)), j1 = Math.min(t.ny - 1, Math.ceil((y1 + r - t.y0) / t.cell));
     for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
-      const p = { x: t.x0 + i * t.cell, y: t.y0 + j * t.cell };
-      const inside = pointInPoly(p, f.pts);
-      const d = inside ? 0 : polyDist(p, f.pts);
+      const x = t.x0 + i * t.cell, y = t.y0 + j * t.cell;
+      const d = polyDistFast(x, y, px, py);
       if (d > r) continue;
       if (d <= t.cell * 0.75) apply(j * t.nx + i, -Infinity, zmin - SINK);
       else apply(j * t.nx + i, zm - SLOPE * d, zm + SLOPE * d);

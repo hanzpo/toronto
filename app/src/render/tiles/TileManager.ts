@@ -151,6 +151,9 @@ const MAX_BYTES = 900 * 1024 * 1024;
 const MAX_TILES = 1400;
 
 export class TileManager {
+  /** level-0 tiles the network engine (net/NetLayer) has data for, and those it has drawn */
+  netTiles = new Set<string>();
+  netReady = new Set<string>();
   manifest!: Manifest;
   root = new THREE.Group();
   houses = new HousePools();
@@ -385,13 +388,14 @@ export class TileManager {
           const px = ctx.pixelScale * Math.max((eye * t.S) / (d * (d + t.S)), (t.maxH - t.minH) / d);
           sliver = px < 0.6;
         }
+        const net = t.L === 0 && this.netReady.has(`${t.tx}_${t.ty}`);
         if (t.terrainFar) {
           // vector ground near, raster beyond ring 1 (same surface, cheaper)
-          const far = d > ctx.view.r1;
+          const far = d > ctx.view.r1 || net;
           t.terrain!.visible = layers.terrain && !sliver && !far && !hidden;
-          t.terrainFar.visible = layers.terrain && !sliver && far && !hidden;
+          t.terrainFar.visible = layers.terrain && !sliver && far && !hidden && !net;
         } else if (t.terrain) {
-          t.terrain.visible = layers.terrain && !sliver && !hidden;
+          t.terrain.visible = layers.terrain && !sliver && !hidden && !net;
           if (t.terrainCoarse) {
             // far level-1 / level-2 terrain: half-resolution index range
             const R = (t.L === 2 ? TERRAIN_COARSE_L2 : TERRAIN_COARSE_L1) * (t.terrainFarLod ? 0.9 : 1);
@@ -424,7 +428,7 @@ export class TileManager {
           // (< ~1.2°) cover no pixels worth a draw call
           const grazing = sliver || (d > ctx.view.r1 && (H - t.maxH) < d * 0.02);
           const m3 = mask & 3;
-          t.roads.visible = !grazing && !hidden && m3 !== 0 && !(m3 === 1 && t.railStart === 0) && !(m3 === 2 && t.railStart === t.roads.geometry.index!.count);
+          t.roads.visible = !net && !grazing && !hidden && m3 !== 0 && !(m3 === 1 && t.railStart === 0) && !(m3 === 2 && t.railStart === t.roads.geometry.index!.count);
         }
       }
       if (t.houses) {

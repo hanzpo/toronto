@@ -1,15 +1,25 @@
 import * as THREE from 'three/webgpu';
 import type { Mat } from '../core/assets';
 import type { Built, LinearOut, TrackOut } from '../core/model';
-import { flat, material } from './materials';
+import { flat, material, terrainVC } from './materials';
+
+const LAND: Record<number, number> = {
+  0: 0x8d9a62, 1: 0x5f87a3, 2: 0x6f9149, 3: 0x4f6435, 4: 0x7d9655, 5: 0x8a8781, 6: 0x86827a, 7: 0x9c9862, 8: 0xd2c39a,
+  9: 0x77746e, 10: 0x857d72, 11: 0x6d6b67, 12: 0x76935a, 13: 0x6a9a4a, 15: 0x77746e, 16: 0x67744d, 17: 0x7f9a58,
+  18: 0x96866a, 19: 0x5a9142, 21: 0xa9a49a, 23: 0x8aa864,
+};
 import { PropsView } from './props';
 
-const v3 = (x: number, y: number, z: number) => new THREE.Vector3(x, z, -y);
+let OX = 0, OY = 0;
+const v3 = (x: number, y: number, z: number) => new THREE.Vector3(x - OX, z, -(y - OY));
 
 export class NetView {
   group = new THREE.Group();
   props: PropsView;
-  constructor(b: Built) {
+  private ground?: Uint8Array;
+  constructor(b: Built, origin = { x: 0, y: 0 }, ground?: Uint8Array) {
+    OX = origin.x; OY = origin.y;
+    this.ground = ground;
     for (const [m, buf] of b.meshes) this.group.add(this.mesh(m, buf));
     if (b.terrain) this.group.add(this.terrain(b.terrain));
     this.group.add(this.tracks(b.tracks));
@@ -38,7 +48,7 @@ export class NetView {
     const pos = new Float32Array(t.nx * t.ny * 3);
     for (let j = 0; j < t.ny; j++) for (let i = 0; i < t.nx; i++) {
       const k = (j * t.nx + i) * 3;
-      pos[k] = t.x0 + i * t.cell; pos[k + 1] = t.h[j * t.nx + i]; pos[k + 2] = -(t.y0 + j * t.cell);
+      pos[k] = t.x0 - OX + i * t.cell; pos[k + 1] = t.h[j * t.nx + i]; pos[k + 2] = -(t.y0 - OY + j * t.cell);
     }
     const idx = new Uint32Array((t.nx - 1) * (t.ny - 1) * 6);
     let q = 0;
@@ -50,7 +60,22 @@ export class NetView {
     g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
     g.setIndex(new THREE.BufferAttribute(idx, 1));
     g.computeVertexNormals();
-    const mesh = new THREE.Mesh(g, material('terrain'));
+    let mat = material('terrain');
+    if (this.ground) {
+      const col = new Float32Array(t.nx * t.ny * 3);
+      const c = new THREE.Color();
+      for (let j = 0; j < t.ny; j++) for (let i = 0; i < t.nx; i++) {
+        const lx = t.x0 - OX + i * t.cell, ly = t.y0 - OY + j * t.cell;
+        const gi = Math.min(255, Math.max(0, Math.floor(lx / 4))), gj = Math.min(255, Math.max(0, Math.floor(ly / 4)));
+        const cls = this.ground[gj * 256 + gi];
+        c.set(LAND[cls] ?? LAND[0]);
+        const k = (j * t.nx + i) * 3;
+        col[k] = c.r; col[k + 1] = c.g; col[k + 2] = c.b;
+      }
+      g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      mat = terrainVC();
+    }
+    const mesh = new THREE.Mesh(g, mat);
     mesh.receiveShadow = true;
     mesh.name = 'terrain';
     return mesh;

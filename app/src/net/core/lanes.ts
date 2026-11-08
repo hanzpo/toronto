@@ -14,7 +14,13 @@ export function linkLanes(ctx: Ctx) {
   for (const lanes of byNode.values()) {
     const veh = lanes.filter((l) => l.kind !== 'walk');
     const cum = new Map<LaneOut, number[]>();
-    for (const l of lanes) cum.set(l, lengths(l));
+    const bb = new Map<LaneOut, [number, number, number, number]>();
+    for (const l of lanes) {
+      cum.set(l, lengths(l));
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const p of l.pts) { x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y); x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y); }
+      bb.set(l, [x0, y0, x1, y1]);
+    }
     for (let i = 0; i < lanes.length; i++) {
       for (let j = i + 1; j < lanes.length; j++) {
         const A = lanes[i], B = lanes[j];
@@ -22,6 +28,9 @@ export function linkLanes(ctx: Ctx) {
         if (A.kind === 'walk' && !A.crosswalk) continue;
         if (B.kind === 'walk' && !B.crosswalk) continue;
         if (A.prev.length && B.prev.length && A.prev.some((p) => B.prev.includes(p)) && A.next.some((p) => B.next.includes(p))) continue;
+        const ba = bb.get(A)!, b2 = bb.get(B)!;
+        const sameNext = A.next.length && B.next.length && A.next[0] === B.next[0];
+        if (!sameNext && (ba[2] < b2[0] || b2[2] < ba[0] || ba[3] < b2[1] || b2[3] < ba[1])) continue;
         const ca = cum.get(A)!, cb = cum.get(B)!;
         let hit: { s: number; os: number } | null = null;
         for (let p = 0; p < A.pts.length - 1 && !hit; p++) {

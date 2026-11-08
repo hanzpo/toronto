@@ -1,5 +1,5 @@
 import * as THREE from 'three/webgpu';
-import { Fn, float, vec2, vec3, texture, positionWorld, mix, fract, abs, smoothstep, max, sin, floor, uv, normalWorld } from 'three/tsl';
+import { Fn, float, vec2, vec3, texture, positionWorld, mix, fract, abs, smoothstep, max, sin, floor, uv, normalWorld, attribute } from 'three/tsl';
 import type { Mat } from '../core/assets';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -97,6 +97,25 @@ export function material(m: Mat): THREE.MeshStandardNodeMaterial {
   if (s.offset) { mat.polygonOffset = true; mat.polygonOffsetFactor = s.offset; mat.polygonOffsetUnits = s.offset; }
   cache.set(m, mat);
   return mat;
+}
+
+let tvc: THREE.MeshStandardNodeMaterial | null = null;
+export function terrainVC(): THREE.MeshStandardNodeMaterial {
+  if (tvc) return tvc;
+  const m = new THREE.MeshStandardNodeMaterial({ roughness: 1, metalness: 0 });
+  const wp = positionWorld.xz;
+  m.colorNode = Fn(() => {
+    const base: N = attribute('color', 'vec3');
+    const t = texture(tex('grass_color.webp'), wp.mul(0.12)).rgb;
+    const lum = t.dot(vec3(0.299, 0.587, 0.114));
+    const n1 = vnoise(wp.mul(0.35)), n2 = vnoise(wp.mul(2.3));
+    let c: N = base.mul(mix(float(1), lum.mul(2.2), 0.35));
+    c = c.mul(mix(float(1), n1.mul(0.6).add(n2.mul(0.4)).mul(0.6).add(0.7), 0.3));
+    const slope = float(1).sub(normalWorld.y);
+    return mix(c, vec3(0.42, 0.36, 0.27), smoothstep(0.3, 0.65, slope).mul(0.6));
+  })();
+  tvc = m;
+  return m;
 }
 
 export function flat(color: number, rough = 0.8, metal = 0, emissive?: number): THREE.MeshStandardNodeMaterial {

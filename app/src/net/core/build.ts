@@ -32,7 +32,7 @@ function segGeometry(d: SegDesc, a: Asset, pa0: V2, pb0: V2): V2[] {
   return fillet(ctrl, d.r ?? Math.max(a.rh, 8));
 }
 
-export function build(desc: NetDesc): Built {
+export function build(desc: NetDesc, opts: { origin?: { x: number; y: number } } = {}): Built {
   if (desc.assets) registerAssets(desc.assets);
   const ctx = new Ctx(desc);
   const nodes = new Map<string, Node>();
@@ -81,7 +81,7 @@ export function build(desc: NetDesc): Built {
     conformTerrain(ctx, desc.terrain);
     ctx.footprints = keepF;
   }
-  return ctx.finish();
+  return ctx.finish(opts.origin);
 }
 
 function makeLeg(seg: Seg, end: 'a' | 'b', node: Node): Leg {
