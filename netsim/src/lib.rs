@@ -1011,7 +1011,22 @@ impl World {
     pub fn frame2(&mut self) -> Vec<f32> {
         let mut out = Vec::with_capacity(self.agents.len() * 14);
         for a in &self.agents {
-            let flags = if a.acc < -0.6 || a.v < 0.2 { 1.0 } else { 0.0 };
+            let mut flags = if a.acc < -0.6 || a.v < 0.2 { 1.0 } else { 0.0 };
+            if a.kind == AKind::Car || a.kind == AKind::Bus {
+                let rem = if a.lane == OFF_NET { f32::INFINITY } else { self.net.lanes[a.lane as usize].len - a.d };
+                let turn = if self.net.lanes.get(a.lane as usize).map_or(false, |l| l.node.is_some()) {
+                    self.net.lanes[a.lane as usize].turn
+                } else if rem < 45.0 {
+                    a.route.front().map_or(0, |s| self.net.lanes[s.lane as usize].turn)
+                } else {
+                    0
+                };
+                if turn == 2 {
+                    flags += 4.0;
+                } else if turn == 1 {
+                    flags += 8.0;
+                }
+            }
             if let Some(f) = a.free {
                 let (c, s) = (f.h.cos(), f.h.sin());
                 let half = if a.kind == AKind::Ped { 0.2 } else { a.len * 0.5 };

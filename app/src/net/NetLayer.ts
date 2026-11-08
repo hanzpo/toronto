@@ -7,8 +7,9 @@ import { NetView } from './view/NetView';
 import type { NetBuilt } from './worker';
 
 const S = 1024;
-const RADIUS = 1700;
-const KEEP = 2600;
+const RADIUS = 2600;
+const KEEP = 3400;
+const PROPS = 1400;
 const MAX_ALT = 3500;
 
 interface NetTile { key: string; tx: number; ty: number; state: 'loading' | 'ready' | 'empty'; view?: NetView; group?: THREE.Group; nodeIds?: string[]; terrain?: Built['terrain']; solids?: { e: number; n: number; r: number }[] }
@@ -78,7 +79,12 @@ export class NetLayer implements Layer {
     const sig = this.signals;
     const blink = Math.floor(performance.now() / 500) % 2 === 0;
     for (const t of this.tiles.values()) {
-      if (t.state !== 'ready' || !t.view || !t.nodeIds || !sig) continue;
+      if (t.state !== 'ready' || !t.view) continue;
+      const d = Math.hypot(Math.max(0, Math.abs(E - (t.tx + 0.5) * S) - S / 2), Math.max(0, Math.abs(N - (t.ty + 0.5) * S) - S / 2));
+      t.view.props.group.visible = d < PROPS && ctx.altitude < 1500;
+    }
+    for (const t of this.tiles.values()) {
+      if (t.state !== 'ready' || !t.view || !t.nodeIds || !sig || !t.view.props.group.visible) continue;
       const ids = t.nodeIds;
       t.view.props.setSignals((ni, g) => sig.signal(ids[ni], g));
       t.view.props.setGates((ni) => { const v = sig.gate(ids[ni]); return { down: Math.min(1, v * 1.4), flash: v > 0 && blink }; });
