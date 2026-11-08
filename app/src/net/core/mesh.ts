@@ -19,8 +19,11 @@ export class MeshBuf {
 
 export class Sink {
   bufs = new Map<Mat, MeshBuf>();
+  private scratch = new MeshBuf();
+  mute = false;
 
   buf(m: Mat) {
+    if (this.mute) { this.scratch.pos.length = 0; this.scratch.uv.length = 0; this.scratch.idx.length = 0; return this.scratch; }
     let b = this.bufs.get(m);
     if (!b) { b = new MeshBuf(); this.bufs.set(m, b); }
     return b;

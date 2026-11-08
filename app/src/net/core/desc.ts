@@ -1,4 +1,5 @@
 import type { V2 } from './geom';
+import type { Asset } from './assets';
 
 export type Control = 'auto' | 'signal' | 'stop' | 'allstop' | 'yield' | 'none';
 
@@ -55,6 +56,8 @@ export interface NetDesc {
   nodes: NodeDesc[];
   segments: SegDesc[];
   terrain?: TerrainDesc;
+  assets?: Partial<Asset>[];
+  own?: { segs: string[]; nodes: string[] };
 }
 
 export class NetBuilder {

@@ -277,6 +277,10 @@ platformAsset('platform_go_r', 7, 'right', goSlots);
 platformAsset('platform_subway', 10, 'both', subSlots);
 platformAsset('platform_tram', 3, 'both', [{ kind: 'shelter', spacing: 30, phase: 10, at: 0.1 }]);
 
+export function registerAssets(list: Partial<Asset>[]) {
+  for (const a of list) if (a.id && !ASSETS[a.id]) ASSETS[a.id] = { ...base, ...a } as Asset;
+}
+
 export function asset(id: string): Asset {
   const a = ASSETS[id];
   if (!a) throw new Error(`unknown asset ${id}`);

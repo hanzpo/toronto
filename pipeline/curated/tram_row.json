@@ -1,0 +1,4 @@
+{
+  "about": "Streets whose streetcar tracks run in a raised centre right-of-way instead of in the traffic lanes. The mapping turns their folded tracks into a transit_row band (docs/CROSS_SECTION.md). Sources: TTC Spadina (1997) and St Clair (2010) right-of-way projects, Queens Quay West (1990, 2015).",
+  "streets": ["Spadina Avenue", "St. Clair Avenue West", "Queens Quay West", "The Queensway", "Queens Quay East"]
+}

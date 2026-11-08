@@ -1,4 +1,4 @@
-import { asset as getAsset, layout, oneway, type Asset } from './assets';
+import { asset as getAsset, layout, oneway, registerAssets, type Asset } from './assets';
 import type { NetDesc, SegDesc } from './desc';
 import { type V2, add, angle, left, mul, norm, sub, dist } from './geom';
 import { Path, fillet, hermite, profileFn } from './path';
@@ -33,6 +33,7 @@ function segGeometry(d: SegDesc, a: Asset, pa0: V2, pb0: V2): V2[] {
 }
 
 export function build(desc: NetDesc): Built {
+  if (desc.assets) registerAssets(desc.assets);
   const ctx = new Ctx(desc);
   const nodes = new Map<string, Node>();
   for (const nd of desc.nodes) nodes.set(nd.id, { desc: nd, p: { x: nd.x, y: nd.y }, z: nd.z, legs: [], kind: 'end', control: nd.control ?? 'auto' });
@@ -56,13 +57,30 @@ export function build(desc: NetDesc): Built {
   }
   ctx.segs = segs;
   ctx.nodes = [...nodes.values()];
-  for (const n of ctx.nodes) { n.legs.sort((p, q) => p.ang - q.ang); classify(ctx, n); }
+  for (const n of ctx.nodes) {
+    const key = (l: (typeof n.legs)[number]) => Math.atan2(l.o.y + l.u.y * 25 - n.p.y, l.o.x + l.u.x * 25 - n.p.x);
+    n.legs.sort((p, q) => key(p) - key(q));
+    classify(ctx, n);
+  }
   for (const n of ctx.nodes) setbacks(ctx, n);
   resolveStructures(ctx);
-  for (const s of segs) buildSegment(ctx, s);
-  for (const n of ctx.nodes) buildNode(ctx, n);
+  const ownS = desc.own ? new Set(desc.own.segs) : null, ownN = desc.own ? new Set(desc.own.nodes) : null;
+  const guarded = (owned: boolean, f: () => void) => {
+    if (owned) { f(); return; }
+    const np = ctx.props.length, nt = ctx.tracks.length, nl = ctx.linear.length, nf = ctx.footprints.length;
+    ctx.sink.mute = true;
+    f();
+    ctx.sink.mute = false;
+    ctx.props.length = np; ctx.tracks.length = nt; ctx.linear.length = nl; ctx.footprints.length = nf;
+  };
+  for (const s of segs) guarded(!ownS || ownS.has(s.desc.id), () => buildSegment(ctx, s));
+  for (const n of ctx.nodes) guarded(!ownN || ownN.has(n.desc.id), () => buildNode(ctx, n));
   linkLanes(ctx);
-  if (desc.terrain) conformTerrain(ctx, desc.terrain);
+  if (desc.terrain) {
+    const keepF = ctx.footprints;
+    conformTerrain(ctx, desc.terrain);
+    ctx.footprints = keepF;
+  }
   return ctx.finish();
 }
 

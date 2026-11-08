@@ -56,6 +56,11 @@ export function classify(ctx: Ctx, n: Node) {
     if (roads.some((l) => l.seg.asset.rank === 0)) ctx.review.push({ at: n.p, kind: 'level_crossing_on_freeway', note: n.desc.id });
     return;
   }
+  if (roads.length && trams.length && (roads.length !== 2 || Math.abs(wrapPi(roads[0].ang - roads[1].ang - Math.PI)) > 0.5)) {
+    n.kind = 'junction';
+    if (n.control === 'auto') n.control = 'signal';
+    return;
+  }
   if (roads.length && trams.length) { n.kind = 'tram_crossing'; return; }
   if (roads.length === 2 && paths.length > 0) { n.kind = 'crosswalk'; return; }
   if (roads.length === 0) {
@@ -93,6 +98,7 @@ function crosswalkWidth(n: Node) {
 }
 
 export function setbacks(ctx: Ctx, n: Node) {
+  if (!n.legs.length) return;
   const L = n.legs;
   for (const l of L) l.cut = null;
   switch (n.kind) {
@@ -133,7 +139,7 @@ function boxSetbacks(_ctx: Ctx, n: Node) {
     const j = (i + 1) % k;
     const a = L[i], b = L[j];
     const D = wrap2Pi(b.ang - a.ang);
-    const pi = add(n.p, mul(a.n, a.curbL)), pj = add(n.p, mul(b.n, b.curbR));
+    const pi = add(a.o, mul(a.n, a.curbL)), pj = add(b.o, mul(b.n, b.curbR));
     const c: Corner = { i, j, arc: false, ti: 0, tj: 0 };
     if (curbed && D < STRAIGHT && D > 0.12) {
       const R = Math.max(1, Math.min(a.seg.asset.radius || 1.5, b.seg.asset.radius || 1.5));
@@ -147,8 +153,8 @@ function boxSetbacks(_ctx: Ctx, n: Node) {
       if (x && x.t > 0 && x.u > 0) { c.ti = x.t + 0.5; c.tj = x.u + 0.5; }
     }
     if (D < STRAIGHT) {
-      const x = lineX(add(n.p, mul(a.n, a.rowL)), a.u, add(n.p, mul(b.n, b.rowR)), b.u);
-      if (x && x.t > 0 && x.u > 0) { c.P = add(add(n.p, mul(a.n, a.rowL)), mul(a.u, x.t)); c.tPi = x.t; c.tPj = x.u; }
+      const x = lineX(add(a.o, mul(a.n, a.rowL)), a.u, add(b.o, mul(b.n, b.rowR)), b.u);
+      if (x && x.t > 0 && x.u > 0) { c.P = add(add(a.o, mul(a.n, a.rowL)), mul(a.u, x.t)); c.tPi = x.t; c.tPj = x.u; }
     }
     if (c.arc && c.R) {
       const wa = Math.abs(a.rowL - a.curbL), wb = Math.abs(b.curbR - b.rowR);
@@ -221,6 +227,7 @@ function crossingSetbacks(_ctx: Ctx, n: Node) {
 }
 
 export function buildNode(ctx: Ctx, n: Node) {
+  if (!n.legs.length) return;
   switch (n.kind) {
     case 'junction': case 'path_junction': case 'transition':
       boxNode(ctx, n);
@@ -584,18 +591,12 @@ function trackEnd(_ctx: Ctx, q: LegLane, l: Leg): P3 {
 function groupAxes(n: Node): number[] {
   const L = n.legs;
   const g = L.map(() => -1);
-  let next = 0;
+  const axes: number[] = [];
   for (let i = 0; i < L.length; i++) {
-    if (g[i] >= 0) continue;
-    g[i] = next;
-    let best = -1, bd = 0.6;
-    for (let j = 0; j < L.length; j++) {
-      if (j === i || g[j] >= 0) continue;
-      const d = Math.abs(wrapPi(L[i].ang - L[j].ang - Math.PI));
-      if (d < bd) { bd = d; best = j; }
-    }
-    if (best >= 0) g[best] = next;
-    next++;
+    const a = ((L[i].ang % Math.PI) + Math.PI) % Math.PI;
+    let k = axes.findIndex((x) => { const d = Math.abs(a - x); return Math.min(d, Math.PI - d) < 0.5; });
+    if (k < 0) { axes.push(a); k = axes.length - 1; }
+    g[i] = k;
   }
   return g;
 }
@@ -1069,7 +1070,7 @@ function mergeSetbacks(ctx: Ctx, n: Node) {
     const side = Math.sign(T.x * R.u.y - T.y * R.u.x) || -1;
     const mLat = side > 0 ? (dot(M.n, left(T)) > 0 ? M.curbL : M.curbR) : (dot(M.n, left(T)) > 0 ? M.curbR : M.curbL);
     const rLat = side > 0 ? (dot(R.n, left(T)) > 0 ? R.curbR : R.curbL) : (dot(R.n, left(T)) > 0 ? R.curbL : R.curbR);
-    const pm = add(n.p, mul(M.n, mLat)), pr = add(n.p, mul(R.n, rLat));
+    const pm = add(M.o, mul(M.n, mLat)), pr = add(R.o, mul(R.n, rLat));
     const x = lineX(pm, M.u, pr, R.u);
     let tR = 0, tM = 0;
     if (x && x.t > 0 && x.u > 0) { tM = x.t; tR = x.u; }
@@ -1118,6 +1119,7 @@ function mergeNode(ctx: Ctx, n: Node) {
   const dst = dstLegs.flatMap((l) => outs(l).map((q) => ({ q, l, lat: posLat(q, l) })));
   const used = new Set<LegLane>();
   for (const e of src) {
+    if (!dst.length) break;
     const near = dst.filter((x) => Math.abs(x.lat - e.lat) < 1.2);
     const targets = near.length ? near : [dst.reduce((b, x) => (Math.abs(x.lat - e.lat) < Math.abs(b.lat - e.lat) ? x : b))];
     for (const x of targets) {

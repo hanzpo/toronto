@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { build } from '../net/core/build';
 import { NetView } from '../net/view/NetView';
 import { LAYOUTS } from './layouts';
+import { loadTile } from '../net/tiles';
 import { AgentsView } from '../net/view/agents';
 import { simJson } from '../net/sim/encode';
 import initSim, { World } from '../net/sim/pkg/netsim';
@@ -46,7 +47,14 @@ sun.shadow.normalBias = 0.05;
 scene.add(sun);
 
 const t0 = performance.now();
-const built = build(layout.desc());
+const mapArg = q.get('map');
+let desc = layout.desc();
+if (mapArg) {
+  const [tx, ty] = mapArg.split(',').map(Number);
+  const t = await loadTile('/data-net/net', tx, ty);
+  if (t) desc = t;
+}
+const built = build(desc);
 const ms = performance.now() - t0;
 const view = new NetView(built);
 scene.add(view.group);
