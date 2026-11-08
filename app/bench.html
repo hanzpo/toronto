@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Network bench</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #c9d6e2; font: 13px -apple-system, system-ui, sans-serif; }
+      #view { position: fixed; inset: 0; }
+      #list { position: fixed; top: 12px; left: 12px; background: rgba(255,255,255,0.92); border-radius: 8px; padding: 6px; max-height: calc(100% - 24px); overflow: auto; }
+      #list a { display: block; padding: 5px 8px; color: #222; text-decoration: none; border-radius: 5px; }
+      #list a.on { background: #222; color: #fff; }
+      #info { position: fixed; bottom: 12px; left: 12px; background: rgba(255,255,255,0.92); border-radius: 8px; padding: 6px 10px; white-space: pre; }
+    </style>
+  </head>
+  <body>
+    <div id="view"></div>
+    <div id="list"></div>
+    <div id="info"></div>
+    <script type="module" src="/src/bench/main.ts"></script>
+  </body>
+</html>
