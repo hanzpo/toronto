@@ -29,8 +29,8 @@ const vnoise = (p: N): N => {
 interface Spec { color: number; tex?: string; scale?: number; rough?: number; metal?: number; detail?: number; joints?: 'sidewalk' | 'slab' | 'deck'; offset?: number }
 
 const SPECS: Record<Mat, Spec> = {
-  asphalt: { color: 0x4a4a48, tex: 'asphalt_color.webp', scale: 0.25, rough: 0.92, detail: 0.25 },
-  asphalt_dark: { color: 0x3c3c3b, tex: 'asphalt_color.webp', scale: 0.25, rough: 0.92, detail: 0.25 },
+  asphalt: { color: 0x5e5e5b, tex: 'asphalt_color.webp', scale: 0.25, rough: 0.92, detail: 0.25 },
+  asphalt_dark: { color: 0x4c4c4a, tex: 'asphalt_color.webp', scale: 0.25, rough: 0.92, detail: 0.25 },
   concrete: { color: 0xb3afa6, tex: 'concrete_color.webp', scale: 0.3, rough: 0.85, joints: 'sidewalk' },
   pavers: { color: 0x8a5a44, tex: 'pavers_color.webp', scale: 0.5, rough: 0.85 },
   grass: { color: 0x6f8f4a, tex: 'grass_color.webp', scale: 0.2, rough: 1, detail: 0.35 },
@@ -94,7 +94,6 @@ export function material(m: Mat): THREE.MeshStandardNodeMaterial {
     }
     return c;
   })();
-  if (s.offset) { mat.polygonOffset = true; mat.polygonOffsetFactor = s.offset; mat.polygonOffsetUnits = s.offset; }
   cache.set(m, mat);
   return mat;
 }

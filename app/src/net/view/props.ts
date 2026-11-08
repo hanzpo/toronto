@@ -85,8 +85,6 @@ const STATIC: Record<string, () => Part[]> = {
 
 export class PropsView {
   group = new THREE.Group();
-  private signalHeads: { node: number; group: number; meshes: [THREE.Mesh, THREE.Mesh, THREE.Mesh] }[] = [];
-  private gates: { node: number; arm: THREE.Object3D; lights: THREE.Mesh[] }[] = [];
   private lit = { red: flat(0xff2a1a, 0.4, 0, 0xff2a1a), amber: flat(0xffa41a, 0.4, 0, 0xffa41a), green: flat(0x3dff7a, 0.4, 0, 0x2ad46a), off: flat(0x222324, 0.5) };
 
   constructor(props: PropOut[], toThree: (x: number, y: number, z: number) => THREE.Vector3) {
@@ -114,9 +112,74 @@ export class PropsView {
         const o = this.special(p);
         if (!o) continue;
         o.position.copy(toThree(p.x, p.y, p.z));
-        this.group.add(o);
+        this.staging.add(o);
       }
     }
+    this.bake();
+  }
+
+  private staging = new THREE.Group();
+  private lampMesh: THREE.InstancedMesh | null = null;
+  private lampInfo: { node: number; group: number; k: number; gate: boolean; idx: number }[] = [];
+  private arms: { mesh: THREE.Mesh; base: THREE.Matrix4; node: number }[] = [];
+
+  private bake() {
+    const root = this.staging;
+    root.updateMatrixWorld(true);
+    const byMat = new Map<THREE.Material, THREE.BufferGeometry[]>();
+    const lamps: { m: THREE.Matrix4; info: { node: number; group: number; k: number; gate: boolean } }[] = [];
+    const armRoots: THREE.Object3D[] = [];
+    root.traverse((o) => { if (o.userData.arm) armRoots.push(o); });
+    const inArm = (o: THREE.Object3D) => { for (let q: THREE.Object3D | null = o; q; q = q.parent) if (q.userData.arm) return true; return false; };
+    root.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      if (mesh.userData.lamp) { lamps.push({ m: mesh.matrixWorld.clone(), info: mesh.userData.lamp }); return; }
+      if (inArm(mesh)) return;
+      const g = (mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry.clone()).applyMatrix4(mesh.matrixWorld);
+      g.deleteAttribute('uv');
+      const a = byMat.get(mesh.material as THREE.Material) ?? [];
+      a.push(g);
+      byMat.set(mesh.material as THREE.Material, a);
+    });
+    for (const [m, gs] of byMat) {
+      const merged = new THREE.Mesh(mergeGeometries(gs)!, m);
+      merged.castShadow = true;
+      merged.receiveShadow = true;
+      this.group.add(merged);
+    }
+    if (lamps.length) {
+      const geo = new THREE.CylinderGeometry(0.11, 0.11, 0.05, 10).rotateZ(Math.PI / 2);
+      const im = new THREE.InstancedMesh(geo, new THREE.MeshBasicNodeMaterial({ color: 0xffffff }), lamps.length);
+      lamps.forEach((l, i) => { im.setMatrixAt(i, l.m); im.setColorAt(i, OFF); this.lampInfo.push({ ...l.info, idx: i }); });
+      this.lampMesh = im;
+      this.group.add(im);
+    }
+    for (const a of armRoots) {
+      const gs: THREE.BufferGeometry[] = [];
+      a.updateMatrixWorld(true);
+      const inv = a.matrixWorld.clone().invert();
+      a.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh) return;
+        const g = (mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry.clone()).applyMatrix4(new THREE.Matrix4().multiplyMatrices(inv, mesh.matrixWorld));
+        g.deleteAttribute('uv');
+        const c = ((mesh.material as THREE.MeshStandardNodeMaterial).color ?? new THREE.Color(1, 1, 1));
+        const col = new Float32Array(g.attributes.position.count * 3);
+        for (let i = 0; i < col.length; i += 3) { col[i] = c.r; col[i + 1] = c.g; col[i + 2] = c.b; }
+        g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+        gs.push(g);
+      });
+      if (!gs.length) continue;
+      const mesh = new THREE.Mesh(mergeGeometries(gs)!, ARM_MAT);
+      mesh.matrixAutoUpdate = false;
+      mesh.castShadow = true;
+      const base = a.matrixWorld.clone();
+      mesh.matrix.copy(base);
+      this.group.add(mesh);
+      this.arms.push({ mesh, base, node: a.userData.arm.node });
+    }
+    root.clear();
   }
 
   private special(p: PropOut): THREE.Object3D | null {
@@ -138,7 +201,9 @@ export class PropsView {
         add(box(0.04, 1.25, 0.6, -0.17, 0, 0), M.black, h);
         const lamps: THREE.Mesh[] = [];
         for (const [k, yy] of [[0, 0.32], [1, 0], [2, -0.32]] as const) {
-          const l = add(new THREE.CylinderGeometry(0.11, 0.11, 0.04, 12).rotateZ(Math.PI / 2).translate(0.17, yy, 0), this.lit.off, h);
+          const l = add(new THREE.BufferGeometry(), this.lit.off, h);
+          l.position.set(0.17, yy, 0);
+          l.userData.lamp = { node: P.node ?? -1, group: 0, k, gate: false };
           lamps[k] = l;
         }
         parent.add(h);
@@ -154,19 +219,18 @@ export class PropsView {
         for (let k = 0; k < n; k++) {
           const x = reach * (n === 1 ? 0.75 : 0.45 + 0.5 * k);
           const lamps = head(arm, x, 5.6, 0, (p.h - (P.armDir ?? 0)));
-          this.signalHeads.push({ node: P.node ?? -1, group: P.group ?? 0, meshes: lamps });
+          for (const l of lamps) l.userData.lamp.group = P.group ?? 0;
         }
       }
       const lamps = head(g, 0, 3.6, 0, p.h);
-      lamps.forEach((l) => l.position.x += 0.0);
+      for (const l of lamps) l.userData.lamp.group = P.group ?? 0;
       const holder = g.children[g.children.length - 1];
       holder.position.add(new THREE.Vector3(Math.cos(p.h) * 0.25, 0, -Math.sin(p.h) * 0.25));
-      this.signalHeads.push({ node: P.node ?? -1, group: P.group ?? 0, meshes: lamps });
       if (P.side !== undefined) {
         const s = head(g, 0, 3.6, 0, P.side);
+        for (const l of s) l.userData.lamp.group = P.sideGroup ?? 0;
         const hh = g.children[g.children.length - 1];
         hh.position.add(new THREE.Vector3(Math.cos(P.side) * 0.25, 0, -Math.sin(P.side) * 0.25));
-        this.signalHeads.push({ node: P.node ?? -1, group: P.sideGroup ?? 0, meshes: s });
       }
       return g;
     }
@@ -178,22 +242,24 @@ export class PropsView {
       add(box(0.03, 0.22, 1.25, 0.12, 3.9, 0).rotateX(0.785), M.white, cb);
       add(box(0.03, 0.22, 1.25, 0.12, 3.9, 0).rotateX(-0.785), M.white, cb);
       add(box(0.05, 0.25, 1.4, 0.12, 2.8, 0), M.black, cb);
-      const lights = [
-        add(new THREE.CylinderGeometry(0.15, 0.15, 0.05, 12).rotateZ(Math.PI / 2).translate(0.16, 2.8, 0.5), this.lit.off, cb),
-        add(new THREE.CylinderGeometry(0.15, 0.15, 0.05, 12).rotateZ(Math.PI / 2).translate(0.16, 2.8, -0.5), this.lit.off, cb),
-      ];
+      for (const [k, zz] of [[0, 0.5], [1, -0.5]] as const) {
+        const l = add(new THREE.BufferGeometry(), this.lit.off, cb);
+        l.position.set(0.16, 2.8, zz);
+        l.scale.set(1.35, 1.35, 1.35);
+        l.userData.lamp = { node: P.node ?? -1, group: 0, k, gate: true };
+      }
       add(box(0.6, 1.1, 0.5, 0, 0.55, 0), M.concrete);
       const pivot = new THREE.Group();
       pivot.position.y = 1.05;
       pivot.rotation.y = P.armDir ?? 0;
       g.add(pivot);
       const arm = new THREE.Group();
+      arm.userData.arm = { node: P.node ?? -1 };
       pivot.add(arm);
       const L = P.arm ?? 4;
       for (let k = 0; k < Math.ceil(L / 0.6); k++) {
         add(box(Math.min(0.6, L - k * 0.6), 0.1, 0.1, 0.3 + k * 0.6, 0, 0), k % 2 ? M.white : M.red, arm);
       }
-      this.gates.push({ node: P.node ?? -1, arm, lights });
       return g;
     }
     if (p.kind === 'pier') {
@@ -215,20 +281,36 @@ export class PropsView {
   }
 
   setSignals(state: (node: number, group: number) => 'red' | 'amber' | 'green') {
-    for (const s of this.signalHeads) {
-      const st = state(s.node, s.group);
-      s.meshes[0].material = st === 'red' ? this.lit.red : this.lit.off;
-      s.meshes[1].material = st === 'amber' ? this.lit.amber : this.lit.off;
-      s.meshes[2].material = st === 'green' ? this.lit.green : this.lit.off;
+    if (!this.lampMesh) return;
+    let dirty = false;
+    for (const l of this.lampInfo) {
+      if (l.gate) continue;
+      const st = state(l.node, l.group);
+      const on = (l.k === 0 && st === 'red') || (l.k === 1 && st === 'amber') || (l.k === 2 && st === 'green');
+      const c = on ? (l.k === 0 ? RED : l.k === 1 ? AMBER : GREEN) : OFF;
+      this.lampMesh.setColorAt(l.idx, c);
+      dirty = true;
     }
+    if (dirty && this.lampMesh.instanceColor) this.lampMesh.instanceColor.needsUpdate = true;
   }
 
   setGates(state: (node: number) => { down: number; flash: boolean }) {
-    for (const g of this.gates) {
-      const s = state(g.node);
-      g.arm.rotation.z = (1 - s.down) * (Math.PI / 2 - 0.05);
-      g.lights[0].material = s.flash ? this.lit.red : this.lit.off;
-      g.lights[1].material = s.flash ? this.lit.off : (s.down > 0 ? this.lit.red : this.lit.off);
+    for (const a of this.arms) {
+      const s = state(a.node);
+      a.mesh.matrix.multiplyMatrices(a.base, ROT.makeRotationZ((1 - s.down) * (Math.PI / 2 - 0.05)));
+      a.mesh.matrixWorldNeedsUpdate = true;
     }
+    if (!this.lampMesh) return;
+    for (const l of this.lampInfo) {
+      if (!l.gate) continue;
+      const s = state(l.node);
+      const on = s.down > 0 && (l.k === 0 ? s.flash : !s.flash);
+      this.lampMesh.setColorAt(l.idx, on ? RED : OFF);
+    }
+    if (this.lampMesh.instanceColor) this.lampMesh.instanceColor.needsUpdate = true;
   }
 }
+
+const OFF = new THREE.Color(0x1a1b1d), RED = new THREE.Color(0xff3020), AMBER = new THREE.Color(0xffb020), GREEN = new THREE.Color(0x40ff80);
+const ROT = new THREE.Matrix4();
+const ARM_MAT = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 0.6 });

@@ -11,7 +11,9 @@ const RADIUS = 1700;
 const KEEP = 2600;
 const MAX_ALT = 3500;
 
-interface NetTile { key: string; tx: number; ty: number; state: 'loading' | 'ready' | 'empty'; view?: NetView; group?: THREE.Group }
+interface NetTile { key: string; tx: number; ty: number; state: 'loading' | 'ready' | 'empty'; view?: NetView; group?: THREE.Group; nodeIds?: string[] }
+
+export interface SignalSource { signal(node: string, group: number): 'red' | 'amber' | 'green'; gate(node: string): number }
 
 export class NetLayer implements Layer {
   readonly id = 'net';
@@ -24,6 +26,7 @@ export class NetLayer implements Layer {
   private jobs = new Map<number, NetTile>();
   private next = 1;
   readonly group = new THREE.Group();
+  signals: SignalSource | null = null;
 
   async init(engine: Engine) {
     this.engine = engine;
@@ -70,6 +73,14 @@ export class NetLayer implements Layer {
       this.busy[wi]++;
       this.workers[wi].postMessage({ id, root: this.root, tx: w.tx, ty: w.ty, size: S });
     }
+    const sig = this.signals;
+    const blink = Math.floor(performance.now() / 500) % 2 === 0;
+    for (const t of this.tiles.values()) {
+      if (t.state !== 'ready' || !t.view || !t.nodeIds || !sig) continue;
+      const ids = t.nodeIds;
+      t.view.props.setSignals((ni, g) => sig.signal(ids[ni], g));
+      t.view.props.setGates((ni) => { const v = sig.gate(ids[ni]); return { down: Math.min(1, v * 1.4), flash: v > 0 && blink }; });
+    }
     for (const t of this.tiles.values()) {
       if (t.state === 'loading') continue;
       const d = Math.hypot(Math.max(0, Math.abs(E - (t.tx + 0.5) * S) - S / 2), Math.max(0, Math.abs(N - (t.ty + 0.5) * S) - S / 2));
@@ -86,13 +97,14 @@ export class NetLayer implements Layer {
     if (!msg.built) { t.state = 'empty'; return; }
     const b = msg.built;
     const meshes: Built['meshes'] = new Map(b.meshes.map(([m, pos, uv, idx]) => [m as Mat, { pos, uv, idx }]));
-    const view = new NetView({ ...b, meshes, lanes: [] } as Built, { x: t.tx * S, y: t.ty * S }, b.ground);
+    const view = new NetView({ ...b, meshes, lanes: [] } as Built, { x: t.tx * S, y: t.ty * S }, b.ground, 2, S);
     const g = view.group;
     g.position.set(t.tx * S, 0, -t.ty * S);
     g.name = `net ${t.key}`;
     this.group.add(g);
     t.view = view;
     t.group = g;
+    t.nodeIds = b.nodes.map((n) => n.id);
     t.state = 'ready';
     this.engine.tiles.netReady.add(t.key);
   }

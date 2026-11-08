@@ -9,7 +9,7 @@ import type { LaneOut, Leg, Node } from './model';
 
 const STRAIGHT = Math.PI - 0.2;
 const CURB_H = 0.15;
-const PAINT = 0.012;
+const PAINT = 0.025;
 
 interface Corner {
   i: number;
@@ -1009,7 +1009,7 @@ function crossingNode(ctx: Ctx, n: Node) {
         const d = norm(sub(p1, p0)), nn = left(d);
         const hw = 1.45;
         const qa = add(p0, mul(nn, hw)), qb = add(p1, mul(nn, hw)), qc = add(p1, mul(nn, -hw)), qd = add(p0, mul(nn, -hw));
-        ctx.sink.quad('crossing_panel', { ...qd, z: n.z + 0.003 }, { ...qc, z: n.z + 0.003 }, { ...qb, z: n.z + 0.003 }, { ...qa, z: n.z + 0.003 });
+        ctx.sink.quad('crossing_panel', { ...qd, z: n.z + 0.015 }, { ...qc, z: n.z + 0.015 }, { ...qb, z: n.z + 0.015 }, { ...qa, z: n.z + 0.015 });
       }
     }
   }

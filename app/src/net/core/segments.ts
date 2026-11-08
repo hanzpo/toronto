@@ -4,7 +4,7 @@ import type { Seg } from './model';
 import { offsetLine, type PathPt } from './path';
 import { PORTAL, crown } from './terrain';
 
-const MARK_Z = 0.012;
+const MARK_Z = 0.025;
 
 export function segRange(seg: Seg) {
   return { sa: seg.legA.setback, sb: seg.path.length - seg.legB.setback };

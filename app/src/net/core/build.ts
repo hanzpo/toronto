@@ -32,7 +32,7 @@ function segGeometry(d: SegDesc, a: Asset, pa0: V2, pb0: V2): V2[] {
   return fillet(ctrl, d.r ?? Math.max(a.rh, 8));
 }
 
-export function build(desc: NetDesc, opts: { origin?: { x: number; y: number } } = {}): Built {
+export function build(desc: NetDesc, opts: { origin?: { x: number; y: number }; lanesOnly?: boolean } = {}): Built {
   if (desc.assets) registerAssets(desc.assets);
   const ctx = new Ctx(desc);
   const nodes = new Map<string, Node>();
@@ -66,7 +66,7 @@ export function build(desc: NetDesc, opts: { origin?: { x: number; y: number } }
   resolveStructures(ctx);
   const ownS = desc.own ? new Set(desc.own.segs) : null, ownN = desc.own ? new Set(desc.own.nodes) : null;
   const guarded = (owned: boolean, f: () => void) => {
-    if (owned) { f(); return; }
+    if (owned && !opts.lanesOnly) { f(); return; }
     const np = ctx.props.length, nt = ctx.tracks.length, nl = ctx.linear.length, nf = ctx.footprints.length;
     ctx.sink.mute = true;
     f();
@@ -76,7 +76,7 @@ export function build(desc: NetDesc, opts: { origin?: { x: number; y: number } }
   for (const s of segs) guarded(!ownS || ownS.has(s.desc.id), () => buildSegment(ctx, s));
   for (const n of ctx.nodes) guarded(!ownN || ownN.has(n.desc.id), () => buildNode(ctx, n));
   linkLanes(ctx);
-  if (desc.terrain) {
+  if (desc.terrain && !opts.lanesOnly) {
     const keepF = ctx.footprints;
     conformTerrain(ctx, desc.terrain);
     ctx.footprints = keepF;

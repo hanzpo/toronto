@@ -56,15 +56,16 @@ function ped(): THREE.BufferGeometry {
 
 export class AgentsView {
   group = new THREE.Group();
+  private col = new THREE.Color();
   private meshes: THREE.InstancedMesh[];
   private dummy = new THREE.Object3D();
-  private col = new THREE.Color();
 
   constructor(max = 4000) {
     const mat = new THREE.MeshStandardNodeMaterial({ vertexColors: true, roughness: 0.55, metalness: 0.1 });
     const geos = [car(), bus(), tram(), train(), ped()];
     this.meshes = geos.map((g) => {
       const m = new THREE.InstancedMesh(g, mat, max);
+      for (let i = 0; i < max; i++) m.setColorAt(i, this.col.set(0xffffff));
       m.count = 0;
       m.castShadow = true;
       m.frustumCulled = false;

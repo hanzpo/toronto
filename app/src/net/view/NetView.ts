@@ -17,9 +17,13 @@ export class NetView {
   group = new THREE.Group();
   props: PropsView;
   private ground?: Uint8Array;
-  constructor(b: Built, origin = { x: 0, y: 0 }, ground?: Uint8Array) {
+  private stride: number;
+  private crop: number;
+  constructor(b: Built, origin = { x: 0, y: 0 }, ground?: Uint8Array, stride = 1, crop = 0) {
     OX = origin.x; OY = origin.y;
     this.ground = ground;
+    this.stride = stride;
+    this.crop = crop;
     for (const [m, buf] of b.meshes) this.group.add(this.mesh(m, buf));
     if (b.terrain) this.group.add(this.terrain(b.terrain));
     this.group.add(this.tracks(b.tracks));
@@ -43,7 +47,29 @@ export class NetView {
     return mesh;
   }
 
-  private terrain(t: NonNullable<Built['terrain']>) {
+  private terrain(t0: NonNullable<Built['terrain']>) {
+    const st = this.stride;
+    const t = st === 1 ? { ...t0 } : (() => {
+      const nx = Math.floor((t0.nx - 1) / st) + 1, ny = Math.floor((t0.ny - 1) / st) + 1;
+      const h = new Float32Array(nx * ny);
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+        let m = Infinity;
+        for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+          const jj = Math.min(t0.ny - 1, Math.max(0, j * st + dj)), ii = Math.min(t0.nx - 1, Math.max(0, i * st + di));
+          m = Math.min(m, t0.h[jj * t0.nx + ii]);
+        }
+        h[j * nx + i] = m;
+      }
+      return { ...t0, nx, ny, cell: t0.cell * st, h };
+    })();
+    if (this.crop) {
+      const i0 = Math.max(0, Math.round((OX - t.x0) / t.cell)), j0 = Math.max(0, Math.round((OY - t.y0) / t.cell));
+      const i1 = Math.min(t.nx - 1, Math.round((OX + this.crop - t.x0) / t.cell)), j1 = Math.min(t.ny - 1, Math.round((OY + this.crop - t.y0) / t.cell));
+      const nx = i1 - i0 + 1, ny = j1 - j0 + 1;
+      const h = new Float32Array(nx * ny);
+      for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) h[j * nx + i] = t.h[(j + j0) * t.nx + i + i0];
+      Object.assign(t, { x0: t.x0 + i0 * t.cell, y0: t.y0 + j0 * t.cell, nx, ny, h });
+    }
     const g = new THREE.BufferGeometry();
     const pos = new Float32Array(t.nx * t.ny * 3);
     for (let j = 0; j < t.ny; j++) for (let i = 0; i < t.nx; i++) {
@@ -96,8 +122,8 @@ export class NetView {
           return { x: p.x - (dy / l) * half * side, y: p.y + (dx / l) * half * side, z: p.z, nx: -dy / l, ny: dx / l };
         });
         if (t.flush) {
-          sweep(grooves, off, 0.11, 0.004, 0.0);
-          sweep(railPos, off, 0.07, 0.006, 0.0);
+          sweep(grooves, off, 0.11, 0.012, 0.0);
+          sweep(railPos, off, 0.07, 0.016, 0.0);
         } else {
           sweep(railPos, off, 0.072, 0.17, 0.17);
         }
@@ -131,7 +157,7 @@ export class NetView {
       return mesh;
     };
     if (railPos.length) grp.add(mk(railPos, material('rail')));
-    if (grooves.length) { const m = flat(0x151515, 0.9); m.polygonOffset = true; m.polygonOffsetFactor = -3; m.polygonOffsetUnits = -3; grp.add(mk(grooves, m)); }
+    if (grooves.length) grp.add(mk(grooves, flat(0x151515, 0.9)));
     if (ties.length) {
       const im = new THREE.InstancedMesh(new THREE.BoxGeometry(0.25, 0.18, 2.6), material('tie'), ties.length);
       ties.forEach((m, i) => im.setMatrixAt(i, m));

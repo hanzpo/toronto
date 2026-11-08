@@ -63,11 +63,18 @@ export default function App() {
         if (cancelled) { engine.dispose(); return; }
         await engine.addLayer(new (await mods.labels).LabelsLayer());
         await yieldTask();
-        await engine.addLayer(new (await mods.street).StreetLayer());
-        await engine.addLayer(new (await mods.props).PropsLayer());
+        const hasNet = await fetch(`${root}/net/index.json`, { method: 'HEAD' }).then((r) => r.ok).catch(() => false);
+        if (!hasNet) {
+          await engine.addLayer(new (await mods.street).StreetLayer());
+          await engine.addLayer(new (await mods.props).PropsLayer());
+          await engine.addLayer(new (await mods.crossings).CrossingsLayer());
+        }
         await engine.addLayer(new (await mods.urban).UrbanLayer());
-        await engine.addLayer(new (await mods.crossings).CrossingsLayer());
-        { const net = new (await import('./net/NetLayer')).NetLayer(); await engine.addLayer(net); Object.assign(window as object, { __net: net }); }
+        const net = new (await import('./net/NetLayer')).NetLayer();
+        await engine.addLayer(net);
+        const netsim = engine.tiles.netTiles.size ? new (await import('./net/SimLayer')).SimLayer() : null;
+        if (netsim) { await engine.addLayer(netsim); net.signals = netsim; }
+        Object.assign(window as object, { __net: net, __netsim: netsim });
         const transit = new (await mods.transit).TransitLayer(engine.dataRoot);
         await engine.addLayer(transit);
         Object.assign(window as object, { __transit: transit });
@@ -75,7 +82,7 @@ export default function App() {
         await engine.addLayer(new (await mods.interact).InteractLayer());
         { const stations = new (await mods.stations).StationsLayer(transit.system); await engine.addLayer(stations); Object.assign(window as object, { __stations: stations }); }
         await yieldTask();
-        { const traffic = new (await mods.traffic).TrafficLayer(transit); await engine.addLayer(traffic); Object.assign(window as object, { __traffic: traffic }); }
+        if (!netsim) { const traffic = new (await mods.traffic).TrafficLayer(transit); await engine.addLayer(traffic); Object.assign(window as object, { __traffic: traffic }); }
         await firstTiles(engine);
         if (cancelled) return;
         await engine.addLayer(new (await mods.landmarks).LandmarksLayer());
