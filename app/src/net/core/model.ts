@@ -72,6 +72,8 @@ export interface LaneOut {
   track?: TrackKind;
   gauge?: number;
   crosswalk?: boolean;
+  turn?: 'through' | 'right' | 'left' | 'u';
+  stopSign?: boolean;
 }
 
 export interface PropOut { kind: PropKind; x: number; y: number; z: number; h: number; p?: Record<string, number> }

@@ -542,7 +542,7 @@ function junctionLanes(ctx: Ctx, n: Node, g: NodeGeo) {
           const pts = curve(laneEnd(e), mul(a.u, -1), laneEnd(x), b.u, kind === 'through' ? 'through' : 'turn');
           const cls = e.lane.cls.filter((c) => c !== 'tram' && x.lane.cls.includes(c));
           const lane = ctx.lane({ kind: 'drive', cls, pts, width: Math.min(e.w, x.w), speed: kind === 'through' ? e.lane.speed : Math.min(e.lane.speed, 6), node: n.desc.id, bidir: false });
-          (lane as LaneOut & { turn?: string }).turn = kind;
+          lane.turn = kind;
           ctx.link(e.lane, lane);
           ctx.link(lane, x.lane);
           if (plan) { plan.groups[groups[i]].lanes.push(lane.id); lane.signal = { node: n.desc.id, group: groups[i] }; }
@@ -571,7 +571,7 @@ function junctionLanes(ctx: Ctx, n: Node, g: NodeGeo) {
     const top = Math.min(...L.map((l) => l.seg.asset.rank));
     for (const l of L) {
       const stop = n.control === 'allstop' || l.seg.asset.rank > top;
-      for (const q of ctx.legLanes.get(l) ?? []) if (q.inbound && q.lane.kind === 'drive') (q.lane as LaneOut & { stopSign?: boolean }).stopSign = stop;
+      for (const q of ctx.legLanes.get(l) ?? []) if (q.inbound && q.lane.kind === 'drive') q.lane.stopSign = stop;
     }
   }
 }
@@ -608,28 +608,39 @@ function pedLinks(ctx: Ctx, n: Node, g: NodeGeo, groups: number[], plan: { group
     if (!ws.length) return null;
     return ws.reduce((b, q) => (side === 'left' ? (q.lat > b.lat ? q : b) : (q.lat < b.lat ? q : b)));
   };
-  const corner: (LaneOut | null)[] = [];
+  const cwEnd = (l: Leg, side: 'left' | 'right'): P3 | null => {
+    if (!l.crosswalk) return null;
+    const t = l.setback + g.cw / 2;
+    return side === 'left' ? at(l, t, l.curbL + 0.6, 0.03) : at(l, t, l.curbR - 0.6, 0.03);
+  };
+  const W = (pts: P3[], cross = false) => ctx.lane({ kind: 'walk', cls: ['ped'], pts, width: cross ? g.cw : 2, speed: 1.3, node: n.desc.id, bidir: true, crosswalk: cross });
+  const hubs: { left: LaneOut | null; right: LaneOut | null }[] = L.map(() => ({ left: null, right: null }));
   for (let i = 0; i < k; i++) {
     const a = L[i], c = g.corners[i], b = L[c.j];
     const wa = walkOf(a, 'left'), wb = walkOf(b, 'right');
-    const pa = at(a, g.tw.get(a)!.left, wa ? wa.lat : (a.curbL + a.rowL) / 2, CURB_H);
-    const pb = at(b, g.tw.get(b)!.right, wb ? wb.lat : (b.curbR + b.rowR) / 2, CURB_H);
-    const mid = c.c && c.R ? add(c.c, mul(norm(sub(mul(add(pa, pb), 0.5), c.c)), Math.max(0.5, c.R - 1.6))) : mul(add(pa, pb), 0.5);
-    const pts = [pa, { ...mid, z: nodeZ(n, mid) + CURB_H }, pb];
-    const lane = ctx.lane({ kind: 'walk', cls: ['ped'], pts, width: 2, speed: 1.3, node: n.desc.id, bidir: true });
-    if (wa) ctx.link(wa.lane, lane);
-    if (wb) ctx.link(lane, wb.lane);
-    corner.push(lane);
+    const pa = wa ? laneEnd(wa) : at(a, g.tw.get(a)!.left, (a.curbL + a.rowL) / 2, CURB_H);
+    const pb = wb ? laneEnd(wb) : at(b, g.tw.get(b)!.right, (b.curbR + b.rowR) / 2, CURB_H);
+    const ea = cwEnd(a, 'left') ?? pa, eb = cwEnd(b, 'right') ?? pb;
+    const mid = c.c && c.R ? add(c.c, mul(norm(sub(mul(add(ea, eb), 0.5), c.c)), Math.max(0.5, c.R - 1.6))) : mul(add(ea, eb), 0.5);
+    const zc = nodeZ(n, mid) + CURB_H;
+    const la = ea !== pa ? W([pa, ea]) : null;
+    const lm = W([ea, { ...mid, z: zc }, eb]);
+    const lb = eb !== pb ? W([eb, pb]) : null;
+    if (wa) ctx.link(wa.lane, la ?? lm);
+    if (la) ctx.link(la, lm);
+    if (lb) ctx.link(lm, lb);
+    if (wb) ctx.link(lb ?? lm, wb.lane);
+    hubs[i].left = lm;
+    hubs[c.j].right = lm;
   }
   for (let i = 0; i < k; i++) {
     const l = L[i];
     if (!l.crosswalk) continue;
-    const t = l.setback + g.cw / 2;
-    const r = at(l, t, l.curbR - 0.3, CURB_H - 0.13), lf = at(l, t, l.curbL + 0.3, CURB_H - 0.13);
-    const lane = ctx.lane({ kind: 'walk', cls: ['ped'], pts: [r, lf], width: g.cw, speed: 1.3, node: n.desc.id, bidir: true, crosswalk: true });
-    const cl = corner[i], cr = corner[(i - 1 + k) % k];
-    if (cr) ctx.link(cr, lane);
-    if (cl) ctx.link(lane, cl);
+    const r = cwEnd(l, 'right')!, lf = cwEnd(l, 'left')!;
+    const lane = W([r, lf], true);
+    const hr = hubs[i].right, hl = hubs[i].left;
+    if (hr) ctx.link(hr, lane);
+    if (hl) ctx.link(lane, hl);
     if (plan) {
       for (let q = 0; q < plan.groups.length; q++) if (q !== groups[i]) plan.groups[q].peds.push(lane.id);
       lane.signal = { node: n.desc.id, group: -1 };

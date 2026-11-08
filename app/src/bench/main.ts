@@ -3,6 +3,9 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { build } from '../net/core/build';
 import { NetView } from '../net/view/NetView';
 import { LAYOUTS } from './layouts';
+import { AgentsView } from '../net/view/agents';
+import { simJson } from '../net/sim/encode';
+import initSim, { World } from '../net/sim/pkg/netsim';
 
 const q = new URLSearchParams(location.search);
 const id = q.get('l') ?? LAYOUTS[0].id;
@@ -48,6 +51,24 @@ const ms = performance.now() - t0;
 const view = new NetView(built);
 scene.add(view.group);
 
+await initSim();
+const world = new World(simJson(built), 11);
+const pop = layout.pop ?? [10, 0, 0, 0, 10];
+world.populate(pop[0], pop[1], pop[2], pop[3], pop[4]);
+const agents = new AgentsView();
+scene.add(agents.group);
+const warm = Number(q.get('warm') ?? 40);
+for (let i = 0; i < warm * 10; i++) world.step(0.1);
+const speed = Number(q.get('speed') ?? 1);
+const paused = q.get('pause') === '1';
+const lights = ['red', 'amber', 'green'] as const;
+function syncSim() {
+  agents.update(world.frame());
+  view.props.setSignals((node, group) => lights[world.signal(node, group)] ?? 'green');
+  view.props.setGates((node) => { const g = world.gate(node); return { down: Math.min(1, g * 1.4), flash: g > 0 && Math.floor(performance.now() / 500) % 2 === 0 }; });
+}
+syncSim();
+
 const controls = new OrbitControls(camera, renderer.domElement);
 const cam = (q.get('cam') ?? '').split(',').map(Number);
 const [tx, ty, dist, hd, pt] = cam.length === 5 && cam.every((v) => !isNaN(v)) ? cam : layout.cam;
@@ -71,9 +92,14 @@ addEventListener('resize', resize);
 resize();
 
 let frames = 0;
+let last = performance.now();
 renderer.setAnimationLoop(() => {
+  const now = performance.now();
+  const dt = Math.min(0.1, (now - last) / 1000) * speed;
+  last = now;
+  if (!paused && dt > 0) { let left = dt; while (left > 1e-4) { const h = Math.min(0.05, left); world.step(h); left -= h; } syncSim(); }
   controls.update();
   renderer.render(scene, camera);
   frames++;
 });
-Object.assign(window as object, { __bench: { built, scene, camera, renderer, view, frames: () => frames } });
+Object.assign(window as object, { __bench: { built, scene, camera, renderer, view, world, frames: () => frames } });
