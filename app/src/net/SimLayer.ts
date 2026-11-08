@@ -1,7 +1,7 @@
 import type { Engine } from '../engine/Engine';
 import type { FrameContext, Layer } from '../engine/types';
 import { simSpeed } from '../state/store';
-import type { SimFrame, SimTrips, TripIn } from './sim/simWorker';
+import type { SimFrame, SimReply, SimTrips, TripIn } from './sim/simWorker';
 import { clock } from '../state/clock';
 import type { TransitLayer } from '../layers/TransitLayer';
 import { AgentsView } from './view/agents';
@@ -11,7 +11,7 @@ const RADIUS = 1200;
 const MOVE = 700;
 
 export class SimLayer implements Layer {
-  readonly id = 'netsim';
+  readonly id = 'traffic';
   private engine!: Engine;
   private worker: Worker | null = null;
   private centre: { e: number; n: number } | null = null;
@@ -28,8 +28,9 @@ export class SimLayer implements Layer {
     this.engine = engine;
     this.have = engine.tiles.netTiles;
     this.worker = new Worker(new URL('./sim/simWorker.ts', import.meta.url), { type: 'module' });
-    this.worker.onmessage = (ev: MessageEvent<SimFrame | SimTrips>) => {
+    this.worker.onmessage = (ev: MessageEvent<SimFrame | SimTrips | SimReply>) => {
       if (ev.data.type === 'trips') { this.onTrips(ev.data); return; }
+      if (ev.data.type === 'reply') { this.replies.get(ev.data.id)?.(ev.data.ok); this.replies.delete(ev.data.id); return; }
       if (ev.data.type !== 'frame') return;
       if (!this.frame || this.frame.nodes !== ev.data.nodes) {
         this.nodeIdx = new Map(ev.data.nodes.map((id, i) => [id, i]));
@@ -80,6 +81,89 @@ export class SimLayer implements Layer {
       this.agents.update(this.frame.agents);
       this.agents.group.visible = ctx.altitude < 3000;
     }
+  }
+
+  private replies = new Map<number, (ok: boolean) => void>();
+  private reqId = 1;
+  private lastPlayer: { e: number; n: number } | null = null;
+
+  private ask(m: object): Promise<boolean> {
+    const id = this.reqId++;
+    return new Promise((res) => { this.replies.set(id, res); this.worker?.postMessage({ ...m, id }); });
+  }
+
+  takeOverNearestCar(e: number, n: number, radius = 40): Promise<boolean> {
+    return this.ask({ type: 'take', x: e, y: n, r: Math.max(radius, 60) });
+  }
+
+  takeOverCar(): Promise<boolean> {
+    const p = this.picked;
+    return p ? this.ask({ type: 'take', x: p.e, y: p.n, r: 6 }) : Promise.resolve(false);
+  }
+
+  private picked: { e: number; n: number } | null = null;
+
+  pickCar(e: number, n: number, radius = 8): number | null {
+    const f = this.frame?.agents;
+    if (!f) return null;
+    let best = -1, bd = radius;
+    for (let i = 0; i + 9 <= f.length; i += 9) {
+      if (f[i + 5] !== 0) continue;
+      const d = Math.hypot(f[i] - e, f[i + 1] - n);
+      if (d < bd) { bd = d; best = i; }
+    }
+    if (best < 0) return null;
+    this.picked = { e: f[best], n: f[best + 1] };
+    return best / 9;
+  }
+
+  pickCarMajor(e: number, n: number, radius = 150): number | null {
+    return this.pickCar(e, n, radius);
+  }
+
+  pickPed(e: number, n: number, radius = 3): { e: number; n: number; z: number; heading: number; colour: number } | null {
+    const f = this.frame?.agents;
+    if (!f) return null;
+    for (let i = 0; i + 9 <= f.length; i += 9) {
+      if (f[i + 5] !== 4) continue;
+      if (Math.hypot(f[i] - e, f[i + 1] - n) < radius) return { e: f[i], n: f[i + 1], z: f[i + 2], heading: f[i + 3], colour: 0x6b7a8f };
+    }
+    return null;
+  }
+
+  removePedNear() {}
+
+  getPlayer(): { e: number; n: number; elev: number; heading: number; speed: number; roadName: string | null; onRoad: boolean; surface: number; damage: number } | null {
+    const p = this.frame?.player;
+    if (!p || p.length < 6) return null;
+    this.lastPlayer = { e: p[0], n: p[1] };
+    return { e: p[0], n: p[1], elev: p[2], heading: p[3], speed: p[4], roadName: null, onRoad: p[5] > 0, surface: p[5] > 0 ? 0 : 1, damage: 0 };
+  }
+
+  setPlayerInput(inp: { throttle?: number; brake?: number; steer?: number; handbrake?: boolean }) {
+    const p = this.lastPlayer;
+    const ground = p ? this.engine.heightAt(p.e, p.n) : 0;
+    this.worker?.postMessage({ type: 'input', throttle: inp.throttle ?? 0, brake: inp.brake ?? 0, steer: inp.steer ?? 0, handbrake: !!inp.handbrake, ground });
+  }
+
+  releasePlayer() { this.worker?.postMessage({ type: 'release' }); }
+
+  setWalker(e: number, n: number, elev: number) { this.worker?.postMessage({ type: 'walker', x: e, y: n, z: elev }); }
+
+  clearWalker() { this.worker?.postMessage({ type: 'clearWalker' }); }
+
+  solidsNear(e: number, n: number, r: number, out: { e: number; n: number; h: number; hl: number; hw: number }[] = []) {
+    out.length = 0;
+    const f = this.frame?.agents;
+    if (!f) return out;
+    const W = [1.9, 2.6, 2.6, 3.0, 0];
+    for (let i = 0; i + 9 <= f.length; i += 9) {
+      const k = f[i + 5];
+      if (k === 4) continue;
+      if (Math.hypot(f[i] - e, f[i + 1] - n) > r + f[i + 6]) continue;
+      out.push({ e: f[i], n: f[i + 1], h: f[i + 3], hl: f[i + 6] / 2, hw: W[k] / 2 });
+    }
+    return out;
   }
 
   private transit(): TransitLayer | null {

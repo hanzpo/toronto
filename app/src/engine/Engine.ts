@@ -209,11 +209,15 @@ export class Engine {
 
   /** terrain elevation (datum m) at world E,N (finest loaded LOD, 0 if unknown) */
   heightAt(e: number, n: number): number {
+    const h = this.tiles?.netHeight?.(e, n);
+    if (h !== null && h !== undefined) return h;
     return this.tiles ? this.tiles.heightAt(e, n, 0) : 0;
   }
 
   /** Terrain or embankment fill top, whichever is higher (walker, third-person cameras). */
   surfaceAt(e: number, n: number): number {
+    const h = this.tiles?.netHeight?.(e, n);
+    if (h !== null && h !== undefined) return h;
     return this.tiles ? this.tiles.surfaceAt(e, n, 0) : 0;
   }
 

@@ -42,7 +42,24 @@ pub struct Agent {
     trip: i32,
     stops: VecDeque<(u32, f32, f64)>,
     stop_wait: f32,
+    free: Option<Free>,
 }
+
+#[derive(Clone, Copy, Default)]
+pub struct Free {
+    x: f32,
+    y: f32,
+    z: f32,
+    h: f32,
+    steer: f32,
+    throttle: f32,
+    brake: f32,
+    handbrake: bool,
+    ground: f32,
+    on_road: bool,
+}
+
+const OFF_NET: u32 = u32::MAX;
 
 #[wasm_bindgen]
 pub struct World {
@@ -294,7 +311,7 @@ impl World {
             let probe = Agent {
                 kind, lane: l, dir: 1, d: 0.0, v: 0.0, len: 0.0, v0: 0.0, route: VecDeque::new(), hist: VecDeque::new(),
                 stopped: 0.0, arrived: 0.0, variant: 0, lat: 0.0, dwell: 0.0, reserved: Vec::new(), alive: true,
-                trip: -1, stops: VecDeque::new(), stop_wait: 0.0,
+                trip: -1, stops: VecDeque::new(), stop_wait: 0.0, free: None,
             };
             if !self.lane_ok(&probe, l) {
                 continue;
@@ -322,7 +339,7 @@ impl World {
             let agent = Agent {
                 kind, lane: l, dir, d, v: 0.0, len, v0, route: VecDeque::new(), hist: VecDeque::new(), stopped: 0.0, arrived: 0.0,
                 variant: self.rng.below(8) as u8, lat, dwell: 0.0, reserved: vec![l], alive: true,
-                trip: -1, stops: VecDeque::new(), stop_wait: 0.0,
+                trip: -1, stops: VecDeque::new(), stop_wait: 0.0, free: None,
             };
             let idx = self.agents.len();
             self.agents.push(agent);
@@ -341,7 +358,7 @@ impl World {
             o.clear();
         }
         for (i, a) in self.agents.iter().enumerate() {
-            if !a.alive {
+            if !a.alive || a.lane == OFF_NET {
                 continue;
             }
             self.occ[a.lane as usize].push((a.d, i as u32));
@@ -519,6 +536,10 @@ impl World {
         let n = self.agents.len();
         for i in 0..n {
             if !self.agents[i].alive {
+                continue;
+            }
+            if self.agents[i].free.is_some() {
+                self.step_free(i, dt);
                 continue;
             }
             self.plan(i);
@@ -700,6 +721,53 @@ impl World {
         }
     }
 
+    fn step_free(&mut self, i: usize, dt: f32) {
+        let a = &mut self.agents[i];
+        let mut f = a.free.unwrap();
+        if a.kind != AKind::Ped {
+            let fwd = f.throttle * 3.2 - f.brake * 7.5 * a.v.signum() - 0.015 * a.v * a.v.abs() - 0.15 * a.v.signum();
+            let mut v = a.v + fwd * dt;
+            if f.brake > 0.1 && a.v.abs() < 0.3 && f.throttle < 0.05 {
+                v = (a.v - f.brake * 2.0 * dt).max(-4.0);
+            }
+            if f.handbrake {
+                v *= (1.0 - 1.6 * dt).max(0.0);
+            }
+            if a.v.abs() < 0.05 && f.throttle == 0.0 && f.brake == 0.0 {
+                v = 0.0;
+            }
+            a.v = v.clamp(-6.0, 45.0);
+            let wheelbase = 2.8;
+            let st = f.steer.clamp(-1.0, 1.0) * (0.55 - (a.v.abs() / 45.0) * 0.4);
+            f.h += a.v / wheelbase * st.tan() * dt;
+            f.x += f.h.cos() * a.v * dt;
+            f.y += f.h.sin() * a.v * dt;
+        }
+        let (hx, hy) = if a.kind == AKind::Ped { (0.0, 0.0) } else { (f.h.cos(), f.h.sin()) };
+        let want = Kind::Drive;
+        let hit = self.net.project(f.x, f.y, hx, hy, if a.kind == AKind::Ped { 1.6 } else { 2.5 }, want);
+        let a = &mut self.agents[i];
+        match hit {
+            Some((lane, s, z, _)) => {
+                a.lane = lane;
+                a.dir = 1;
+                a.d = s + if a.kind == AKind::Ped { 0.4 } else { a.len * 0.5 };
+                f.on_road = true;
+                if a.kind != AKind::Ped {
+                    f.z = z;
+                }
+            }
+            None => {
+                a.lane = OFF_NET;
+                f.on_road = false;
+                if a.kind != AKind::Ped {
+                    f.z = f.ground;
+                }
+            }
+        }
+        a.free = Some(f);
+    }
+
     fn step_ped(&mut self, i: usize, dt: f32) {
         let a = &self.agents[i];
         let ln = &self.net.lanes[a.lane as usize];
@@ -724,6 +792,104 @@ impl World {
         }
     }
 
+    pub fn take_over_nearest(&mut self, x: f32, y: f32, r: f32) -> bool {
+        let mut best: Option<(usize, f32)> = None;
+        for (i, a) in self.agents.iter().enumerate() {
+            if a.kind != AKind::Car || a.free.is_some() || a.trip >= 0 || !a.alive || a.lane == OFF_NET {
+                continue;
+            }
+            let l = &self.net.lanes[a.lane as usize];
+            let s = if a.dir > 0 { a.d } else { l.len - a.d };
+            let (p, _, _) = self.net.at(a.lane, s);
+            let d = ((p[0] - x).powi(2) + (p[1] - y).powi(2)).sqrt();
+            if d < r && best.map_or(true, |b| d < b.1) {
+                best = Some((i, d));
+            }
+        }
+        let Some((i, _)) = best else { return false };
+        self.release_player();
+        let a = &self.agents[i];
+        let l = &self.net.lanes[a.lane as usize];
+        let s = if a.dir > 0 { a.d } else { l.len - a.d };
+        let (p, h, _) = self.net.at(a.lane, s);
+        let h = if a.dir > 0 { h } else { h + std::f32::consts::PI };
+        let a = &mut self.agents[i];
+        a.free = Some(Free { x: p[0], y: p[1], z: p[2], h, ground: p[2], on_road: true, ..Default::default() });
+        a.route.clear();
+        true
+    }
+
+    pub fn set_player_input(&mut self, throttle: f32, brake: f32, steer: f32, handbrake: bool, ground: f32) {
+        for a in self.agents.iter_mut() {
+            if a.kind != AKind::Ped {
+                if let Some(f) = a.free.as_mut() {
+                    f.throttle = throttle;
+                    f.brake = brake;
+                    f.steer = steer;
+                    f.handbrake = handbrake;
+                    f.ground = ground;
+                }
+            }
+        }
+    }
+
+    pub fn player(&self) -> Vec<f32> {
+        for a in &self.agents {
+            if a.kind != AKind::Ped {
+                if let Some(f) = a.free {
+                    return vec![f.x, f.y, f.z, f.h, a.v, if f.on_road { 1.0 } else { 0.0 }];
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    pub fn release_player(&mut self) {
+        for a in self.agents.iter_mut() {
+            if a.kind != AKind::Ped && a.free.is_some() {
+                a.alive = false;
+            }
+        }
+        self.agents.retain(|a| a.alive);
+    }
+
+    pub fn set_walker(&mut self, x: f32, y: f32, z: f32) {
+        if let Some(a) = self.agents.iter_mut().find(|a| a.kind == AKind::Ped && a.free.is_some()) {
+            let f = a.free.as_mut().unwrap();
+            f.x = x;
+            f.y = y;
+            f.z = z;
+            return;
+        }
+        self.agents.push(Agent {
+            kind: AKind::Ped, lane: OFF_NET, dir: 1, d: 0.0, v: 0.0, len: 0.8, v0: 0.0, route: VecDeque::new(), hist: VecDeque::new(), stopped: 0.0,
+            arrived: 0.0, variant: 0, lat: 0.0, dwell: 0.0, reserved: Vec::new(), alive: true, trip: -1, stops: VecDeque::new(), stop_wait: 0.0,
+            free: Some(Free { x, y, z, ..Default::default() }),
+        });
+    }
+
+    pub fn clear_walker(&mut self) {
+        self.agents.retain(|a| !(a.kind == AKind::Ped && a.free.is_some()));
+    }
+
+    pub fn solids_near(&self, x: f32, y: f32, r: f32) -> Vec<f32> {
+        let mut out = Vec::new();
+        for a in &self.agents {
+            if a.kind == AKind::Ped || a.free.is_some() || a.lane == OFF_NET {
+                continue;
+            }
+            let l = &self.net.lanes[a.lane as usize];
+            let s = if a.dir > 0 { a.d - a.len * 0.5 } else { l.len - a.d + a.len * 0.5 };
+            let (p, h, _) = self.net.at(a.lane, s);
+            if (p[0] - x).abs() > r || (p[1] - y).abs() > r {
+                continue;
+            }
+            let w = match a.kind { AKind::Car => 1.9, AKind::Bus => 2.6, _ => 2.7 };
+            out.extend_from_slice(&[p[0], p[1], p[2], h, a.len, w]);
+        }
+        out
+    }
+
     pub fn set_clock(&mut self, service_seconds: f64) {
         self.clock0 = service_seconds - self.t;
     }
@@ -746,7 +912,7 @@ impl World {
         let a = Agent {
             kind, lane: first.lane, dir: first.dir, d: d.clamp(0.0, lane_len), v, len, v0: self.net.lanes[first.lane as usize].speed.max(8.0),
             route, hist: VecDeque::new(), stopped: 0.0, arrived: 0.0, variant, lat: 0.0, dwell: 0.0, reserved: Vec::new(), alive: true,
-            trip: trip as i32, stops, stop_wait: 0.0,
+            trip: trip as i32, stops, stop_wait: 0.0, free: None,
         };
         self.agents.push(a);
         true
@@ -780,6 +946,13 @@ impl World {
         let mut out = std::mem::take(&mut self.out);
         out.clear();
         for a in &self.agents {
+            if let Some(f) = a.free {
+                if a.kind == AKind::Ped {
+                    continue;
+                }
+                out.extend_from_slice(&[f.x, f.y, f.z, f.h, 0.0, a.kind as u8 as f32, a.len, a.variant as f32, a.v]);
+                continue;
+            }
             let sections: Vec<(f32, f32)> = match a.kind {
                 AKind::Tram => vec![(0.0, 10.0), (10.4, 9.4), (20.2, 9.6)],
                 AKind::Train => {

@@ -77,6 +77,7 @@ pub enum Kind {
     Walk,
 }
 
+pub const GRID: f32 = 25.0;
 pub const C_CAR: u16 = 1;
 pub const C_BUS: u16 = 2;
 pub const C_TRUCK: u16 = 4;
@@ -121,6 +122,7 @@ pub struct Signal {
 }
 
 pub struct Net {
+    pub grid: HashMap<(i32, i32), Vec<(u32, u32)>>,
     pub lanes: Vec<Lane>,
     pub signals: HashMap<u16, Signal>,
     pub node_kind: Vec<String>,
@@ -253,7 +255,55 @@ impl Net {
             }
             lanes[i].ends = [e0, e1];
         }
-        Ok(Net { lanes, signals, node_kind: inp.nodes.iter().map(|n| n.kind.clone()).collect() })
+        let mut grid: HashMap<(i32, i32), Vec<(u32, u32)>> = HashMap::new();
+        for (li, l) in lanes.iter().enumerate() {
+            for i in 0..l.pts.len().saturating_sub(1) {
+                let (a, b) = (l.pts[i], l.pts[i + 1]);
+                let (x0, x1) = ((a[0].min(b[0]) / GRID).floor() as i32, (a[0].max(b[0]) / GRID).floor() as i32);
+                let (y0, y1) = ((a[1].min(b[1]) / GRID).floor() as i32, (a[1].max(b[1]) / GRID).floor() as i32);
+                for gx in x0..=x1 {
+                    for gy in y0..=y1 {
+                        grid.entry((gx, gy)).or_default().push((li as u32, i as u32));
+                    }
+                }
+            }
+        }
+        Ok(Net { grid, lanes, signals, node_kind: inp.nodes.iter().map(|n| n.kind.clone()).collect() })
+    }
+
+    pub fn project(&self, x: f32, y: f32, hx: f32, hy: f32, r: f32, want: Kind) -> Option<(u32, f32, f32, f32)> {
+        let mut best: Option<(u32, f32, f32, f32, f32)> = None;
+        for gx in ((x - r) / GRID).floor() as i32..=((x + r) / GRID).floor() as i32 {
+            for gy in ((y - r) / GRID).floor() as i32..=((y + r) / GRID).floor() as i32 {
+                let Some(list) = self.grid.get(&(gx, gy)) else { continue };
+                for &(li, i) in list {
+                    let l = &self.lanes[li as usize];
+                    if l.kind != want {
+                        continue;
+                    }
+                    let (a, b) = (l.pts[i as usize], l.pts[i as usize + 1]);
+                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                    let l2 = dx * dx + dy * dy;
+                    if l2 < 1e-6 {
+                        continue;
+                    }
+                    let len = l2.sqrt();
+                    if (dx * hx + dy * hy) / len < 0.3 && (hx != 0.0 || hy != 0.0) {
+                        continue;
+                    }
+                    let t = (((x - a[0]) * dx + (y - a[1]) * dy) / l2).clamp(0.0, 1.0);
+                    let (qx, qy) = (a[0] + dx * t, a[1] + dy * t);
+                    let d = ((x - qx).powi(2) + (y - qy).powi(2)).sqrt();
+                    if d > r.max(l.width * 0.5 + 0.5) {
+                        continue;
+                    }
+                    if best.map_or(true, |bb| d < bb.4) {
+                        best = Some((li, l.cum[i as usize] + t * len, a[2] + (b[2] - a[2]) * t, d, d));
+                    }
+                }
+            }
+        }
+        best.map(|b| (b.0, b.1, b.2, b.3))
     }
 
     pub fn at(&self, lane: u32, s: f32) -> ([f32; 3], f32, f32) {

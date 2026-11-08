@@ -11,7 +11,7 @@ const RADIUS = 1700;
 const KEEP = 2600;
 const MAX_ALT = 3500;
 
-interface NetTile { key: string; tx: number; ty: number; state: 'loading' | 'ready' | 'empty'; view?: NetView; group?: THREE.Group; nodeIds?: string[] }
+interface NetTile { key: string; tx: number; ty: number; state: 'loading' | 'ready' | 'empty'; view?: NetView; group?: THREE.Group; nodeIds?: string[]; terrain?: Built['terrain'] }
 
 export interface SignalSource { signal(node: string, group: number): 'red' | 'amber' | 'green'; gate(node: string): number }
 
@@ -36,6 +36,7 @@ export class NetLayer implements Layer {
     const idx = (await r.json()) as { tiles: { tile: [number, number] }[] };
     for (const t of idx.tiles) this.have.add(`${t.tile[0]}_${t.tile[1]}`);
     engine.tiles.netTiles = this.have;
+    engine.tiles.netHeight = (e, n) => this.heightAt(e, n);
     this.group.name = 'net';
     engine.tiles.root.add(this.group);
     const n = Math.max(1, Math.min(2, (navigator.hardwareConcurrency || 4) - 2));
@@ -105,8 +106,20 @@ export class NetLayer implements Layer {
     t.view = view;
     t.group = g;
     t.nodeIds = b.nodes.map((n) => n.id);
+    t.terrain = b.terrain;
     t.state = 'ready';
     this.engine.tiles.netReady.add(t.key);
+  }
+
+  heightAt(e: number, n: number): number | null {
+    const t = this.tiles.get(`${Math.floor(e / S)}_${Math.floor(n / S)}`);
+    const g = t?.terrain;
+    if (!g) return null;
+    const fx = (e - g.x0) / g.cell, fy = (n - g.y0) / g.cell;
+    const i = Math.max(0, Math.min(g.nx - 2, Math.floor(fx))), j = Math.max(0, Math.min(g.ny - 2, Math.floor(fy)));
+    const u = Math.min(1, Math.max(0, fx - i)), v = Math.min(1, Math.max(0, fy - j));
+    const h = g.h, nx = g.nx;
+    return h[j * nx + i] * (1 - u) * (1 - v) + h[j * nx + i + 1] * u * (1 - v) + h[(j + 1) * nx + i] * (1 - u) * v + h[(j + 1) * nx + i + 1] * u * v + 0.05;
   }
 
   private drop(t: NetTile) {

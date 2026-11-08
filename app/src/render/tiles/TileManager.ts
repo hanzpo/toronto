@@ -154,6 +154,7 @@ export class TileManager {
   /** level-0 tiles the network engine (net/NetLayer) has data for, and those it has drawn */
   netTiles = new Set<string>();
   netReady = new Set<string>();
+  netHeight: ((e: number, n: number) => number | null) | null = null;
   manifest!: Manifest;
   root = new THREE.Group();
   houses = new HousePools();

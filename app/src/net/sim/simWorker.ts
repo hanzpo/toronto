@@ -10,11 +10,18 @@ export interface TripIn { trip: number; kind: TripKind; variant: number; pts: Fl
 export type SimIn =
   | { type: 'region'; root: string; tiles: [number, number][]; seed: number; speed: number }
   | { type: 'speed'; speed: number }
-  | { type: 'trips'; clock: number; trips: TripIn[] };
+  | { type: 'trips'; clock: number; trips: TripIn[] }
+  | { type: 'take'; id: number; x: number; y: number; r: number }
+  | { type: 'input'; throttle: number; brake: number; steer: number; handbrake: boolean; ground: number }
+  | { type: 'release' }
+  | { type: 'walker'; x: number; y: number; z: number }
+  | { type: 'clearWalker' };
+
+export interface SimReply { type: 'reply'; id: number; ok: boolean }
 
 export interface SimTrips { type: 'trips'; accepted: number[]; done: number[] }
 
-export interface SimFrame { type: 'frame'; agents: Float32Array; nodes: string[]; sig: Uint8Array; groups: Uint8Array; gates: Float32Array; t: number }
+export interface SimFrame { type: 'frame'; agents: Float32Array; nodes: string[]; sig: Uint8Array; groups: Uint8Array; gates: Float32Array; t: number; player: number[] }
 
 let world: World | null = null;
 let index: LaneIndex | null = null;
@@ -58,6 +65,11 @@ self.onmessage = (ev: MessageEvent<SimIn>) => {
   const m = ev.data;
   if (m.type === 'region') void region(m.root, m.tiles, m.seed);
   if (m.type === 'speed') speed = m.speed;
+  if (m.type === 'take') { const ok = !!world?.take_over_nearest(m.x, m.y, m.r); (self as unknown as Worker).postMessage({ type: 'reply', id: m.id, ok } satisfies SimReply); }
+  if (m.type === 'input') world?.set_player_input(m.throttle, m.brake, m.steer, m.handbrake, m.ground);
+  if (m.type === 'release') world?.release_player();
+  if (m.type === 'walker') world?.set_walker(m.x, m.y, m.z);
+  if (m.type === 'clearWalker') world?.clear_walker();
   if (m.type === 'trips' && world && index) {
     world.set_clock(m.clock);
     const accepted: number[] = [];
@@ -85,6 +97,6 @@ setInterval(() => {
   for (let n = 0; n < nodes.length; n++) for (let g = 0; g < Math.min(4, groupsPer[n] || 1); g++) sig[n * 4 + g] = world.signal(n, g);
   const gates = new Float32Array(nodes.length);
   for (let n = 0; n < nodes.length; n++) gates[n] = world.gate(n);
-  const msg: SimFrame = { type: 'frame', agents, nodes, sig, groups: Uint8Array.from(groupsPer), gates, t: world.time() };
+  const msg: SimFrame = { type: 'frame', agents, nodes, sig, groups: Uint8Array.from(groupsPer), gates, t: world.time(), player: [...world.player()] };
   (self as unknown as Worker).postMessage(msg, [agents.buffer, sig.buffer, gates.buffer]);
 }, 33);

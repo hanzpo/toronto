@@ -53,6 +53,9 @@ export class World {
         const ret = wasm.world_add_trip(this.__wbg_ptr, val6, val7, val8, ptr0, len0, ptr1, len1, val9, val10, ptr2, len2, ptr3, len3, ptr4, len4);
         return ret !== 0;
     }
+    clear_walker() {
+        wasm.world_clear_walker(this.__wbg_ptr);
+    }
     /**
      * @returns {number}
      */
@@ -109,6 +112,15 @@ export class World {
         return this;
     }
     /**
+     * @returns {Float32Array}
+     */
+    player() {
+        const ret = wasm.world_player(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
      * @param {number} cars
      * @param {number} buses
      * @param {number} trams
@@ -118,11 +130,32 @@ export class World {
     populate(cars, buses, trams, trains, peds) {
         wasm.world_populate(this.__wbg_ptr, cars, buses, trams, trains, peds);
     }
+    release_player() {
+        wasm.world_release_player(this.__wbg_ptr);
+    }
     /**
      * @param {number} service_seconds
      */
     set_clock(service_seconds) {
         wasm.world_set_clock(this.__wbg_ptr, service_seconds);
+    }
+    /**
+     * @param {number} throttle
+     * @param {number} brake
+     * @param {number} steer
+     * @param {boolean} handbrake
+     * @param {number} ground
+     */
+    set_player_input(throttle, brake, steer, handbrake, ground) {
+        wasm.world_set_player_input(this.__wbg_ptr, throttle, brake, steer, handbrake, ground);
+    }
+    /**
+     * @param {number} x
+     * @param {number} y
+     * @param {number} z
+     */
+    set_walker(x, y, z) {
+        wasm.world_set_walker(this.__wbg_ptr, x, y, z);
     }
     /**
      * @param {number} node
@@ -132,6 +165,18 @@ export class World {
     signal(node, group) {
         const ret = wasm.world_signal(this.__wbg_ptr, node, group);
         return ret;
+    }
+    /**
+     * @param {number} x
+     * @param {number} y
+     * @param {number} r
+     * @returns {Float32Array}
+     */
+    solids_near(x, y, r) {
+        const ret = wasm.world_solids_near(this.__wbg_ptr, x, y, r);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
     }
     /**
      * @param {number} dt
@@ -147,6 +192,16 @@ export class World {
         var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
         return v1;
+    }
+    /**
+     * @param {number} x
+     * @param {number} y
+     * @param {number} r
+     * @returns {boolean}
+     */
+    take_over_nearest(x, y, r) {
+        const ret = wasm.world_take_over_nearest(this.__wbg_ptr, x, y, r);
+        return ret !== 0;
     }
     /**
      * @returns {number}
