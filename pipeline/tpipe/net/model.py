@@ -296,9 +296,9 @@ class Builder:
                 adj[e.nodes[-1]].append(e)
         def junctionish(n: int) -> bool:
             return deg[n] >= 3 or n in rail_at
-        pairs: set[tuple[int, int]] = set()
-        def union(a: int, b: int) -> None:
-            pairs.add((min(a, b), max(a, b)))
+        pairs: dict[tuple[int, int], list[Edge]] = {}
+        def union(a: int, b: int, chain: list[Edge]) -> None:
+            pairs.setdefault((min(a, b), max(a, b)), []).extend(chain)
         for start in sorted(n for n in adj if junctionish(n)):
             for e0 in adj[start]:
                 rank = A.ROAD_RANK.get(e0.tags.get("highway", ""), 5)
@@ -316,9 +316,7 @@ class Builder:
                         break
                     if junctionish(nxt):
                         if nxt != start:
-                            for c in chain:
-                                c.dead = True
-                            union(start, nxt)
+                            union(start, nxt, chain)
                         break
                     others = [o for o in adj[nxt] if o is not e]
                     if len(others) != 1:
@@ -326,11 +324,23 @@ class Builder:
                     e = others[0]
                     cur = nxt
                     chain.append(e)
-        for a, b in sorted(pairs):
+        span: dict[int, list[int]] = {}
+        for (a, b), chain in sorted(pairs.items()):
             ra, rb = self.find(a), self.find(b)
-            if ra != rb and math.dist(self.xy[ra], self.xy[rb]) < 70:
-                lo, hi = min(ra, rb), max(ra, rb)
-                self.uf[hi] = lo
+            if ra == rb:
+                for c in chain:
+                    c.dead = True
+                continue
+            ma, mb = span.get(ra, [ra]), span.get(rb, [rb])
+            pts = [self.xy[m] for m in ma + mb]
+            xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+            if math.hypot(max(xs) - min(xs), max(ys) - min(ys)) > 40:
+                continue
+            lo, hi = min(ra, rb), max(ra, rb)
+            self.uf[hi] = lo
+            span[lo] = ma + mb
+            for c in chain:
+                c.dead = True
         for e in self.edges:
             if not e.dead and e.nodes[0] == e.nodes[-1] and e.fam == "road":
                 e.dead = True

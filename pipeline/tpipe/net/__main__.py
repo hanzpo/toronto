@@ -58,7 +58,7 @@ def seg_json(e: model.Edge) -> dict[str, object]:
     v = []
     if vertical._flag(e, "bridge"):
         v.append({"s0": 0, "s1": 1, "kind": "bridge"})
-    if vertical._flag(e, "tunnel"):
+    if vertical._flag(e, "tunnel") or vertical._level(e) < 0:
         v.append({"s0": 0, "s1": 1, "kind": "tunnel"})
     if v:
         d["variant"] = v

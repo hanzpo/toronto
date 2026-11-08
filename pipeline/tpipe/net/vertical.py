@@ -38,6 +38,19 @@ def _flag(e: Edge, key: str) -> bool:
     return v not in ("no", "") and not (key == "tunnel" and v == "building_passage")
 
 
+def _level(e: Edge) -> float:
+    if e.fam not in ("path", "platform"):
+        return 0.0
+    v = e.tags.get("level", "").split(";")[0].strip()
+    try:
+        lv = float(v)
+    except ValueError:
+        lv = 0.0
+    if lv == 0.0 and (e.tags.get("location") == "underground" or (e.tags.get("tunnel") == "yes" and e.tags.get("indoor") == "yes")):
+        lv = -1.0
+    return max(-4.0, min(4.0, lv))
+
+
 def _layer(e: Edge) -> int:
     try:
         return int(e.tags.get("layer", "0"))
@@ -60,8 +73,12 @@ class Profile:
         if n >= 5:
             k = np.ones(3) / 3
             g = np.concatenate([[g[0]], np.convolve(g, k, mode="valid"), [g[-1]]])
+        lvl = _level(e)
+        if lvl:
+            g = g + 4.5 * lvl
         self.ground = g
         self.z = g.copy()
+        self.pin = np.zeros(n, dtype=bool)
         self.lb = np.full(n, -np.inf)
         self.ub = np.full(n, np.inf)
         self.L = L
@@ -75,8 +92,64 @@ class Profile:
         return int(np.argmin(np.abs(self.s - s)))
 
 
+def corridors(net: Network, prof: dict[str, Profile], dtm: Dtm) -> int:
+    import json
+
+    from .. import geo
+
+    data = json.loads((geo.PIPE / "curated" / "corridors.json").read_text())["corridors"]
+    pinned = 0
+    for c in data:
+        pts = [(*geo.project(lo, la), z) for lo, la, z in c["profile"]]
+        line = LineString([(x, y) for x, y, _ in pts])
+        cum = np.concatenate([[0.0], np.cumsum([math.dist(pts[i][:2], pts[i + 1][:2]) for i in range(len(pts) - 1)])])
+        zs = [z for _, _, z in pts]
+        kind = c.get("kind", "road")
+        names = set(c.get("names") or [])
+        ways = set(c.get("ways") or [])
+        snap = float(c.get("snap", 40))
+        mode = c.get("mode", "above_ground")
+        for e in net.edges:
+            fam = net.assets.assets[e.asset]["family"]
+            if kind == "rail" and fam not in ("rail", "subway"):
+                continue
+            if kind != "rail" and fam != "road":
+                continue
+            if ways and e.way not in ways:
+                continue
+            if not ways and kind != "rail" and e.tags.get("name") not in names:
+                continue
+            if kind != "rail" and int(net.assets.assets[e.asset]["rank"]) > int(c.get("max_class", 9)):  # type: ignore[arg-type]
+                continue
+            p = prof[e.id]
+            for i in range(len(p.s)):
+                from shapely.geometry import Point
+                q = Point(p.x[i], p.y[i])
+                if line.distance(q) > snap:
+                    continue
+                along = line.project(q)
+                if along <= 0 or along >= line.length:
+                    continue
+                if mode == "lidar_ground":
+                    z = float(p.ground[i]) + float(c.get("ballast", 0.3)) + 0.4
+                else:
+                    zz = [v for v in zs]
+                    if any(v is None for v in zz):
+                        continue
+                    z = float(np.interp(along, cum, zz))  # type: ignore[arg-type]
+                    if mode != "absolute":
+                        z += float(p.ground[i])
+                    if c.get("level") == "formation":
+                        z += 0.95
+                p.lb[i] = p.ub[i] = z
+                p.pin[i] = True
+                pinned += 1
+    return pinned
+
+
 def solve(net: Network, dtm: Dtm) -> None:
     prof = {e.id: Profile(e, dtm) for e in net.edges}
+    corridors(net, prof, dtm)
     at_node: dict[str, list[tuple[Profile, int]]] = defaultdict(list)
     for p in prof.values():
         at_node[p.e.a].append((p, 0))
@@ -91,6 +164,11 @@ def solve(net: Network, dtm: Dtm) -> None:
         for up, su, lo, sl, need in xings:
             zl = lo.at(sl)
             iu = up.idx(su)
+            if up.pin[iu]:
+                il = lo.idx(sl)
+                if not lo.pin[il] and not lo.bridge:
+                    lo.ub[il] = min(lo.ub[il], up.at(su) - need)
+                continue
             if up.tunnel and not lo.tunnel:
                 il = lo.idx(sl)
                 lo.lb[il] = max(lo.lb[il], up.at(su) + need)
@@ -107,8 +185,12 @@ def solve(net: Network, dtm: Dtm) -> None:
             hi = max(zs)
             lo_ = min(zs)
             target = hi if hi - lo_ < 30 else float(np.median(zs))
+            pins = [p.z[i] for p, i in ends if p.pin[i]]
+            if pins:
+                target = float(np.mean(pins))
             for p, i in ends:
-                p.lb[i] = max(p.lb[i], target - 0.01)
+                if not p.pin[i]:
+                    p.lb[i] = max(p.lb[i], target - 0.01)
         for p in prof.values():
             gr = g[p.e.id]
             z = np.maximum(p.ground, p.lb)
@@ -127,6 +209,7 @@ def solve(net: Network, dtm: Dtm) -> None:
             for i in range(len(z) - 2, -1, -1):
                 if z[i + 1] < p.ground[i + 1] - 0.2:
                     z[i] = min(z[i], z[i + 1] + gr * ds[i])
+            z = np.where(p.pin, p.lb, z)
             p.z = z
     for e in net.edges:
         p = prof[e.id]
