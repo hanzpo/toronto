@@ -33,6 +33,7 @@ const ISOLATION: Record<string, string> = {
 
 const TILE_RE = /^\/data\/tiles\/(\d)\/(-?\d+)_(-?\d+)\.bin\.gz$/
 const GRAPH_RE = /^\/data\/graph\/(-?\d+)_(-?\d+)\.bin\.gz$/
+const NET_RE = /^\/data\/net\/(-?\d+)_(-?\d+)\.(json|dtm)\.gz$/
 type PackIndex = Record<string, [number, number]>
 const packIndex = new Map<string, Promise<PackIndex | null>>()
 
@@ -86,15 +87,16 @@ async function serveData(req: Request, env: Env, ctx: ExecutionContext, path: st
   let res: Response
   const t = TILE_RE.exec(path)
   const g = t ? null : GRAPH_RE.exec(path)
-  const m = t ?? (g ? [g[0], '0', g[1], g[2]] : null)
+  const nt = t || g ? null : NET_RE.exec(path)
+  const m = t ?? (g ? [g[0], '0', g[1], g[2]] : nt ? [nt[0], '0', nt[1], nt[2]] : null)
   if (m) {
     const [lv, tx, ty] = [Number(m[1]), Number(m[2]), Number(m[3])]
     const f = 4 ** (2 - lv)
-    const pack = `${g ? 'g' : ''}${Math.floor(tx / f)}_${Math.floor(ty / f)}`
+    const pack = `${g ? 'g' : nt ? 'n' : ''}${Math.floor(tx / f)}_${Math.floor(ty / f)}`
     const version = url.searchParams.get('v') ?? ''
     const idx = await loadIndex(env, ctx, url.origin, pack, version)
     const tIdx = Date.now()
-    const entry = idx?.[`${lv}/${tx}_${ty}`]
+    const entry = idx?.[nt ? `${nt[3]}/${tx}_${ty}` : `${lv}/${tx}_${ty}`]
     if (!entry) return withHeaders(new Response('not found', { status: 404, headers: { 'Cache-Control': 'public, max-age=3600' } }))
     const obj = await env.DATA.get(`packs/${pack}.pack`, { range: { offset: entry[0], length: entry[1] } })
     if (!obj) return withHeaders(new Response('not found', { status: 404 }))

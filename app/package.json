@@ -8,7 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "build:sim": "wasm-pack build ../sim --target web --release --out-dir ../app/src/sim/pkg --out-name sim && rm -f src/sim/pkg/.gitignore src/sim/pkg/package.json src/sim/pkg/README.md"
+    "build:sim": "wasm-pack build ../netsim --target web --release --out-dir ../app/src/net/sim/pkg --out-name netsim && rm -f src/net/sim/pkg/.gitignore src/net/sim/pkg/package.json src/net/sim/pkg/README.md"
   },
   "dependencies": {
     "earcut": "^3.2.4",

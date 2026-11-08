@@ -19,5 +19,5 @@ put() {
 export -f put
 {
   [ $PACKS_TOO = 1 ] && for f in "$PACKS"/*; do echo "packs/$(basename "$f") $f"; done
-  (cd "$DATA" && find . -type f ! -path './tiles/*' ! -path './graph/*' | sed 's|^\./||') | while read -r rel; do echo "data/$rel $DATA/$rel"; done
+  (cd "$DATA" && find . -type f ! -path './tiles/*' ! -path './graph/*' ! -path './net/*.gz' | sed 's|^\./||') | while read -r rel; do echo "data/$rel $DATA/$rel"; done
 } | xargs -P 8 -L 1 bash -c 'put "$0" "$1"'

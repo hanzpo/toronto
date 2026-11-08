@@ -37,6 +37,33 @@ def main(out: Path) -> None:
         tx, ty = map(int, f.name.split(".")[0].split("_"))
         ggroups.setdefault(parent_l2(0, tx, ty), []).append((0, tx, ty))
     write_packs(out, ggroups, lambda lv, tx, ty: geo.OUT / "graph" / f"{tx}_{ty}.bin.gz", "g")
+    # network engine tiles (tpipe.net): description + terrain per level-0 tile, keys "json/tx_ty", "dtm/tx_ty"
+    ngroups: dict[tuple[int, int], list[tuple[int, int, int]]] = {}
+    for f in (geo.OUT / "net").glob("*.json.gz"):
+        tx, ty = map(int, f.name.split(".")[0].split("_"))
+        ngroups.setdefault(parent_l2(0, tx, ty), []).append((0, tx, ty))
+    write_net_packs(out, ngroups)
+
+
+def write_net_packs(out: Path, groups) -> None:
+    total = 0
+    for (px, py), tiles in sorted(groups.items()):
+        index = {}
+        off = 0
+        name = f"n{px}_{py}"
+        with open(out / f"{name}.pack", "wb") as f:
+            for _, tx, ty in sorted(tiles):
+                for ext in ("json", "dtm"):
+                    p = geo.OUT / "net" / f"{tx}_{ty}.{ext}.gz"
+                    if not p.exists():
+                        continue
+                    data = p.read_bytes()
+                    f.write(data)
+                    index[f"{ext}/{tx}_{ty}"] = [off, len(data)]
+                    off += len(data)
+        (out / f"{name}.idx.json").write_text(json.dumps(index, separators=(",", ":")))
+        total += off
+    print(f"{len(groups)} net packs, {total / 1e6:.0f} MB -> {out}")
 
 
 def write_packs(out: Path, groups, path_of, prefix: str) -> None:

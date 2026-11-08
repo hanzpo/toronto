@@ -45,8 +45,7 @@ from .core import finding
 
 MODEL_CATS = {"duplicate_track", "underpass_drawn_at_grade", "drawn_rail_vs_train_path", "graph_vs_model",
               "sidewalk_between_carriageways", "lane_count_jump", "duplicate_crosswalk",
-              "adjacent_track_z_step", "mapped_crossing_not_generated",
-              "surface_gap", "surface_overlap", "terrain_above_paving", "surface_off_model"}  # unified surface (qa/checks_surface.py)
+              "adjacent_track_z_step", "mapped_crossing_not_generated"}
 
 V_BRIDGE, V_TUNNEL, V_EMBED = 1, 2, 8
 ST_EXACT = 11
@@ -551,9 +550,6 @@ def run(B, cats: set) -> list[dict]:
         out += check_duplicate_crosswalk(B)
     if "lane_count_jump" in cats:
         out += check_lane_jump(B)
-    if cats & {"surface_gap", "surface_overlap", "terrain_above_paving", "surface_off_model"}:
-        from .checks_surface import run as run_surface
-        out += run_surface(B, cats)
     if "graph_vs_model" in cats:
         from .checks_graph import load_graph
         out += check_graph_model(B, load_graph(B.tiles))

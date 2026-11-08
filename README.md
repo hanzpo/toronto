@@ -14,7 +14,8 @@ Live: https://toronto.hanznathanpo.workers.dev
 |---|---|
 | `pipeline/` | Offline Python data build (`run.sh`): region, terrain, OSM tiles, road graph, transit, landmarks |
 | `app/` | Vite + React + three.js (WebGPU) client |
-| `sim/` | Rust → WebAssembly traffic and pedestrian simulation |
+| `netsim/` | Rust → WebAssembly sim on the network engine's lanes (traffic, pedestrians, transit, player) |
+| `app/src/net/` | Network engine (docs/NETWORK.md, docs/REBUILD.md): assets, segments, nodes, lanes, terrain |
 | `worker/` | Cloudflare Worker serving the app and the R2-hosted dataset |
 | `docs/SPEC.md` | Coordinate system and binary data contract |
 | `docs/TRANSIT.md` | Transit data format and runtime |

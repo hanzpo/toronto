@@ -28,4 +28,21 @@ model.
    deleted.
 
 ## Status
-See git log.
+- Engine, bench, sim and mapping are done; the whole region (14,472 tiles) is
+  mapped and the app draws and simulates it near the camera.
+- Scheduled transit is handed from the timetable layer to the sim near the
+  camera (routes matched onto lanes, stops and dwell from GTFS).
+- Player driving and walking run in the new sim.
+- Deleted: the old street, props, crossings and traffic layers, the old sim
+  crate, the net2 slice, the unified-surface prototype and the old tunnel
+  builder.
+- Still on the old stack: far road and rail LOD (tile levels 1 and 2), bus and
+  rail shape matching in the transit pipeline (roadnet, rail_graph), the
+  congestion overlay (old graph), and the old QA checks.
+
+## Commands
+- Map the region: `cd pipeline && uv run python -m tpipe.net --region`
+- One area: `uv run python -m tpipe.net --bbox=W,S,E,N --name NAME`
+- Engine tests: `cd app && npx vitest run src/net/test`
+- Sim tests: `cd netsim && cargo test --release`
+- Bench: `/bench.html?l=<layout>` or `?map=tx,ty` for a mapped tile
