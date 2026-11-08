@@ -2,6 +2,8 @@ import * as THREE from 'three/webgpu';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { PropOut } from '../core/model';
 import { flat } from './materials';
+import { vec3, uv, float, smoothstep } from 'three/tsl';
+import { U } from '../../render/uniforms';
 
 type Part = { g: THREE.BufferGeometry; m: THREE.Material };
 
@@ -9,7 +11,7 @@ const M = {
   pole: flat(0x55585c, 0.6, 0.4),
   poleDark: flat(0x2e3033, 0.6, 0.3),
   wood: flat(0x5a4632, 0.95),
-  lampHead: flat(0x3a3c40, 0.5, 0.3),
+  lampHead: glowing(0x3a3c40, 0xffd9a0, 2.4),
   lens: flat(0xf3eedc, 0.3, 0, 0x000000),
   trunk: flat(0x4f3d2c, 0.95),
   leaf: flat(0x47662f, 0.9),
@@ -25,6 +27,13 @@ const M = {
   roof: flat(0x6d7075, 0.6, 0.3),
   sign: flat(0x2d6e3e, 0.6),
 };
+
+function glowing(base: number, glow: number, k: number): THREE.MeshStandardNodeMaterial {
+  const m = flat(base, 0.5, 0.3);
+  const c = new THREE.Color(glow);
+  m.emissiveNode = vec3(c.r, c.g, c.b).mul(U.night.mul(k));
+  return m;
+}
 
 const box = (w: number, h: number, d: number, x = 0, y = 0, z = 0) => new THREE.BoxGeometry(w, h, d).translate(x, y, z);
 const cyl = (r0: number, r1: number, h: number, x = 0, y = 0, z = 0, seg = 8) => new THREE.CylinderGeometry(r0, r1, h, seg).translate(x, y + h / 2, z);
@@ -116,6 +125,31 @@ export class PropsView {
       }
     }
     this.bake();
+    this.pools(props, toThree);
+  }
+
+  private pools(props: PropOut[], toThree: (x: number, y: number, z: number) => THREE.Vector3) {
+    const lamps = props.filter((p) => p.kind === 'lamp' || p.kind === 'lamp_res' || p.kind === 'platform_lamp');
+    if (!lamps.length) return;
+    const geo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+    const mat = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+    const r = uv().sub(0.5).length().mul(2);
+    const fall = float(1).sub(smoothstep(0.0, 1.0, r)).pow(2);
+    mat.colorNode = vec3(1.0, 0.78, 0.5).mul(fall).mul(U.night.mul(0.55));
+    const im = new THREE.InstancedMesh(geo, mat, lamps.length);
+    const d = new THREE.Object3D();
+    lamps.forEach((p, i) => {
+      const reach = p.kind === 'lamp' ? 2.1 : p.kind === 'lamp_res' ? 1.5 : 0;
+      const ox = Math.cos(p.h) * reach, oy = Math.sin(p.h) * reach;
+      d.position.copy(toThree(p.x + ox, p.y + oy, p.z - 0.1));
+      d.position.y += 0.06;
+      const size = p.kind === 'platform_lamp' ? 9 : 18;
+      d.scale.set(size, 1, size);
+      d.updateMatrix();
+      im.setMatrixAt(i, d.matrix);
+    });
+    im.renderOrder = 2;
+    this.group.add(im);
   }
 
   private staging = new THREE.Group();
