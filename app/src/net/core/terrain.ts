@@ -1,12 +1,14 @@
-import type { Ctx } from './ctx';
+import type { Ctx, Underpass } from './ctx';
 import type { TerrainDesc } from './desc';
 import type { Seg } from './model';
 import { segRange, variantAt } from './segments';
 
 const SINK = 0.05;
-const SLOPE = 0.5;
+export const SLOPE = 0.5;
 const REACH = 40;
 const NODE_REACH = 14;
+const WING = 16;
+const UNDER_SNAP = 4;
 
 function polyDistFast(x: number, y: number, px: number[], py: number[]): number {
   let inside = false;
@@ -54,6 +56,7 @@ export function conformTerrain(ctx: Ctx, t: TerrainDesc) {
   };
 
   for (const s of ctx.segs) stampSeg(ctx, t, s, apply);
+  for (const u of ctx.under) stampUnder(ctx, t, u, apply);
   for (const f of ctx.footprints) {
     if (f.kind !== 'node') continue;
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, zmin = Infinity, zsum = 0;
@@ -130,6 +133,49 @@ function stampSeg(ctx: Ctx, t: TerrainDesc, s: Seg, apply: (i: number, l: number
       if (kind === 'wall') continue;
       const slope = SLOPE;
       apply(idx, ze - SINK - slope * d, ze + slope * d);
+    }
+  }
+}
+
+export function underZ(u: Underpass, x: number, y: number) {
+  const lo = u.lo;
+  const q = lo.path.project({ x, y });
+  return lo.path.at(q.s).z + Math.min(...lo.lay.map((b) => Math.min(b.hl, b.hr)));
+}
+
+export function underSpan(ctx: Ctx, u: Underpass): [number, number] | null {
+  if (variantAt(ctx, u.lo, u.sl) !== 'grade') return null;
+  const v = (ctx.variants.get(u.up) ?? []).find((q) => q.kind === 'bridge' && q.s1 > u.s0 && q.s0 < u.s1);
+  if (!v) return null;
+  return [v.s0 >= u.s0 - UNDER_SNAP ? v.s0 : u.s0, v.s1 <= u.s1 + UNDER_SNAP ? v.s1 : u.s1];
+}
+
+function stampUnder(ctx: Ctx, t: TerrainDesc, u: Underpass, apply: (i: number, l: number, h: number) => void) {
+  const span = underSpan(ctx, u);
+  if (!span) return;
+  const [c0, c1] = span;
+  const up = u.up, P = up.path, cell = t.cell, pad = cell * 0.75;
+  const Lw = up.lay[0].l, Rw = up.lay[up.lay.length - 1].r;
+  for (let k = 0; k < P.n - 1; k++) {
+    const s0 = P.s[k], s1 = P.s[k + 1];
+    if (s1 < c0 || s0 > c1) continue;
+    const ax = P.x[k], ay = P.y[k], bx = P.x[k + 1], by = P.y[k + 1];
+    const dx = bx - ax, dy = by - ay, l = Math.hypot(dx, dy);
+    if (l < 1e-6) continue;
+    const ux = dx / l, uy = dy / l;
+    const r = Math.max(Math.abs(Lw), Math.abs(Rw)) + WING;
+    const i0 = Math.max(0, Math.floor((Math.min(ax, bx) - r - t.x0) / cell)), i1 = Math.min(t.nx - 1, Math.ceil((Math.max(ax, bx) + r - t.x0) / cell));
+    const j0 = Math.max(0, Math.floor((Math.min(ay, by) - r - t.y0) / cell)), j1 = Math.min(t.ny - 1, Math.ceil((Math.max(ay, by) + r - t.y0) / cell));
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) {
+      const px = t.x0 + i * cell - ax, py = t.y0 + j * cell - ay;
+      const along = px * ux + py * uy;
+      if (along < -0.01 || along > l + 0.01) continue;
+      const s_ = s0 + along;
+      if (s_ < c0 || s_ > c1) continue;
+      const lat = -px * uy + py * ux;
+      const d = lat > Lw + pad ? lat - Lw - pad : lat < Rw - pad ? Rw - pad - lat : 0;
+      if (d > WING) continue;
+      apply(j * t.nx + i, -Infinity, underZ(u, t.x0 + i * cell, t.y0 + j * cell) - SINK + SLOPE * d);
     }
   }
 }

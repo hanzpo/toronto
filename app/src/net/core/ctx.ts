@@ -7,6 +7,8 @@ export interface LegLane { lane: LaneOut; lat: number; inbound: boolean; def: La
 
 export interface Variant { s0: number; s1: number; kind: 'grade' | 'bridge' | 'tunnel' | 'wall' }
 
+export interface Underpass { up: Seg; s0: number; s1: number; lo: Seg; sl: number }
+
 export class Ctx {
   sink = new Sink();
   props: PropOut[] = [];
@@ -20,6 +22,7 @@ export class Ctx {
   nodes: Node[] = [];
   legLanes = new Map<Leg, LegLane[]>();
   variants = new Map<Seg, Variant[]>();
+  under: Underpass[] = [];
   terrainOut: Built['terrain'];
   desc: NetDesc;
   constructor(desc: NetDesc) { this.desc = desc; }

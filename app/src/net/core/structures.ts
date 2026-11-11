@@ -16,7 +16,7 @@ export function resolveStructures(ctx: Ctx) {
     }
     forced.set(s, out);
   }
-  const over = crossings(ctx);
+  const over = crossings(ctx, forced);
   for (const s of ctx.segs) {
     const L = s.path.length;
     const a = s.asset;
@@ -107,7 +107,7 @@ function merge(r: Variant[], gap: number): Variant[] {
   return out;
 }
 
-function crossings(ctx: Ctx): Map<Seg, [number, number][]> {
+function crossings(ctx: Ctx, forced: Map<Seg, Variant[]>): Map<Seg, [number, number][]> {
   const out = new Map<Seg, [number, number][]>();
   const segs = ctx.segs;
   const box = segs.map((s) => {
@@ -131,7 +131,7 @@ function crossings(ctx: Ctx): Map<Seg, [number, number][]> {
           const sb = B.path.s[q] + x.u * (B.path.s[q + 1] - B.path.s[q]);
           const za = A.path.at(sa).z, zb = B.path.at(sb).z;
           const [up, lo, su, sl] = za >= zb ? [A, B, sa, sb] : [B, A, sb, sa];
-          void sl;
+          if (forced.get(lo)!.some((v) => v.kind === 'tunnel' && sl >= v.s0 && sl <= v.s1)) continue;
           const dz = Math.abs(za - zb);
           const need = up.asset.deckDepth + lo.asset.clearance;
           if (dz < 0.5) {
@@ -144,6 +144,7 @@ function crossings(ctx: Ctx): Map<Seg, [number, number][]> {
           const span = (half + 3) / Math.max(0.25, ang) + 4;
           const list = out.get(up) ?? [];
           list.push([su - span, su + span]);
+          ctx.under.push({ up, s0: su - span, s1: su + span, lo, sl });
           out.set(up, list);
         }
       }
