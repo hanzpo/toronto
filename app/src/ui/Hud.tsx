@@ -118,7 +118,7 @@ const ANALYTICS: { k: AnalyticsKey; label: string; color: string; sub?: string }
   { k: 'via', label: 'VIA Rail', color: 'var(--via)' },
   { k: 'bus', label: 'Buses', color: 'var(--bus)' },
   { k: 'vehicles', label: 'Live vehicles', color: 'var(--live)', sub: 'schedule positions' },
-  { k: 'congestion', label: 'Congestion', color: 'var(--warn)', sub: 'major roads · model + live' },
+  { k: 'congestion', label: 'Congestion', color: 'var(--warn)', sub: 'major roads · time of day' },
   { k: 'air', label: 'Air traffic', color: '#9fb4ff', sub: 'YYZ · YTZ · YHM · YKF' },
 ];
 

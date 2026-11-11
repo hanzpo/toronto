@@ -69,6 +69,7 @@ export default function App() {
         const transit = new (await mods.transit).TransitLayer(engine.dataRoot);
         await engine.addLayer(transit);
         Object.assign(window as object, { __transit: transit });
+        await engine.addLayer(new (await import('./layers/CongestionLayer')).CongestionLayer());
         await yieldTask();
         await engine.addLayer(new (await mods.interact).InteractLayer());
         { const stations = new (await mods.stations).StationsLayer(transit.system); await engine.addLayer(stations); Object.assign(window as object, { __stations: stations }); }
