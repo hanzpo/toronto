@@ -1,7 +1,7 @@
 // Tile worker: fetch + gunzip + decode TBN1 + build transferable geometry.
 import { decodeTbn } from '../data/tbn';
 
-import { buildBuildings, buildRail, buildRoads, buildTerrain, concatMeshes, extractHouses, frontSurfaces, promoteNonHouses, TerrainSampler, type MeshBuf, type TileMeshes } from './meshing';
+import { buildBuildings, buildTerrain, extractHouses, promoteNonHouses, TerrainSampler, type MeshBuf, type TileMeshes } from './meshing';
 import { setHeritage } from './buildings';
 import { buildUrban } from './urban';
 import { houseRoofQa } from './houseFront';
@@ -10,10 +10,10 @@ import { buildCanopy } from './vegetation';
 import { extractFootprints } from './collide';
 import { applyStationZones, setStationZones } from './stationZones';
 import { dropAirsideTile } from './airside';
-import { SURF_CURB, SURF_TACTILE } from './roads';
+import { buildFar } from './farNet';
 
-/** road surfaces only drawn on tiles near the camera (TileManager ROAD_NEAR): vertical curb faces, tactile plates */
-const NEAR_SURFS = new Set([SURF_CURB, SURF_TACTILE]);
+/** road and rail arrays of the old tiles: replaced by the network model's (net/bake.ts far tiles) */
+const OLD_STREET = /^(r|l|xr|xl|xb|j|js|jw|jc|jt|sg|md|k)_/;
 
 export type WorkerIn =
   | { type: 'config'; suppress: number[]; heritage?: number[]; build: number; zones?: number[][]; vground?: boolean }
@@ -114,13 +114,25 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
   jobsByUrl.add(url);
   const t0 = performance.now();
   try {
-    const raw = await tileBytes(url);
+    const farUrl = url.replace('/tiles/', '/net/far/');
+    const [raw, farRaw] = await Promise.all([tileBytes(url), tileBytes(farUrl).catch(() => null)]);
     if (ac.signal.aborted) { post({ type: 'cancelled', id }); return; }
     if (!raw) { post({ type: 'empty', id }); return; }
-    const buf = await gunzipBytes(raw);
+    const [buf, farBuf] = await Promise.all([gunzipBytes(raw), farRaw ? gunzipBytes(farRaw) : null]);
+    sources.delete(farUrl);
     if (ac.signal.aborted) { post({ type: 'cancelled', id }); return; }
     const t1 = performance.now();
     const { arrays: a, header } = decodeTbn<{ names?: string[] }>(buf);
+    for (const k of Object.keys(a)) if (OLD_STREET.test(k)) delete a[k];
+    if (farBuf) {
+      const far = decodeTbn<{ names?: string[] }>(farBuf);
+      const names = header.names ?? (header.names = []);
+      const base = names.length;
+      names.push(...(far.header.names ?? []));
+      const rn = far.arrays.r_name as Uint16Array;
+      for (let i = 0; i < rn.length; i++) if (rn[i] !== 0xffff) rn[i] += base;
+      Object.assign(a, far.arrays);
+    }
     if (level === 0) applyStationZones(a, msg.tx * size, msg.ty * size, size);
     if (level === 0) await dropAirsideTile(a, url, msg.tx * size, msg.ty * size, size); // apron roads: drawn by AirportLayer
     const G = (a.terrain_h ? Math.round(Math.sqrt(a.terrain_h.length)) : grid) || grid;
@@ -136,19 +148,16 @@ self.onmessage = async (ev: MessageEvent<WorkerIn>) => {
     if (houses) { houses = promoteNonHouses(a, houses).hb; houses.qa = houseRoofQa(houses, a, msg.tx * size, msg.ty * size); }
     const bld = buildBuildings(a, suppress, level, msg.tx * size, msg.ty * size, sampler, header.names);
     const ground = a.ground ? (a.ground as Uint8Array).slice() : new Uint8Array(256 * 256);
-    const roads = buildRoads(a, sampler, level, ground);
-    const rail = buildRail(a, sampler, level);
+    const street = buildFar(a, sampler, level);
     // rooftops (from buildBuildings), construction sites, laneways: layers/UrbanLayer.ts
     const urban = level === 0 ? buildUrban(a, header.names ?? [], bld.items, place, ground, houses, msg.tx, msg.ty) : null;
     const canopy = level === 1 ? buildCanopy(a, ground, sampler, msg.tx, msg.ty, size) : null;
-    const street3d = concatMeshes(roads.mesh, rail.mesh);
-    const railStart = roads.mesh ? roads.mesh.index.length : 0;
-    const roadNear = street3d && level === 0 ? frontSurfaces(street3d, railStart, NEAR_SURFS) : 0;
+    const street3d = street.mesh;
     const collide = level === 0 ? extractFootprints(a, suppress) : null;
     const result: TileMeshes = {
       terrain: terr.mesh, vground, cuts, emb, heights: terr.heights, grid: G, ground, minH: terr.minH, maxH: Math.max(terr.maxH, 0),
-      buildings: bld.mesh, collide, roads: street3d, railStart, roadNear, terrainCoarse: terr.coarseStart, houses, canopy, urban,
-      counts: { buildings: bld.count, houses: houses?.count ?? 0, roads: roads.count, rails: rail.count },
+      buildings: bld.mesh, collide, roads: street3d, railStart: street.railStart, terrainCoarse: terr.coarseStart, houses, canopy, urban,
+      counts: { buildings: bld.count, houses: houses?.count ?? 0, roads: street.roads, rails: street.rails },
     };
     const tr: Transferable[] = [terr.heights.buffer, ground.buffer];
     if (collide) tr.push(collide.off.buffer, collide.xy.buffer, collide.bottom.buffer, collide.top.buffer, ...(collide.occ ? [collide.occ.buffer] : []));
