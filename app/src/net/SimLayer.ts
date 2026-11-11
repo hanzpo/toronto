@@ -4,7 +4,7 @@ import { simSpeed } from '../state/store';
 import type { SimFrame, SimRegion, SimReply, SimTrips, TripIn } from './sim/simWorker';
 import { clock } from '../state/clock';
 import type { TransitLayer } from '../layers/TransitLayer';
-import { NetVehicles, bodies, transitSpans, type TripMeta } from './view/vehicles';
+import { NetVehicles, bodies, type TripMeta } from './view/vehicles';
 import * as THREE from 'three/webgpu';
 
 const S = 1024;
@@ -83,8 +83,7 @@ export class SimLayer implements Layer {
     }
     if (this.frame) {
       const tl = this.transit();
-      if (tl && !tl.simOwns) tl.simOwns = (t) => this.handed.has(t);
-      this.agents.highlight ??= tl?.highlight ?? null;
+      if (tl && !tl.sim) tl.sim = { paths: () => this.agents.paths, owns: (t) => this.handed.has(t) };
       this.agents.update(performance.timeOrigin + performance.now(), ctx.anchor, ctx.cameraPos.x, -ctx.cameraPos.z, ctx.dt, (trip) => this.meta(trip));
       this.agents.group.visible = ctx.altitude < 3000;
     }
@@ -132,8 +131,6 @@ export class SimLayer implements Layer {
 
   tripPose(trip: number): { e: number; n: number; z: number; h: number } | null { return this.agents.poses.get(trip) ?? null; }
 
-  hideTrip(trip: number | null) { this.agents.hide = trip; }
-
   tripPath(trip: number): Float32Array | null { return this.agents.paths.get(trip) ?? null; }
 
   driveTrip(trip: number | null): boolean {
@@ -153,12 +150,6 @@ export class SimLayer implements Layer {
     if (trip === null) return;
     this.kept.add(trip);
     if (this.handed.delete(trip)) this.worker?.postMessage({ type: 'drop', trip });
-  }
-
-  transitBodies(): { trip: number; ae: number; an: number; be: number; bn: number; z: number }[] {
-    const f = this.frame?.agents;
-    if (!f) return [];
-    return transitSpans(f);
   }
 
   pickPed(e: number, n: number, radius = 3): { e: number; n: number; z: number; heading: number; colour: number } | null {

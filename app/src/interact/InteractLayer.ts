@@ -34,8 +34,6 @@ interface TrafficApi {
   pickCarMajor?(e: number, n: number, radius?: number, perClass?: number): number | null;
   handles?(trip: number): boolean;
   tripPose?(trip: number): { e: number; n: number; z: number; h: number; v: number } | null;
-  hideTrip?(trip: number | null): void;
-  transitBodies?(): { trip: number; ae: number; an: number; be: number; bn: number; z: number }[];
   pickPed?(e: number, n: number, radius?: number): { e: number; n: number; z: number; heading: number; colour: number } | null;
   removePedNear?(e: number, n: number): void;
   setWalker?(e: number, n: number, elev: number, radius: number): void;
@@ -499,7 +497,6 @@ export class InteractLayer implements Layer {
       this.op = null;
     }
     if (this.trip !== null) this.transit.overrides.delete(this.trip);
-    this.traffic()?.hideTrip?.(null);
     if (this.drivingCar) {
       try { this.traffic()?.releasePlayer?.(); } catch { /* ignore */ }
       this.drivingCar = false;
@@ -608,8 +605,8 @@ export class InteractLayer implements Layer {
         if (op.doors === 'closing') doorChime();
       }
       const p = op.path.pose(op.s, 6, _railPose);
-      if (this.opSim) this.traffic()?.hideTrip?.(this.view !== 'chase' ? op.info.trip : null);
-      else if (this.view !== 'chase') this.transit.overrides.set(op.info.trip, null);
+      if (this.view !== 'chase') this.transit.overrides.set(op.info.trip, null);
+      else if (this.opSim) this.transit.overrides.delete(op.info.trip);
       else this.transit.overrides.set(op.info.trip, { x: p.e, y: p.n, z: p.z, heading: p.heading, mode: op.mode, route: op.route, pattern: op.path.pattern, dist: op.s });
     }
     if (this.mode === 'walk' && this.walker) {
@@ -902,10 +899,8 @@ export class InteractLayer implements Layer {
     this.transit.hideLines = inside;
     // hide the vehicle we sit in (its body would block the camera)
     if (this.trip !== null && !this.op) {
-      const tr = this.traffic();
       const hide = this.mode !== 'follow' && this.view !== 'chase';
-      if (tr?.handles?.(this.trip)) tr.hideTrip?.(hide ? this.trip : null);
-      else if (hide) this.transit.overrides.set(this.trip, null);
+      if (hide) this.transit.overrides.set(this.trip, null);
       else this.transit.overrides.delete(this.trip);
     }
     this.routeHi.update(ctx);
@@ -1231,12 +1226,6 @@ export class InteractLayer implements Layer {
       if (!proj(ps[o + 3], ps[o + 4], ps[o + 5], b)) continue;
       const d = segDist(x, y, a[0], a[1], b[0], b[1]);
       if (d < bd) { bd = d; best = { kind: 'vehicle', trip: ps[o], label: '' }; }
-    }
-    const tb = this.traffic()?.transitBodies?.() ?? [];
-    for (const t of tb) {
-      if (!proj(t.ae, t.an, t.z, a) || !proj(t.be, t.bn, t.z, b)) continue;
-      const d = segDist(x, y, a[0], a[1], b[0], b[1]);
-      if (d < bd) { bd = d; best = { kind: 'vehicle', trip: t.trip, label: '' }; }
     }
     if (this.op) {
       const p = this.pose, L2 = this.op.dyn.length / 2;

@@ -41,8 +41,6 @@ export class NetVehicles {
   private white = new THREE.Color(1, 1, 1);
   readonly poses = new Map<number, { e: number; n: number; z: number; h: number; v: number }>();
   readonly paths = new Map<number, Float32Array>();
-  hide: number | null = null;
-  highlight: Map<number, number> | null = null;
 
   constructor() {
     this.group.name = 'net-vehicles';
@@ -128,12 +126,12 @@ export class NetVehicles {
         const path = new Float32Array(n * 3);
         for (let j = 0; j < n; j++) { path[j * 3] = P[(n - 1 - j) * 3]; path[j * 3 + 1] = P[(n - 1 - j) * 3 + 1]; path[j * 3 + 2] = P[(n - 1 - j) * 3 + 2]; }
         this.paths.set(b1.trip, path);
-        if (b1.trip === this.hide) continue;
+        continue;
       }
       const m = b1.trip >= 0 ? meta(b1.trip) : null;
       const mode: Mode = m?.mode ?? (b1.kind === BUS ? 'bus' : b1.kind === TRAM ? 'streetcar' : b1.variant === 1 ? 'subway' : 'commuter_rail');
       const lay = layoutFor(mode, m?.route);
-      this.placeConsist(lay, P, n, ax, az, d > 400, m?.color ?? this.white, b1.flags, b1.trip >= 0 ? this.highlight?.get(b1.trip) ?? 0 : 0);
+      this.placeConsist(lay, P, n, ax, az, d > 400, m?.color ?? this.white, b1.flags);
     }
     for (const id of this.phase.keys()) if (!seen.has(id)) this.phase.delete(id);
     for (const p of this.cars) p.commit();
@@ -167,7 +165,7 @@ export class NetVehicles {
     out[2] = P[i * 3 + 2] + (P[i * 3 + 5] - P[i * 3 + 2]) * t;
   }
 
-  private placeConsist(lay: ConsistLayout, P: Float32Array, n: number, ax: number, az: number, low: boolean, color: THREE.Color, flags: number, outline = 0) {
+  private placeConsist(lay: ConsistLayout, P: Float32Array, n: number, ax: number, az: number, low: boolean, color: THREE.Color, flags: number) {
     const fp = [0, 0, 0], rp = [0, 0, 0];
     for (let i = 0; i < lay.cars.length; i++) {
       const c = lay.centre[i];
@@ -181,7 +179,7 @@ export class NetVehicles {
       const mx = (fp[0] + rp[0]) / 2, my = (fp[1] + rp[1]) / 2, mz = (fp[2] + rp[2]) / 2;
       const off = (pf + pr) / 2;
       const cx = mx - Math.cos(h) * off, cy = my - Math.sin(h) * off;
-      this.consists.add(lay.cars[i], low, cx - ax, mz, -cy - az, h, pitch, color, flags | (i === 0 ? 16 : 0), outline);
+      this.consists.add(lay.cars[i], low, cx - ax, mz, -cy - az, h, pitch, color, flags | (i === 0 ? 16 : 0));
     }
   }
 
@@ -205,13 +203,3 @@ export function bodies(f: Float32Array): BodyPose[] {
   return out;
 }
 
-export function transitSpans(f: Float32Array): { trip: number; ae: number; an: number; be: number; bn: number; z: number }[] {
-  const out: { trip: number; ae: number; an: number; be: number; bn: number; z: number }[] = [];
-  let i = 0;
-  while (i + HEAD <= f.length) {
-    const n = f[i + 6], p = i + HEAD, q = p + (n - 1) * 3, trip = f[i + 3];
-    if (trip >= 0 && f[i + 1] !== 0 && f[i + 1] !== 4) out.push({ trip, ae: f[p], an: f[p + 1], be: f[q], bn: f[q + 1], z: Math.max(f[p + 2], f[q + 2]) + 2 });
-    i += HEAD + n * 3;
-  }
-  return out;
-}

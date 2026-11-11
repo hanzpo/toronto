@@ -12,7 +12,7 @@ import { useApp, type AnalyticsKey } from '../state/store';
 import { MODES, MODE_ID, STATE_DWELL, TransitSystem, fetchLoader, type Mode, type Profile } from '../transit';
 import { LANE_OFFSET, layoutFor, placeCar, type CarPose, type ConsistLayout } from './transit/consist';
 import { CarPools, FLAG_BRAKE } from './transit/pools';
-import type { PatternShape } from '../transit/shape';
+import { PatternShape } from '../transit/shape';
 
 const NEAR = 2600;
 const LOW_DETAIL = 450;
@@ -52,8 +52,8 @@ export class TransitLayer implements Layer {
   /** trip -> outline kind (render/overlay/OutlineSet: 1 hover, 2 selected) */
   readonly highlight = new Map<number, number>();
   hideLines = false;
-  /** trips the network sim drives and draws itself */
-  simOwns: ((trip: number) => boolean) | null = null;
+  /** the network sim: the consist path of every trip it drives (rear → front), and the trips it has taken over */
+  sim: { paths(): ReadonlyMap<number, Float32Array>; owns(trip: number): boolean } | null = null;
   lastT = 0;
   stats = { cars: 0, near: 0 };
   /** pickable vehicle spans drawn this frame: [trip, e0, n0, e1, n1, z] × pickCount */
@@ -77,6 +77,8 @@ export class TransitLayer implements Layer {
   private az = 0;
   private evalBox: [number, number, number, number] = [0, 0, 0, 0];
   private drawnPose = new Map<number, DrawnPose>();
+  /** trips placed this frame: every trip is drawn at most once, from the first source that claims it */
+  private claimed = new Set<number>();
   private lenCache = new Map<number, number>();
 
   constructor(dataRoot: string) {
@@ -168,8 +170,10 @@ export class TransitLayer implements Layer {
     this.drawnPose.clear();
     this.pickCount = 0;
     this.stats.near = 0;
-    if (an.vehicles && this.system.tripCount > 0) this.drawSchedule(ctx, an, markerPx, counts);
+    this.claimed.clear();
     this.drawOverrides(ctx, counts);
+    if (this.system.tripCount > 0) this.drawSim(ctx);
+    if (an.vehicles && this.system.tripCount > 0) this.drawSchedule(ctx, an, markerPx, counts);
     this.pools.commit();
     this.stats.cars = this.pools.instances;
     for (const m of MODE_LIST) {
@@ -199,7 +203,7 @@ export class TransitLayer implements Layer {
       if (!mode) continue;
       if (!near && !an[STYLE[mode].key]) continue;
       const trip = v.trip[i];
-      if (this.overrides.has(trip) || this.simOwns?.(trip)) continue;
+      if (this.sim?.owns(trip) || !this.claim(trip)) continue;
       const dc = Math.hypot(v.x[i] - camE, v.y[i] - camN);
       if (dc > markerMax) continue;
       const sty = STYLE[mode];
@@ -232,8 +236,34 @@ export class TransitLayer implements Layer {
     this.prevSpeed = next;
   }
 
+  private claim(trip: number): boolean {
+    if (this.claimed.has(trip)) return false;
+    this.claimed.add(trip);
+    return true;
+  }
+
+  private drawSim(ctx: FrameContext) {
+    const camE = ctx.cameraPos.x, camN = -ctx.cameraPos.z;
+    for (const [trip, pts] of this.sim?.paths() ?? []) {
+      const info = this.system.tripInfo(trip);
+      if (!info || !this.claim(trip)) continue;
+      const n = pts.length / 3;
+      if (n < 2) continue;
+      const dist = new Float32Array(n);
+      for (let i = 1; i < n; i++) dist[i] = dist[i - 1] + Math.hypot(pts[i * 3] - pts[i * 3 - 3], pts[i * 3 + 1] - pts[i * 3 - 2]);
+      const shape = new PatternShape(-1, pts, dist);
+      const lay = layoutFor(info.mode, info.routeMeta);
+      const route = info.route;
+      const dc = Math.hypot(pts[(n - 1) * 3] - camE, pts[(n - 1) * 3 + 1] - camN);
+      this.drawConsist(shape, lay, shape.length, 1, this.routeTint[route], dc > LOW_DETAIL, 0, 0, trip, MODE_ID[info.mode]);
+      this.notePose(trip, shape, shape.length - lay.length / 2, lay.length, 1, 0);
+      this.stats.near++;
+    }
+  }
+
   private drawOverrides(ctx: FrameContext, counts: Map<Mode, number>) {
-    for (const o of this.overrides.values()) {
+    for (const [trip, o] of this.overrides) {
+      this.claim(trip);
       if (!o) continue;
       if (o.pattern !== undefined && o.dist !== undefined) {
         const shape = this.system.patternShape(o.pattern);
