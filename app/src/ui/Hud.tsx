@@ -293,10 +293,44 @@ function Shortcuts() {
   );
 }
 
+function FullscreenButton() {
+  const [on, setOn] = useState(!!document.fullscreenElement);
+  useEffect(() => {
+    const f = () => setOn(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', f);
+    return () => document.removeEventListener('fullscreenchange', f);
+  }, []);
+  const toggle = () => void (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen());
+  return (
+    <button className="iconbtn panel" onClick={toggle} title={on ? 'Exit full screen' : 'Full screen'} aria-label={on ? 'Exit full screen' : 'Full screen'}>
+      {on ? <Icon.collapse /> : <Icon.expand />}
+    </button>
+  );
+}
+
+function useContainScroll() {
+  useEffect(() => {
+    const scrollable = (el: Element | null, dy: number): boolean => {
+      for (; el && el !== document.body; el = el.parentElement) {
+        const s = getComputedStyle(el);
+        if (!/(auto|scroll)/.test(s.overflowY) || el.scrollHeight <= el.clientHeight) continue;
+        if (dy < 0 ? el.scrollTop > 0 : el.scrollTop + el.clientHeight < el.scrollHeight - 1) return true;
+      }
+      return false;
+    };
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || !scrollable(e.target as Element, e.deltaY)) e.preventDefault();
+    };
+    window.addEventListener('wheel', onWheel, { passive: false, capture: true });
+    return () => window.removeEventListener('wheel', onWheel, { capture: true });
+  }, []);
+}
+
 // ---------------------------------------------------------------------------- root
 
 export function Hud() {
   useKeyboardShortcuts();
+  useContainScroll();
   const mode = useApp((s) => s.analyticsMode);
   const selected = useApp((s) => s.selected);
   const takeover = useInteract((s) => s.mode !== 'free');
@@ -309,6 +343,7 @@ export function Hud() {
       <div className="navcluster">
         <ScaleBar />
         <Shortcuts />
+        <FullscreenButton />
         <Compass />
       </div>
       <Panels />

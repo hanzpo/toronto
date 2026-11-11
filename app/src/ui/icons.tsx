@@ -29,5 +29,7 @@ export const Icon = {
   station: () => <Svg><rect x="5" y="3" width="14" height="14" rx="3.5" /><path d="M5 10h14" /><path d="m8.5 21 1.5-4M15.5 21 14 17" /><circle cx="9" cy="13.5" r=".6" fill="currentColor" /><circle cx="15" cy="13.5" r=".6" fill="currentColor" /></Svg>,
   place: () => <Svg><path d="M12 21s6.5-5.6 6.5-11a6.5 6.5 0 0 0-13 0c0 5.4 6.5 11 6.5 11Z" /><circle cx="12" cy="10" r="2.3" /></Svg>,
   arrow: () => <Svg><path d="M5 12h14M13 6l6 6-6 6" /></Svg>,
+  expand: () => <Svg><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></Svg>,
+  collapse: () => <Svg><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" /></Svg>,
   keyboard: () => <Svg><rect x="3" y="6" width="18" height="12" rx="2.5" /><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10" /></Svg>,
 };
