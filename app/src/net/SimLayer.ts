@@ -4,7 +4,7 @@ import { simSpeed } from '../state/store';
 import type { SimFrame, SimRegion, SimReply, SimTrips, TripIn } from './sim/simWorker';
 import { clock } from '../state/clock';
 import type { TransitLayer } from '../layers/TransitLayer';
-import { NetVehicles, bodies, type TripMeta } from './view/vehicles';
+import { NetVehicles, bodies, transitSpans, type TripMeta } from './view/vehicles';
 import * as THREE from 'three/webgpu';
 
 const S = 1024;
@@ -33,7 +33,7 @@ export class SimLayer implements Layer {
     this.worker.onmessage = (ev: MessageEvent<SimFrame | SimTrips | SimReply | SimRegion>) => {
       if (ev.data.type === 'region') { this.keepOnly(new Set(ev.data.trips)); return; }
       if (ev.data.type === 'trips') { this.onTrips(ev.data); return; }
-      if (ev.data.type === 'reply') { this.replies.get(ev.data.id)?.(ev.data.ok); this.replies.delete(ev.data.id); return; }
+      if (ev.data.type === 'reply') { if (ev.data.player.length && this.frame) this.frame.player = ev.data.player; this.replies.get(ev.data.id)?.(ev.data.ok); this.replies.delete(ev.data.id); return; }
       if (ev.data.type !== 'frame') return;
       if (!this.frame || this.frame.nodes !== ev.data.nodes) {
         this.nodeIdx = new Map(ev.data.nodes.map((id, i) => [id, i]));
@@ -124,6 +124,12 @@ export class SimLayer implements Layer {
     return this.pickCar(e, n, radius);
   }
 
+  transitBodies(): { trip: number; ae: number; an: number; be: number; bn: number; z: number }[] {
+    const f = this.frame?.agents;
+    if (!f) return [];
+    return transitSpans(f);
+  }
+
   pickPed(e: number, n: number, radius = 3): { e: number; n: number; z: number; heading: number; colour: number } | null {
     const f = this.frame?.agents;
     if (!f) return null;
@@ -137,7 +143,7 @@ export class SimLayer implements Layer {
     const p = this.frame?.player;
     if (!p || p.length < 6) return null;
     this.lastPlayer = { e: p[0], n: p[1] };
-    return { e: p[0], n: p[1], elev: p[2], heading: p[3], speed: p[4], roadName: null, onRoad: p[5] > 0, surface: p[5] > 0 ? 0 : 1, damage: 0 };
+    return { e: p[0], n: p[1], elev: p[2], heading: p[3], speed: p[4], roadName: null, onRoad: p[5] > 0, surface: p[5] > 0 ? 1 : 0, damage: 0 };
   }
 
   setPlayerInput(inp: { throttle?: number; brake?: number; steer?: number; handbrake?: boolean }) {

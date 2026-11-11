@@ -73,6 +73,15 @@ export class World {
     /**
      * @returns {Float32Array}
      */
+    export_free() {
+        const ret = wasm.world_export_free(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @returns {Float32Array}
+     */
     export_state() {
         const ret = wasm.world_export_state(this.__wbg_ptr);
         var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
@@ -112,6 +121,14 @@ export class World {
     has_trip(trip) {
         const ret = wasm.world_has_trip(this.__wbg_ptr, trip);
         return ret !== 0;
+    }
+    /**
+     * @param {Float32Array | number[]} data
+     */
+    import_free(data) {
+        const ptr0 = passArrayF32ToWasm0(data, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.world_import_free(this.__wbg_ptr, ptr0, len0);
     }
     /**
      * @param {Float32Array | number[]} data

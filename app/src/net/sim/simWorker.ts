@@ -17,7 +17,7 @@ export type SimIn =
   | { type: 'walker'; x: number; y: number; z: number }
   | { type: 'clearWalker' };
 
-export interface SimReply { type: 'reply'; id: number; ok: boolean }
+export interface SimReply { type: 'reply'; id: number; ok: boolean; player: number[] }
 export interface SimRegion { type: 'region'; trips: number[] }
 
 export interface SimTrips { type: 'trips'; accepted: number[]; done: number[] }
@@ -63,6 +63,7 @@ async function region(root: string, tiles: [number, number][], seed: number) {
     const map = Int32Array.from(oldKeys, (k) => at.get(k) ?? -1);
     world.set_clock(old.clock());
     carried = world.import_state(old.export_state(), map);
+    world.import_free(old.export_free());
     old.free();
   }
   nodes = b.nodes.map((n) => n.id);
@@ -87,7 +88,7 @@ self.onmessage = (ev: MessageEvent<SimIn>) => {
   const m = ev.data;
   if (m.type === 'region') void region(m.root, m.tiles, m.seed);
   if (m.type === 'speed') speed = m.speed;
-  if (m.type === 'take') { const ok = !!world?.take_over_nearest(m.x, m.y, m.r); (self as unknown as Worker).postMessage({ type: 'reply', id: m.id, ok } satisfies SimReply); }
+  if (m.type === 'take') { const ok = !!world?.take_over_nearest(m.x, m.y, m.r); (self as unknown as Worker).postMessage({ type: 'reply', id: m.id, ok, player: world ? [...world.player()] : [] } satisfies SimReply); }
   if (m.type === 'input') world?.set_player_input(m.throttle, m.brake, m.steer, m.handbrake, m.ground);
   if (m.type === 'release') world?.release_player();
   if (m.type === 'walker') world?.set_walker(m.x, m.y, m.z);

@@ -59,6 +59,7 @@ pub struct Free {
     handbrake: bool,
     ground: f32,
     on_road: bool,
+    parked: bool,
 }
 
 const OFF_NET: u32 = u32::MAX;
@@ -746,7 +747,7 @@ impl World {
             if a.v.abs() < 0.05 && f.throttle == 0.0 && f.brake == 0.0 {
                 v = 0.0;
             }
-            a.v = v.clamp(-6.0, 45.0);
+            a.v = if f.parked { a.v.signum() * (a.v.abs() - 8.0 * dt).max(0.0) } else { v.clamp(-6.0, 45.0) };
             let wheelbase = 2.8;
             let st = f.steer.clamp(-1.0, 1.0) * (0.55 - (a.v.abs() / 45.0) * 0.4);
             f.h += a.v / wheelbase * st.tan() * dt;
@@ -805,12 +806,20 @@ impl World {
     pub fn take_over_nearest(&mut self, x: f32, y: f32, r: f32) -> bool {
         let mut best: Option<(usize, f32)> = None;
         for (i, a) in self.agents.iter().enumerate() {
-            if a.kind != AKind::Car || a.free.is_some() || a.trip >= 0 || !a.alive || a.lane == OFF_NET {
+            if a.kind != AKind::Car || a.trip >= 0 || !a.alive {
                 continue;
             }
-            let l = &self.net.lanes[a.lane as usize];
-            let s = if a.dir > 0 { a.d } else { l.len - a.d };
-            let (p, _, _) = self.net.at(a.lane, s);
+            let p = match a.free {
+                Some(f) if f.parked => [f.x, f.y],
+                Some(_) => continue,
+                None if a.lane == OFF_NET => continue,
+                None => {
+                    let l = &self.net.lanes[a.lane as usize];
+                    let s = if a.dir > 0 { a.d } else { l.len - a.d };
+                    let (p, _, _) = self.net.at(a.lane, s);
+                    [p[0], p[1]]
+                }
+            };
             let d = ((p[0] - x).powi(2) + (p[1] - y).powi(2)).sqrt();
             if d < r && best.map_or(true, |b| d < b.1) {
                 best = Some((i, d));
@@ -818,6 +827,11 @@ impl World {
         }
         let Some((i, _)) = best else { return false };
         self.release_player();
+        if let Some(f) = self.agents[i].free.as_mut() {
+            f.parked = false;
+            f.brake = 0.0;
+            return true;
+        }
         let a = &self.agents[i];
         let l = &self.net.lanes[a.lane as usize];
         let s = if a.dir > 0 { a.d } else { l.len - a.d };
@@ -832,7 +846,7 @@ impl World {
     pub fn set_player_input(&mut self, throttle: f32, brake: f32, steer: f32, handbrake: bool, ground: f32) {
         for a in self.agents.iter_mut() {
             if a.kind != AKind::Ped {
-                if let Some(f) = a.free.as_mut() {
+                if let Some(f) = a.free.as_mut().filter(|f| !f.parked) {
                     f.throttle = throttle;
                     f.brake = brake;
                     f.steer = steer;
@@ -846,7 +860,7 @@ impl World {
     pub fn player(&self) -> Vec<f32> {
         for a in &self.agents {
             if a.kind != AKind::Ped {
-                if let Some(f) = a.free {
+                if let Some(f) = a.free.filter(|f| !f.parked) {
                     return vec![f.x, f.y, f.z, f.h, a.v, if f.on_road { 1.0 } else { 0.0 }];
                 }
             }
@@ -856,11 +870,23 @@ impl World {
 
     pub fn release_player(&mut self) {
         for a in self.agents.iter_mut() {
-            if a.kind != AKind::Ped && a.free.is_some() {
-                a.alive = false;
+            if a.kind != AKind::Ped {
+                if let Some(f) = a.free.as_mut() {
+                    f.parked = true;
+                    f.throttle = 0.0;
+                    f.steer = 0.0;
+                    f.brake = 1.0;
+                    f.handbrake = true;
+                }
             }
         }
-        self.agents.retain(|a| a.alive);
+        let parked: Vec<usize> = (0..self.agents.len()).filter(|&i| self.agents[i].kind != AKind::Ped && self.agents[i].free.is_some()).collect();
+        if parked.len() > 12 {
+            for &i in &parked[..parked.len() - 12] {
+                self.agents[i].alive = false;
+            }
+            self.agents.retain(|a| a.alive);
+        }
     }
 
     pub fn set_walker(&mut self, x: f32, y: f32, z: f32) {
@@ -957,6 +983,28 @@ impl World {
         out
     }
 
+    pub fn export_free(&self) -> Vec<f32> {
+        let mut out = Vec::new();
+        for a in &self.agents {
+            if let Some(f) = a.free {
+                out.extend_from_slice(&[a.kind as u8 as f32, a.variant as f32, a.len, a.v, f.x, f.y, f.z, f.h, f.ground, if f.parked { 1.0 } else { 0.0 }]);
+            }
+        }
+        out
+    }
+
+    pub fn import_free(&mut self, data: Vec<f32>) {
+        for h in data.chunks_exact(10) {
+            let kind = match h[0] as u8 { 1 => AKind::Bus, 2 => AKind::Tram, 3 => AKind::Train, 4 => AKind::Ped, _ => AKind::Car };
+            self.next_id += 1;
+            self.agents.push(Agent {
+                kind, lane: OFF_NET, dir: 1, d: 0.0, v: h[3], len: h[2], v0: 0.0, route: VecDeque::new(), hist: VecDeque::new(), stopped: 0.0,
+                arrived: 0.0, variant: h[1] as u8, lat: 0.0, dwell: 0.0, reserved: Vec::new(), alive: true, trip: -1, stops: VecDeque::new(), stop_wait: 0.0,
+                free: Some(Free { x: h[4], y: h[5], z: h[6], h: h[7], ground: h[8], parked: h[9] > 0.5, brake: if h[9] > 0.5 { 1.0 } else { 0.0 }, ..Default::default() }), id: self.next_id, acc: 0.0,
+            });
+        }
+    }
+
     pub fn import_state(&mut self, data: Vec<f32>, map: Vec<i32>) -> u32 {
         let mut i = 0;
         let mut n = 0;
@@ -1028,6 +1076,9 @@ impl World {
                 }
             }
             if let Some(f) = a.free {
+                if a.kind == AKind::Ped {
+                    continue;
+                }
                 let (c, s) = (f.h.cos(), f.h.sin());
                 let half = if a.kind == AKind::Ped { 0.2 } else { a.len * 0.5 };
                 out.extend_from_slice(&[a.id as f32, a.kind as u8 as f32, a.variant as f32, a.trip as f32, a.v, flags, 2.0]);

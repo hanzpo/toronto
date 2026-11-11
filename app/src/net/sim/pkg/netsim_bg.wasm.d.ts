@@ -6,11 +6,13 @@ export const world_add_trip: (a: number, b: number, c: number, d: number, e: num
 export const world_clear_walker: (a: number) => void;
 export const world_clock: (a: number) => number;
 export const world_count: (a: number) => number;
+export const world_export_free: (a: number) => [number, number];
 export const world_export_state: (a: number) => [number, number];
 export const world_frame: (a: number) => [number, number];
 export const world_frame2: (a: number) => [number, number];
 export const world_gate: (a: number, b: number) => number;
 export const world_has_trip: (a: number, b: number) => number;
+export const world_import_free: (a: number, b: number, c: number) => void;
 export const world_import_state: (a: number, b: number, c: number, d: number, e: number) => number;
 export const world_new: (a: number, b: number, c: number) => [number, number, number];
 export const world_player: (a: number) => [number, number];

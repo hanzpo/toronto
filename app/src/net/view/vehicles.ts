@@ -190,3 +190,14 @@ export function bodies(f: Float32Array): BodyPose[] {
   }
   return out;
 }
+
+export function transitSpans(f: Float32Array): { trip: number; ae: number; an: number; be: number; bn: number; z: number }[] {
+  const out: { trip: number; ae: number; an: number; be: number; bn: number; z: number }[] = [];
+  let i = 0;
+  while (i + HEAD <= f.length) {
+    const n = f[i + 6], p = i + HEAD, q = p + (n - 1) * 3, trip = f[i + 3];
+    if (trip >= 0 && f[i + 1] !== 0 && f[i + 1] !== 4) out.push({ trip, ae: f[p], an: f[p + 1], be: f[q], bn: f[q + 1], z: Math.max(f[p + 2], f[q + 2]) + 2 });
+    i += HEAD + n * 3;
+  }
+  return out;
+}

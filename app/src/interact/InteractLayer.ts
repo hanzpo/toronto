@@ -33,6 +33,7 @@ interface TrafficApi {
   takeOverCar?(id: number): Promise<boolean> | boolean;
   getPlayer?(): { e: number; n: number; elev?: number; heading?: number; speed?: number; roadName?: string | null; drawZ?: number } | null;
   pickCarMajor?(e: number, n: number, radius?: number, perClass?: number): number | null;
+  transitBodies?(): { trip: number; ae: number; an: number; be: number; bn: number; z: number }[];
   pickPed?(e: number, n: number, radius?: number): { e: number; n: number; z: number; heading: number; colour: number } | null;
   removePedNear?(e: number, n: number): void;
   setWalker?(e: number, n: number, elev: number, radius: number): void;
@@ -102,6 +103,8 @@ export class InteractLayer implements Layer {
   private savedFov = 50;
   private boardedFromWalk = false;
   private drivingCar = false;
+  private steer = 0;
+  private lostFor = 0;
 
   // input
   private keys = new Set<string>();
@@ -380,11 +383,12 @@ export class InteractLayer implements Layer {
     this.mode = 'drive';
     this.view = 'chase';
     this.drivingCar = true;
+    this.steer = 0; this.lostFor = 0;
     this.yaw = 0; this.pitch = 0.2; this.dist = 9.5;
     this.chaseYaw = NaN; this.chaseZ = NaN; this.boom = 1;
     this.enterRig();
     useInteract.getState().set({ mode: 'drive', trip: null, walk: null });
-    this.toast('In the car — it keeps driving until you take the wheel: W/S throttle / brake / reverse, A/D steer, Space handbrake, H horn, F get out, Esc exit');
+    this.toast('W/S throttle, brake and reverse · A/D steer · Space handbrake · H horn · F get out · Esc exit');
     return true;
   }
 
@@ -689,8 +693,16 @@ export class InteractLayer implements Layer {
     }
 
     if (this.mode === 'drive') {
-      const p = this.traffic()?.getPlayer?.();
-      if (!p) { this.exit(); return; }
+      const tr = this.traffic();
+      const k = this.keys;
+      const fwd = k.has('KeyW') || k.has('ArrowUp'), back = k.has('KeyS') || k.has('ArrowDown');
+      const left = k.has('KeyA') || k.has('ArrowLeft'), right = k.has('KeyD') || k.has('ArrowRight');
+      const want = (left ? 1 : 0) - (right ? 1 : 0);
+      this.steer += (want - this.steer) * Math.min(1, dt * (want === 0 ? 6 : 3.5));
+      tr?.setPlayerInput?.({ throttle: fwd ? 1 : 0, brake: back ? 1 : 0, steer: this.steer, handbrake: k.has('Space') });
+      const p = tr?.getPlayer?.();
+      if (!p) { if ((this.lostFor += dt) > 1.5) this.exit(); return; }
+      this.lostFor = 0;
       const hd = p.heading ?? 0;
       const v = p.speed ?? 0;
       const z = p.drawZ ?? p.elev ?? H(p.e, p.n);
@@ -708,7 +720,8 @@ export class InteractLayer implements Layer {
       const cp = Math.cos(this.pitch);
       const fz = this.chaseZ + 1.4;
       eye = [p.e - Math.cos(yaw) * cp * dist, p.n - Math.sin(yaw) * cp * dist, fz + 0.4 + Math.sin(this.pitch) * dist];
-      eye[2] = Math.max(eye[2], H(eye[0], eye[1]) + 1);
+      const ge = H(eye[0], eye[1]);
+      eye[2] = ge > z + 3 ? Math.min(eye[2], z + 2.4) : Math.max(eye[2], ge + 1);
       const ahead = 4 + Math.min(Math.abs(v), 30) * 0.25;
       look = [p.e + Math.cos(this.chaseYaw) * ahead, p.n + Math.sin(this.chaseYaw) * ahead, fz];
       this.setCam(eye, look, dt, 10, [p.e, p.n, fz]);
@@ -1248,6 +1261,12 @@ export class InteractLayer implements Layer {
       const d = segDist(x, y, a[0], a[1], b[0], b[1]);
       if (d < bd) { bd = d; best = { kind: 'vehicle', trip: ps[o], label: '' }; }
     }
+    const tb = this.traffic()?.transitBodies?.() ?? [];
+    for (const t of tb) {
+      if (!proj(t.ae, t.an, t.z, a) || !proj(t.be, t.bn, t.z, b)) continue;
+      const d = segDist(x, y, a[0], a[1], b[0], b[1]);
+      if (d < bd) { bd = d; best = { kind: 'vehicle', trip: t.trip, label: '' }; }
+    }
     if (this.op) {
       const p = this.pose, L2 = this.op.dyn.length / 2;
       const c = Math.cos(p.heading), s = Math.sin(p.heading);
@@ -1454,8 +1473,9 @@ export class InteractLayer implements Layer {
       return;
     }
     if (this.mode === 'drive') {
-      // the TrafficLayer reads the driving keys; F gets out and walks
-      if (code === 'KeyF' && !e.repeat) { this.getOut(); consume(); }
+      if (code === 'KeyF' && !e.repeat) { this.getOut(); consume(); return; }
+      if (code === 'KeyH' && !e.repeat) { horn('car'); consume(); return; }
+      if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(code)) consume();
       return;
     }
     if (code === 'KeyT' && this.trip !== null) { this.operate(this.trip); consume(); }
