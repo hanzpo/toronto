@@ -188,7 +188,7 @@ export function buildRoyThomsonHall(ctx: BuildCtx) {
   P.add('rthGlass', lathe(prof, seg, false, Math.PI / seg).translate(b.cx, 0, -b.cy))
   P.add('concrete', cyl(R + 0.2, 1, 0, seg, R + 0.2, b.cx, b.cy))
   const rt = R * 0.58
-  P.add('concrete', cyl(rt + 0.3, 1.2, H - 0.2, seg, rt + 0.3, b.cx, b.cy))
+  P.add('concrete', lathe([[rt + 0.3, H - 0.2], [rt + 0.3, H + 1], [rt, H + 1]], seg, false).translate(b.cx, 0, -b.cy))
   P.add('roofLight', slab(ccw(Array.from({ length: seg }, (_, i) => [b.cx + rt * Math.cos((i / seg) * Math.PI * 2), b.cy + rt * Math.sin((i / seg) * Math.PI * 2)] as V2)), H + 1))
   return P.build('roy_thomson_hall')
 }
