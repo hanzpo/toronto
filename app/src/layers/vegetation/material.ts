@@ -88,10 +88,15 @@ function crownCover(leaf: N) {
 }
 
 /** fragment: alpha-to-coverage does the LOD fade (× crown cover); shadows switch at half way */
-function applyFade(m: THREE.MeshStandardNodeMaterial, fade: N, extraMask: N | null, cover: N | null = null) {
+function applyFade(m: THREE.MeshStandardNodeMaterial, fade: N, extraMask: N | null, cover: N | null = null, leaf: N | null = null) {
   m.alphaToCoverage = true;
   m.opacityNode = cover ? fade.mul(cover) : fade;
-  const half = fade.greaterThanEqual(0.5);
+  let half: N = fade.greaterThanEqual(0.5);
+  if (leaf) {
+    const p = positionWorld.mul(2.3);
+    const n = fract(sin(dot(floor(p), vec3(12.9898, 78.233, 37.719))).mul(43758.5453));
+    half = half.and(n.lessThan(mix(float(0.12), float(1), leaf)));
+  }
   (m as unknown as { maskShadowNode: N }).maskShadowNode = extraMask ? half.and(extraMask) : half;
   if (extraMask) m.maskNode = extraMask;
 }
@@ -257,14 +262,15 @@ export function lobedMaterial(level: 0 | 1) {
   const vA = varying(ls.alpha, 'vVegA');
   let edge: N = null;
   let c: N = vCol.xyz;
+  const vLeaf = varying(select(kind.lessThan(1.5), float(1), fol.w), 'vVegLeaf');
   if (level === 0) {
     m.side = THREE.DoubleSide;
     const lt = T.texture(leafTexture(), T.uv());
-    edge = lt.a.greaterThan(0.5).or(vCol.w.lessThan(0.5));
+    edge = lt.a.greaterThan(0.5).and(fract(lt.r.mul(7.31)).lessThan(vLeaf.mul(1.02))).or(vCol.w.lessThan(0.5));
     c = select(vCol.w.lessThan(0.5), c, c.mul(lt.r.mul(0.5).add(0.6)));
   }
   const vCov = varying(select(kind.lessThan(1.5), float(1), crownCover(fol.w)), 'vVegCov');
-  applyFade(m, vA, edge, vCov);
+  applyFade(m, vA, edge, vCov, vLeaf);
   softShadow(m, 2.2);
   m.colorNode = baseTone(c);
   return m;
