@@ -17,6 +17,7 @@ import type { Engine } from '../../engine/Engine';
 import type { FrameContext } from '../../engine/types';
 import type { ViewCull } from '../../engine/view';
 import { releaseObject } from '../../engine/dispose';
+import { VEG_CELLS } from '../../workers/vegetation';
 import { VEG_STRIDE } from './species';
 import { impostorQuad, lobedHigh, lobedMid, tieredHigh, tieredMid } from './geometry';
 import { FADE_S, impostorMaterial, lobedMaterial, tieredMaterial, VU } from './material';
@@ -28,6 +29,8 @@ const HY_H = 5, HY_M = 20;
 /** cells within this range put their mid-LOD trees in the shadow-casting pool */
 const SHADOW_MID = 260;
 const HYST = 14;
+/** level-0 tile size (m) */
+const NEAR_S = 1024;
 /** a camera move longer than this in one frame (teleport) re-derives every tree's LOD without fades */
 const JUMP = 60;
 /** cross-fade length when a tree changes LOD (s) */
@@ -230,6 +233,8 @@ export class Vegetation {
   readonly group = new THREE.Group();
   private pools: VegPool[] = [];
   private tiles = new Map<string, VegTile>();
+  /** level-0 placements of the tiles the network engine has built (net/worker.ts) */
+  private near = new Map<string, { e0: number; n0: number; veg: Float32Array; cells: Uint32Array }>();
   private canopies = new Map<string, Canopy>();
   private anchorVer = -1;
   private at = new THREE.Vector3(Infinity, 0, 0);
@@ -265,6 +270,16 @@ export class Vegetation {
       new VegPool(IQ, im, 131072, g, 'vegImpostors', false), // 6
     ];
     engine.scene.add(this.group);
+  }
+
+  setNear(key: string, e0: number, n0: number, veg: Float32Array, cells: Uint32Array) {
+    this.near.set(key, { e0, n0, veg, cells });
+    const old = this.tiles.get(key);
+    if (old) { this.dropTile(old); this.tiles.delete(key); this.dirty = true; }
+  }
+
+  dropNear(key: string) {
+    this.near.delete(key);
   }
 
   /** compile the pipelines up front (a pool's first use would otherwise stall) */
@@ -313,6 +328,16 @@ export class Vegetation {
     const want0 = new Set<string>(), want1 = new Set<string>();
     let changed = false;
     if (far > 1) {
+      for (const [k, t] of this.near) {
+        if (!t.veg.length) continue;
+        const dx = Math.max(0, Math.abs(E - t.e0 - NEAR_S / 2) - NEAR_S / 2), dy = Math.max(0, Math.abs(Nn - t.n0 - NEAR_S / 2) - NEAR_S / 2);
+        const d = Math.hypot(dx, dy, Math.max(0, alt - 60));
+        if (d > far + 100) continue;
+        want0.add(k);
+        let rec = this.tiles.get(k);
+        if (!rec) { rec = this.makeTile(k, t.e0, t.n0, t.veg, t.cells, NEAR_S); this.tiles.set(k, rec); changed = true; }
+        rec.dist = d;
+      }
       for (const t of eng.tiles.drawn) {
         const dx = Math.max(0, Math.abs(E - (t.tx + 0.5) * t.S) - t.S / 2), dy = Math.max(0, Math.abs(Nn - (t.ty + 0.5) * t.S) - t.S / 2);
         const d = Math.hypot(dx, dy, Math.max(0, alt - 60));
@@ -404,6 +429,29 @@ export class Vegetation {
     }
     c.mask = want;
     return writes + 8;
+  }
+
+  private makeTile(key: string, e0: number, n0: number, src: Float32Array, buckets: Uint32Array, S: number): VegTile {
+    const cells: Cell[] = [];
+    const cs = S / VEG_CELLS;
+    for (let b = 0; b < VEG_CELLS * VEG_CELLS; b++) {
+      const l0 = buckets[b * 2], l1 = buckets[b * 2 + 1], t1 = buckets[b * 2 + 2];
+      if (t1 <= l0) continue;
+      const i = b % VEG_CELLS, j = Math.floor(b / VEG_CELLS);
+      const cx = e0 + (i + 0.5) * cs, cy = n0 + (j + 0.5) * cs;
+      let zs = 0;
+      for (let r = l0; r < t1; r++) zs += src[r * VEG_STRIDE + 2] + src[r * VEG_STRIDE + 4] * 0.5;
+      const cz = zs / (t1 - l0);
+      let rr = 0;
+      for (let r = l0; r < t1; r++) {
+        const q = r * VEG_STRIDE;
+        rr = Math.max(rr, Math.hypot(e0 + src[q] - cx, n0 + src[q + 1] - cy, src[q + 2] + src[q + 4] * 0.5 - cz));
+      }
+      cells.push({ l0, l1, t0: l1, t1, cx, cy, cz, r: rr + 1, mask: 0, own: [null, null, null, null, null, null, null] });
+    }
+    const t: VegTile = { key, e0, n0, src, cells, dist: 0, st: new Float32Array((src.length / VEG_STRIDE) * 3) };
+    this.hardStates(t, this.last.x, this.last.y, this.last.z);
+    return t;
   }
 
   /** LOD a tree at distance d should show, staying at `cur` inside the hysteresis margins */

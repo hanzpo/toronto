@@ -62,6 +62,7 @@ export default function App() {
         await engine.addLayer(new (await mods.urban).UrbanLayer());
         const net = new (await import('./net/NetLayer')).NetLayer();
         await engine.addLayer(net);
+        await engine.addLayer(new (await import('./layers/VegetationLayer')).VegetationLayer(net));
         const netsim = engine.tiles.netTiles.size ? new (await import('./net/SimLayer')).SimLayer() : null;
         if (netsim) { await engine.addLayer(netsim); net.signals = netsim; }
         Object.assign(window as object, { __net: net, __netsim: netsim });

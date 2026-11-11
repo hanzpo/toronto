@@ -13,9 +13,6 @@ const M = {
   wood: flat(0x5a4632, 0.95),
   lampHead: glowing(0x3a3c40, 0xffd9a0, 2.4),
   lens: flat(0xf3eedc, 0.3, 0, 0x000000),
-  trunk: flat(0x4f3d2c, 0.95),
-  leaf: flat(0x47662f, 0.9),
-  leaf2: flat(0x55743a, 0.9),
   red: flat(0xb4271f, 0.6),
   yellow: flat(0xd8a51a, 0.6),
   white: flat(0xeeeeea, 0.6),
@@ -61,15 +58,6 @@ const STATIC: Record<string, () => Part[]> = {
     { g: box(1.6, 0.08, 0.08, 0.8, 8.6, 0), m: M.pole },
     { g: box(0.6, 0.15, 0.28, 1.5, 8.53, 0), m: M.lampHead },
   ],
-  tree: () => [
-    { g: cyl(0.14, 0.2, 3.2), m: M.trunk },
-    { g: new THREE.IcosahedronGeometry(2.6, 1).translate(0, 5.2, 0), m: M.leaf },
-    { g: new THREE.IcosahedronGeometry(1.9, 1).translate(0.8, 6.6, 0.5), m: M.leaf2 },
-  ],
-  tree_small: () => [
-    { g: cyl(0.1, 0.14, 2.2), m: M.trunk },
-    { g: new THREE.IcosahedronGeometry(1.6, 1).translate(0, 3.4, 0), m: M.leaf },
-  ],
   hydrant: () => [{ g: cyl(0.12, 0.14, 0.7), m: M.red }, { g: cyl(0.14, 0.14, 0.12, 0, 0.7), m: M.yellow }],
   bin: () => [{ g: cyl(0.3, 0.28, 1.0, 0, 0, 0, 10), m: M.steelGreen }],
   bench: () => [{ g: box(0.5, 0.06, 1.8, 0, 0.45, 0), m: M.bench }, { g: box(0.06, 0.45, 1.8, -0.22, 0.65, 0), m: M.bench },
@@ -101,6 +89,7 @@ export class PropsView {
     for (const p of props) { const a = byKind.get(p.kind) ?? []; a.push(p); byKind.set(p.kind, a); }
     const dummy = new THREE.Object3D();
     for (const [kind, list] of byKind) {
+      if (kind === 'tree' || kind === 'tree_small') continue;
       const make = STATIC[kind];
       if (make) {
         for (const part of merge(make())) {
