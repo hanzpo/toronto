@@ -29,6 +29,7 @@ import json
 
 import numpy as np
 import shapely
+import shapely.ops
 from scipy import ndimage
 from scipy.spatial import cKDTree
 
@@ -130,7 +131,7 @@ def profile_field(wl: np.ndarray, x0: float, y0: float, cell: float, water: list
             for k in set(sum(step_tree.query_ball_point(xy, STEP_SNAP), [])):
                 cuts.append(float(shapely.line_locate_point(ln, shapely.Point(step_pts[k]))))
                 if steps[k].get("kind") in ("weir", "dam", "waterfall"):
-                    below = shapely.substring(ln, cuts[-1], cuts[-1] + RAPID_BELOW)
+                    below = shapely.ops.substring(ln, cuts[-1], cuts[-1] + RAPID_BELOW)
                     if below.length > 1:
                         white.append(below.buffer(25, cap_style="flat"))
         edges = np.searchsorted(d, sorted(cuts))
