@@ -109,7 +109,6 @@ for (const [bk, list] of blocks) {
 
 if (args.far) {
   far[2] = far[1].filter(KEEP[2]);
-  const manifest = JSON.parse(readFileSync(join(NET, '..', 'manifest.json'), 'utf8'));
   for (const L of [1, 2]) {
     const s = S[L];
     const bins = new Map();
@@ -123,10 +122,11 @@ if (args.far) {
       }
     }
     let n = 0;
-    for (const [tx, ty] of manifest.tiles[String(L)]) {
+    for (const [k, list] of bins) {
+      const [tx, ty] = k.split('_').map(Number);
       if (!inBox(tx * s, ty * s, s)) continue;
-      const { arrays, names } = bake.farArrays(bins.get(`${tx}_${ty}`) ?? [], tx * s, ty * s, s, TOL[L]);
-      writeTbn(join(args.far, String(L), `${tx}_${ty}.bin.gz`), arrays, { names });
+      const { arrays, names } = bake.farArrays(list, tx * s, ty * s, s, TOL[L]);
+      writeTbn(join(args.far, String(L), `${k}.bin.gz`), arrays, { names });
       n++;
     }
     console.log(`far level ${L}: ${n} tiles`);

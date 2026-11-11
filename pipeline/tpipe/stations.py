@@ -37,7 +37,7 @@ INDEX = geo.OUT / "transit" / "index.json"
 
 RAIL_MODES = ("subway", "lrt", "commuter_rail", "airport_rail", "intercity_rail")
 HEAVY = ("commuter_rail", "airport_rail", "intercity_rail")
-# transit_rail.npz track kinds per station mode
+# network track kinds (tpipe.net.lanes.tracks) per station mode
 MODE_KIND = {"subway": (1,), "lrt": (2, 1), "commuter_rail": (0,), "airport_rail": (0,), "intercity_rail": (0,)}
 DEFAULTS = {
     #               length width  platform height above rail
@@ -157,25 +157,22 @@ def load_osm() -> dict:
 
 
 class Tracks:
-    """Segment index over transit_rail.npz (OSM rail ways, projected)."""
+    """Segment index over the network model's tracks (rail/network.bin.gz)."""
 
     def __init__(self) -> None:
-        d = np.load(geo.WORK / "transit_rail.npz")
-        xy, off, kind, flags, service = d["xy"], d["off"], d["kind"], d["flags"], d["service"]
-        a, b, k, f, s = [], [], [], [], []
-        for w in range(len(kind)):
-            i0, i1 = off[w], off[w + 1]
-            for i in range(i0, i1 - 1):
-                a.append(i)
-                b.append(i + 1)
-                k.append(kind[w])
-                f.append(flags[w])
-                s.append(service[w])
-        self.a = xy[np.array(a)]
-        self.b = xy[np.array(b)]
-        self.kind = np.array(k)
-        self.flags = np.array(f)
-        self.service = np.array(s)
+        from .net.lanes import tracks
+
+        a, b, k, f = [], [], [], []
+        for P, kind, vf in tracks():
+            a.append(P[:-1, :2])
+            b.append(P[1:, :2])
+            k.append(np.full(len(P) - 1, kind))
+            f.append(vf[:-1] | vf[1:])
+        self.a = np.vstack(a)
+        self.b = np.vstack(b)
+        self.kind = np.concatenate(k)
+        self.flags = np.concatenate(f)
+        self.service = np.zeros(len(self.kind), np.int8)
         self.mid = (self.a + self.b) / 2
 
     def near(self, e: float, n: float, r: float, kinds) -> np.ndarray:
@@ -883,33 +880,6 @@ def union_columns() -> list[list[float]]:
     return cols
 
 
-def union_deck_check(net: "Network") -> None:
-    """Warn when the rail graph's z on the Union deck (curated/union_deck.json extent) differs
-    from the network model's curated rail level there (curated/corridors.json 'usrc')."""
-    p = geo.PIPE / "curated" / "union_deck.json"
-    if not p.exists():
-        return
-    u = json.loads(p.read_text())
-    (ox, oy), r, dk = u["frame"]["pos"], u["frame"]["rotation"], u["deck"]
-    from . import tbn
-    from .rail_geom import curated_rail_z
-
-    a, _ = tbn.read(geo.OUT / "rail" / "network.bin.gz")
-    xyz = a["e_xyz"].reshape(-1, 3)
-    dx, dy = xyz[:, 0] - ox, xyz[:, 1] - oy
-    lx = dx * math.cos(r) + dy * math.sin(r)
-    ly = -dx * math.sin(r) + dy * math.cos(r)
-    m = (lx >= dk["x0"] + 5) & (lx <= dk["x1"] - 5) & (ly >= dk["y0"]) & (ly <= dk["y1"])
-    mz = curated_rail_z(xyz[:, :2].astype(np.float64))
-    m &= np.isfinite(mz) & (np.abs(xyz[:, 2] - mz) < 10)      # surface tracks (not the subway below)
-    if not m.any():
-        return
-    dz = xyz[m, 2] - mz[m]
-    bad = np.abs(dz) > 0.05
-    print(f"Union deck: {int(m.sum())} rail vertices, z − model rail level: median {np.median(dz):+.2f} m, {int(bad.sum())} off by > 5 cm"
-          + ("  ← trains don't run at the model's rail level (curated/corridors.json usrc)" if bad.any() else ""))
-
-
 def build() -> None:
     cur = json.loads(CURATED.read_text())
     index = json.loads(INDEX.read_text())
@@ -1002,7 +972,6 @@ def build() -> None:
         print("\n".join(errs))
         raise SystemExit(1)
     print(f"platforms snapped to the rail graph; {len(dropped)} dropped (no track fit): {dropped[:12]}")
-    union_deck_check(net)
     zones = station_zones(out)
     suppress, report = clearance_suppress(zones)
     suppress |= {int(x["osm"]) for x in cur.get("suppress_extra", [])}
@@ -1055,15 +1024,26 @@ def clearance_suppress(zones) -> tuple[set, list]:
     zpolys = [Polygon(z) for z in zones]
     union_c = Point(UNION_LM["pos"])
     near_st = unary_union([zp.buffer(400) for zp in zpolys]).union(union_c.buffer(2000))
-    d = np.load(geo.WORK / "transit_rail.npz")
-    xy, off, flags, kind = d["xy"], d["off"], d["flags"], d["kind"]
+    from .net.lanes import tracks as net_tracks
+
     tracks = []
-    for w in range(len(flags)):
-        if flags[w] & 3 or kind[w] == 3:  # tunnels/bridges (trains above/below), street-running trams
+    for P, kind, vf in net_tracks():
+        if kind == 3:  # street-running trams
             continue
-        ls = LineString(xy[off[w]:off[w + 1]])
-        if ls.length > 0 and ls.intersects(near_st):
-            tracks.append(ls.intersection(near_st))
+        run: list = []
+        for k in range(len(P)):
+            if vf[k] & 3:  # tunnels / bridges (trains above / below)
+                if len(run) >= 2:
+                    ls = LineString(run)
+                    if ls.length > 0 and ls.intersects(near_st):
+                        tracks.append(ls.intersection(near_st))
+                run = []
+                continue
+            run.append(P[k, :2])
+        if len(run) >= 2:
+            ls = LineString(run)
+            if ls.length > 0 and ls.intersects(near_st):
+                tracks.append(ls.intersection(near_st))
     corridor = unary_union([t.buffer(3.0, cap_style=2) for t in tracks] + zpolys)
     b = np.load(geo.WORK / "osm_buildings.npz", allow_pickle=True)
     ids, nring, ringlen, bxy, hmin, height, tag = b["id"], b["nring"], b["ringlen"], b["xy"], b["min"], b["height"], b["tag"]

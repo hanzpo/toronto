@@ -28,7 +28,7 @@ import { addOsmParts } from './osmparts'
 import type { BuildCtx } from './types'
 
 /** rail elevation above the landmark base: the network model's rail level on the deck
- *  (landmarks.json union_station.rail_z, from tpipe.roadnet + curated/corridors.json 'usrc';
+ *  (landmarks.json union_station.rail_z, from the network model + curated/corridors.json 'usrc';
  *  docs/ROADS.md "Source of truth") − base. 6.5 m is only the fallback for old data. */
 export const UNION_RAIL = 6.5
 let RAIL = UNION_RAIL

@@ -1,5 +1,5 @@
 {
- "about": "Curated deck profiles for elevated / long structures (tpipe.roadnet, docs/ROADS.md). profile = [lon, lat, height m]; mode above_ground = height over the (150 m smoothed) bare-earth terrain, absolute = datum metres. Vertices of matching strokes (by name or OSM way id, class <= max_class) within `snap` m of the control polyline are pinned to the interpolated height; ramps (links) are pinned only where they are bridges. Heights are estimates from the cited sources; see docs/ROADS.md.",
+ "about": "Curated deck profiles for elevated / long structures (tpipe.net vertical solve). profile = [lon, lat, height m]; mode above_ground = height over the (150 m smoothed) bare-earth terrain, absolute = datum metres. Vertices of matching strokes (by name or OSM way id, class <= max_class) within `snap` m of the control polyline are pinned to the interpolated height; ramps (links) are pinned only where they are bridges. Heights are estimates from the cited sources; see docs/ROADS.md.",
  "corridors": [
   {
    "id": "gardiner_elevated",

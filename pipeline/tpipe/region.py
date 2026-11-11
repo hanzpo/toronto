@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import zipfile
 
 import numpy as np
@@ -143,6 +144,23 @@ def build() -> None:
 
 def load():
     return wkb.loads((geo.WORK / "region.wkb").read_bytes())
+
+
+def level0_tiles() -> set[tuple[int, int]]:
+    """The level-0 tiles of the pyramid (as tpipe.osm_tiles writes them): all 16 children of every
+    level-1 tile that touches the region."""
+    import shapely
+
+    reg = load()
+    shapely.prepare(reg)
+    s1 = geo.TILE_SIZE[1]
+    x0, y0, x1, y1 = geo.projected_bbox()
+    out = set()
+    for j in range(math.floor(y0 / s1), math.floor(y1 / s1) + 1):
+        for i in range(math.floor(x0 / s1), math.floor(x1 / s1) + 1):
+            if reg.intersects(shapely.box(i * s1, j * s1, (i + 1) * s1, (j + 1) * s1)):
+                out |= {(i * 4 + a, j * 4 + b) for a in range(4) for b in range(4)}
+    return out
 
 
 if __name__ == "__main__":

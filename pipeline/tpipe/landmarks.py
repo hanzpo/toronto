@@ -470,23 +470,21 @@ def ring(g, tol=0.3) -> list[list[float]]:
 
 def union_rails_from_model(entry: dict) -> dict:
     """rail_z (datum m, top of rail) and the 11 through-track centrelines (local y, north to
-    south, every 15 m from local x = -195) on the Union deck, read from the network model
-    (work/roadnet.npz). Empty when the model is missing (the landmark keeps its defaults)."""
+    south, every 15 m from local x = -195) on the Union deck, read from the network model's tracks
+    (rail/network.bin.gz). Empty when they are missing (the landmark keeps its defaults)."""
     import shapely
 
-    p = geo.WORK / "roadnet.npz"
-    if not p.exists():
+    from .net.lanes import tracks
+
+    try:
+        found = [(P, vf) for P, kind, vf in tracks() if kind == 0 and len(P) >= 2]
+    except FileNotFoundError:
         return {}
-    with np.load(p, allow_pickle=True) as d:
-        off, xyz, cls = d["rail_off"], d["rail_xyz"], d["rail_cls"]
     (ox, oy), r = entry["pos"], float(entry["rotation"])
     c, s_ = math.cos(r), math.sin(r)
     dk = json.loads((geo.PIPE / "curated" / "union_deck.json").read_text())["deck"]
     lines, zs = [], []
-    for i in range(len(off) - 1):
-        if cls[i] > 1 or off[i + 1] - off[i] < 2:
-            continue
-        Q = xyz[off[i]:off[i + 1]]
+    for Q, _ in found:
         dx, dy = Q[:, 0] - ox, Q[:, 1] - oy
         lx, ly = dx * c + dy * s_, -dx * s_ + dy * c
         m = (lx > dk["x0"] - 60) & (lx < dk["x1"] + 60) & (ly > dk["y0"] - 15) & (ly < dk["y1"] + 15)
@@ -686,8 +684,7 @@ def main() -> None:
         print(f"{L['id']:22s} pos=({pos[0]:8.1f},{pos[1]:8.1f}) base={base:6.1f} "
               f"rot={math.degrees(rot):6.1f}° suppress={len(entry['suppress'])}")
 
-    # Union Station: rail level and track centrelines on the deck come from the network model
-    # (tpipe.roadnet rail pieces with the curated rail levels applied; docs/ROADS.md "Source of truth")
+    # Union Station: rail level and track centrelines on the deck come from the network model's tracks
     for entry in out:
         if entry.get("id") == "union_station":
             entry.update(union_rails_from_model(entry))

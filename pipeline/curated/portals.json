@@ -1,6 +1,6 @@
 {
  "version": 1,
- "about": "Tunnel portals and open cuts. The cut geometry is derived from the rail graph (tpipe.rail_graph: where track the trains run on is below the ground but above tunnel depth, docs/SPEC.md 'Portals'); this list names them, documents references and can switch one off with \"skip\": true (radius m, default 150).",
+ "about": "Tunnel portals and open cuts. The cut geometry is derived from the network model's tracks (tpipe.ground: where track the trains run on is below the ground but above tunnel depth, docs/SPEC.md 'Portals'); this list names them, documents references and can switch one off with \"skip\": true (radius m, default 150).",
  "portals": [
   {
    "id": "l1-rosedale-south",

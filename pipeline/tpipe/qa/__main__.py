@@ -27,7 +27,7 @@ import time
 import numpy as np
 
 from .. import geo
-from . import checks_dtm, checks_rail, checks_stations, checks_transit, data
+from . import checks_dtm, checks_stations, checks_transit, data
 from .core import dedupe, order, view_for
 from .runner import BLOCK_CATS, GLOBAL_CATS, _init, _run
 
@@ -39,22 +39,14 @@ ALL_CATS = sorted(BLOCK_CATS | GLOBAL_CATS)
 NEAR_STATION = 500.0  # m: findings this close to a station get near_station + a rank boost
 STATION_BOOST = 2.0  # score = sev x boost near stations; ranks follow score
 OWNER = {  # which workstream fixes each category (docs/QA.md)
-    **{c: "roads" for c in ("road_width_step", "bridge_width_anomaly", "road_overlap_nonjunction", "flat_crossing", "deck_below_clearance",
-                            "junction_hardware_on_grade_sep", "elevation_jump", "road_below_terrain", "duplicate_footway",
-                            "footway_as_road", "sidewalk_bridge_discontinuity", "dash_phase_break", "graph_connectivity",
-                            "hooked_edge", "micro_link", "carriageway_overlap", "graph_vs_drawn_elevation")},
     **{c: "stations" for c in ("platform_track_clearance", "station_column_clearance", "tree_on_platform")},
-    **{c: "rail" for c in ("rail_kink", "rail_gap", "route_track_conflict", "building_over_track")},
     **{c: "transit" for c in ("transit_route_off_road", "transit_wrong_way", "vehicle_path_through_building")},
     **{c: "buildings-props" for c in ("building_overlap", "floating_object", "prop_in_lane", "prop_in_crosswalk", "prop_in_building", "house_overlap",
-                                      "building_over_road", "lot_over_building")},
+                                      "building_over_road", "building_over_track", "lot_over_building")},
     **{c: "vegetation" for c in ("tree_on_road", "tree_on_rail", "tree_over_track", "tree_on_airfield", "tree_on_water", "tree_in_building")},
     **{c: "landmarks" for c in ("landmark_overlap", "landmark_road_overlap")},
     "raster_shore": "ground",
-    # cross-layer merge gate against the network model (docs/ROADS.md "Source of truth")
-    **{c: "model" for c in ("rail_above_bed", "duplicate_track", "underpass_drawn_at_grade", "drawn_rail_vs_train_path",
-                            "graph_vs_model", "sidewalk_between_carriageways", "lane_count_jump", "duplicate_crosswalk", "adjacent_track_z_step",
-                            "mapped_crossing_not_generated", "model_vs_dtm")},
+    "model_vs_dtm": "model",
 }
 
 
@@ -104,8 +96,6 @@ def main(argv=None) -> int:
         n = len(checks_transit.samples()["x"])  # build/refresh the cache once, before forking
         print(f"transit samples: {n}", file=sys.stderr)
     tasks = []
-    if checks_rail.RAIL_CATS & cats:
-        tasks.append(("global", ("rail", cats, bbox)))
     if {"landmark_overlap", "landmark_road_overlap"} & cats:
         tasks.append(("global", ("landmarks", cats, bbox)))
     if checks_stations.STATION_CATS & cats:

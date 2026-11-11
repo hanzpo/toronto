@@ -42,7 +42,6 @@ CLUSTER = 60.0  # m grid for grouping flagged samples into one finding
 MIN_OFF_LEN = 20.0  # m of off-road samples per cluster
 MIN_WRONG_LEN = 15.0
 WRONG_COS = -0.7  # cos(angle) below this = against the one-way direction (> ~135 deg)
-JUNCTION_PAD = 3.0  # m beyond the junction box radius: turning movements there are not checked
 SURFACE_MODES = {"bus": 0, "streetcar": 1, "lrt": 1}
 # rail modes are sampled too (mode 2) for vehicle_path_through_building; the road checks skip them
 RAIL_MODES = {"subway": 2, "commuter_rail": 2, "airport_rail": 2, "intercity_rail": 2}
@@ -181,7 +180,7 @@ def run(B: Block, cats: set) -> list[dict]:
     if L.n and (pm == 1).any():
         lc, lf = L.attrs["class"], L.attrs["flags"]
         lsp = L.seg_piece
-        lk = np.isin(lc[lsp], [3, 4]) & ((lf[lsp] & F_TUNNEL) == 0)
+        lk = (lc[lsp] == 4) & ((lf[lsp] & F_TUNNEL) == 0)
         ls = L.seg[lk]
         if len(ls):
             lt = shapely.STRtree(shapely.linestrings(np.stack([np.stack([L.X[ls], L.Y[ls]], 1), np.stack([L.X[ls + 1], L.Y[ls + 1]], 1)], 1)))
@@ -226,15 +225,6 @@ def run(B: Block, cats: set) -> list[dict]:
         wrong = np.zeros(len(px), bool)
         wrong[a[~good]] = True
         wrong &= ~ok & surf
-        J = B.junc
-        if len(J["x"]):
-            from scipy.spatial import cKDTree
-
-            jt = cKDTree(np.column_stack([J["x"], J["y"]]))
-            rmax = float(J["r"].max()) + JUNCTION_PAD
-            for q, lst in zip(np.nonzero(wrong)[0], jt.query_ball_point(np.column_stack([px[wrong], py[wrong]]), rmax)):
-                if lst and np.any(np.hypot(J["x"][lst] - px[q], J["y"][lst] - py[q]) < J["r"][lst] + JUNCTION_PAD):
-                    wrong[q] = False
         w = np.nonzero(wrong)[0]
         if len(w):
             # road name per wrong sample (first matching one-way segment)

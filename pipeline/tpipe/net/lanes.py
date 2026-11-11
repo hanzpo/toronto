@@ -436,3 +436,12 @@ class Matcher:
         if agencies:
             old = [g for g in old if g.get("pattern", "").split(":")[0] not in agencies]
         GAPS.write_text(json.dumps(old + self.gaps, indent=0))
+
+
+def tracks(path: Path | None = None) -> list[tuple[np.ndarray, int, np.ndarray]]:
+    """Drawn track centrelines of the network model (rail/network.bin.gz, app/scripts/net-bake.mjs):
+    (xyz (n, 3), kind 0 rail · 1 subway · 2 LRT · 3 street tram, per-vertex flags 1 bridge · 2 tunnel)."""
+    a, _ = tbn.read(path or geo.OUT / "rail" / "network.bin.gz")
+    off = a["e_off"].astype(np.int64)
+    xyz = a["e_xyz"].reshape(-1, 3).astype(np.float64)
+    return [(xyz[off[i] : off[i + 1]], int(a["e_kind"][i]), a["e_vf"][off[i] : off[i + 1]]) for i in range(len(off) - 1)]

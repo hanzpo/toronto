@@ -1,9 +1,9 @@
 """model_vs_dtm: the network model's at-grade road and rail z against the HRDEM 1 m lidar DTM.
 
-  model_vs_dtm   a run of at-grade model vertices (work/roadnet.npz; bridges and tunnels excluded)
-                 whose z is more than TOL (1.0 m) off the bare-earth DTM. Roads (class <= 6) compare
-                 their surface z; ballasted heavy rail compares its drawn ballast top (formation z +
-                 0.28 m, the client's track drawing); embedded track compares z. Only where the DTM
+  model_vs_dtm   a run of at-grade vertices of the network model's segments (net/far/0 tiles from
+                 app/scripts/net-bake.mjs; bridges and tunnels excluded) whose z is more than TOL
+                 (1.0 m) off the bare-earth DTM. Roads (class <= 6) compare their surface z;
+                 ballasted rail and subway compare the ballast top (z + 0.28 m); tram track compares z. Only where the DTM
                  is lidar (tpipe.lidar_terrain source 1); elsewhere the vertex is counted as
                  'no_lidar' and not judged. Not judged either (counted): 'covered' -- the 1 m DSM
                  more than COVER (3 m) above the DTM at the vertex (a deck, roof or canopy overhead:
@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 
 import numpy as np
 
@@ -44,7 +43,7 @@ def _under_decks(A, bbox):
     for pre in ("road", "rail"):
         off = A[f"{pre}_off"].astype(np.int64)
         xyz, vf = A[f"{pre}_xyz"], A[f"{pre}_vf"].astype(np.int64)
-        hw = np.maximum(A["road_pl"], A["road_pr"]) if pre == "road" else np.full(len(xyz), 2.5)
+        hw = A["road_hw"] if pre == "road" else np.full(len(off) - 1, 2.5)
         for i in range(len(off) - 1):
             a, b = off[i], off[i + 1]
             br = (vf[a:b] & V_BRIDGE) != 0
@@ -54,7 +53,7 @@ def _under_decks(A, bbox):
             if bbox and not ((P[:, 0] > bbox[0] - 50) & (P[:, 0] < bbox[2] + 50) & (P[:, 1] > bbox[1] - 50) & (P[:, 1] < bbox[3] + 50)).any():
                 continue
             for k in np.nonzero(br[:-1] | br[1:])[0]:
-                segs.append(shapely.buffer(shapely.linestrings(P[k:k + 2, :2]), float(hw[a + k]) + 1.0))
+                segs.append(shapely.buffer(shapely.linestrings(P[k:k + 2, :2]), float(hw[i]) + 1.0))
                 zs.append(min(P[k, 2], P[k + 1, 2]))
     if not segs:
         return lambda P: np.zeros(len(P), bool)
@@ -69,44 +68,75 @@ def _under_decks(A, bbox):
         return out
     return f
 BALLAST_TOP = 0.28
-V_BRIDGE, V_TUNNEL, V_EMBED = 1, 2, 8
+V_BRIDGE, V_TUNNEL = 1, 2
+TRAM = 4
+
+
+def _net_arrays(bbox) -> dict:
+    """Road and rail pieces of the network model's far level-0 tiles in world coordinates."""
+    from .. import tbn
+
+    S = geo.TILE_SIZE[0]
+    out: dict = {}
+    parts: dict = {k: [] for k in ("road_xyz", "road_vf", "road_cls", "road_hw", "road_len", "rail_xyz", "rail_vf", "rail_cls", "rail_len")}
+    for p in sorted((geo.OUT / "net" / "far" / "0").glob("*.bin.gz")):
+        tx, ty = map(int, p.name.split(".")[0].split("_"))
+        if bbox and not ((tx + 1) * S > bbox[0] and tx * S < bbox[2] and (ty + 1) * S > bbox[1] and ty * S < bbox[3]):
+            continue
+        a, _ = tbn.read(p)
+        for src, pre in (("r", "road"), ("l", "rail")):
+            off = a[f"{src}_off"].astype(np.int64)
+            if len(off) < 2:
+                continue
+            xyz = a[f"{src}_xyz"].reshape(-1, 3).astype(np.float64) + [tx * S, ty * S, 0]
+            parts[f"{pre}_xyz"].append(xyz)
+            parts[f"{pre}_vf"].append(a[f"{src}_vf"])
+            parts[f"{pre}_cls"].append(a[f"{src}_class"])
+            parts[f"{pre}_len"].append(np.diff(off))
+            if pre == "road":
+                parts["road_hw"].append(a["r_width"] / 2)
+    for pre in ("road", "rail"):
+        n = np.concatenate(parts[f"{pre}_len"]) if parts[f"{pre}_len"] else np.zeros(0, np.int64)
+        out[f"{pre}_off"] = np.concatenate([[0], np.cumsum(n)]).astype(np.int64)
+        out[f"{pre}_xyz"] = np.vstack(parts[f"{pre}_xyz"]) if parts[f"{pre}_xyz"] else np.zeros((0, 3))
+        out[f"{pre}_vf"] = np.concatenate(parts[f"{pre}_vf"]) if parts[f"{pre}_vf"] else np.zeros(0, np.uint8)
+        out[f"{pre}_cls"] = np.concatenate(parts[f"{pre}_cls"]) if parts[f"{pre}_cls"] else np.zeros(0, np.uint8)
+    out["road_hw"] = np.concatenate(parts["road_hw"]) if parts["road_hw"] else np.zeros(0)
+    return out
 
 
 def _pieces(A, pre, max_cls):
     off = A[f"{pre}_off"].astype(np.int64)
     xyz, vf, cls = A[f"{pre}_xyz"], A[f"{pre}_vf"], A[f"{pre}_cls"]
-    osm = A.get(f"{pre}_osm")
     for i in range(len(off) - 1):
         if cls[i] > max_cls:
             continue
         a, b = off[i], off[i + 1]
-        yield i, xyz[a:b], vf[a:b].astype(np.int64), (osm[i] if osm is not None and pre == "road" else 0)
+        yield i, xyz[a:b], vf[a:b].astype(np.int64), int(cls[i])
 
 
 def stats(bbox=None):
     """per-vertex dz arrays and per-tile summary"""
     from ..lidar_terrain import SRC_HRDEM, get
-    with np.load(geo.WORK / "roadnet.npz", allow_pickle=True) as d:
-        A = {k: d[k] for k in ("road_off", "road_xyz", "road_vf", "road_cls", "road_osm", "road_pl", "road_pr",
-                               "rail_off", "rail_xyz", "rail_vf", "rail_cls")}
+    A = _net_arrays(bbox)
     under = _under_decks(A, bbox)
     T = get()
     rows = {}
-    for kind, pre, mc in (("road", "road", 6), ("rail", "rail", 4)):
-        P, V, piece, osm = [], [], [], []
-        for i, xyz, vf, o in _pieces(A, pre, mc):
+    for kind, pre, mc in (("road", "road", 6), ("rail", "rail", TRAM)):
+        P, V, piece, cl = [], [], [], []
+        for i, xyz, vf, c in _pieces(A, pre, mc):
             m = (vf & (V_BRIDGE | V_TUNNEL)) == 0
             if bbox:
                 m &= (xyz[:, 0] >= bbox[0]) & (xyz[:, 0] < bbox[2]) & (xyz[:, 1] >= bbox[1]) & (xyz[:, 1] < bbox[3])
             if not m.any():
                 continue
-            P.append(xyz[m]); V.append(vf[m]); piece.append(np.full(int(m.sum()), i)); osm.append(np.full(int(m.sum()), o))
+            P.append(xyz[m]); V.append(vf[m]); piece.append(np.full(int(m.sum()), i)); cl.append(np.full(int(m.sum()), c))
         if not P:
             rows[kind] = None
             continue
-        P, V, piece, osm = np.vstack(P), np.concatenate(V), np.concatenate(piece), np.concatenate(osm)
+        P, V, piece, cl = np.vstack(P), np.concatenate(V), np.concatenate(piece), np.concatenate(cl)
         h, src = T.sample_src(P[:, 0], P[:, 1])
-        z = P[:, 2] + (np.where((V & V_EMBED) != 0, 0.0, BALLAST_TOP) if kind == "rail" else 0.0)
+        z = P[:, 2] + (np.where(cl == TRAM, 0.0, BALLAST_TOP) if kind == "rail" else 0.0)
         lid = src == SRC_HRDEM
         cov = np.zeros(len(P), bool)
         if lid.any():
@@ -123,7 +153,7 @@ def stats(bbox=None):
         cov |= under(P)
         judged = lid & ~cov & ~void
         dz = np.where(judged, z - h, np.nan)
-        rows[kind] = dict(P=P, dz=dz, piece=piece, osm=osm, why=np.where(~lid, 1, np.where(cov, 2, np.where(void, 3, 0))))
+        rows[kind] = dict(P=P, dz=dz, piece=piece, why=np.where(~lid, 1, np.where(cov, 2, np.where(void, 3, 0))))
     S = geo.TILE_SIZE[0]
     tiles = {}
     for kind, r in rows.items():
@@ -163,7 +193,7 @@ def run_global(cats, bbox):
             x, y, z = r["P"][k]
             dz = float(r["dz"][k])
             out.append(finding("model_vs_dtm", f"{kind}_{'above' if dz > 0 else 'below'}", 1 + min(abs(dz), 8), x, y, z,
-                               [r["osm"][k]], f"model {kind} z {dz:+.1f} m off the lidar DTM over {len(run)} vertices",
+                               [], f"model {kind} z {dz:+.1f} m off the lidar DTM over {len(run)} vertices",
                                key=("model_vs_dtm", kind, int(r["piece"][k]), round(x / 50), round(y / 50))))
             i = j + 1
     p = geo.OUT / "qa"
