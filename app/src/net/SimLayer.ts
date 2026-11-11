@@ -134,6 +134,18 @@ export class SimLayer implements Layer {
 
   tripPath(trip: number): Float32Array | null { return this.agents.paths.get(trip) ?? null; }
 
+  driveTrip(trip: number | null): boolean {
+    this.worker?.postMessage({ type: 'driveTrip', trip: trip ?? -1 });
+    return trip !== null && this.handed.has(trip);
+  }
+
+  setTripSpeed(v: number) { this.worker?.postMessage({ type: 'tripSpeed', v }); }
+
+  drivenState(): { v: number; safe: number; gap: number } | null {
+    const d = this.frame?.driven;
+    return d && d.length >= 3 ? { v: d[0], safe: d[1], gap: d[2] } : null;
+  }
+
   keepTrip(trip: number | null) {
     for (const t of this.kept) if (t !== trip) this.kept.delete(t);
     if (trip === null) return;

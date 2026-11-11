@@ -73,6 +73,21 @@ export class World {
     /**
      * @param {number} trip
      */
+    drive_trip(trip) {
+        wasm.world_drive_trip(this.__wbg_ptr, trip);
+    }
+    /**
+     * @returns {Float32Array}
+     */
+    driven_state() {
+        const ret = wasm.world_driven_state(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * @param {number} trip
+     */
     drop_trip(trip) {
         wasm.world_drop_trip(this.__wbg_ptr, trip);
     }
@@ -219,6 +234,12 @@ export class World {
      */
     set_targets(cars, buses, trams, trains, peds) {
         wasm.world_set_targets(this.__wbg_ptr, cars, buses, trams, trains, peds);
+    }
+    /**
+     * @param {number} v
+     */
+    set_trip_speed(v) {
+        wasm.world_set_trip_speed(this.__wbg_ptr, v);
     }
     /**
      * @param {number} x

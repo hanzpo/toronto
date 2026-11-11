@@ -44,6 +44,9 @@ interface TrafficApi {
   setPlayerInput?(inp: { throttle: number; brake: number; steer: number; handbrake?: boolean }): void;
   releasePlayer?(): void;
   tripPath?(trip: number): Float32Array | null;
+  driveTrip?(trip: number | null): boolean;
+  setTripSpeed?(v: number): void;
+  drivenState?(): { v: number; safe: number; gap: number } | null;
   keepTrip?(trip: number | null): void;
 }
 
@@ -117,6 +120,7 @@ export class InteractLayer implements Layer {
   private vsTmp: VehicleState | null = null;
   /** rail sim train being ridden (followed across trip changes) and its track this frame */
   private simPath: SimPath | null = null;
+  private opSim = false;
   private pose: Pose = { e: 0, n: 0, z: 0, heading: 0, pitch: 0 };
   private walkNear: { trip: number; label: string } | null = null;
 
@@ -241,7 +245,9 @@ export class InteractLayer implements Layer {
     this.selectVehicle(trip);
     useInteract.getState().set({ mode: 'operate', trip, ride: null, walk: null });
     op.flash(vs.state === STATE_DWELL ? 'You have control — close doors (C) when ready' : 'You have control — W/S to notch, O/C doors', 5);
-    this.traffic()?.keepTrip?.(trip);
+    const tr = this.traffic();
+    this.opSim = !!tr?.driveTrip?.(trip);
+    if (!this.opSim) tr?.keepTrip?.(trip);
     return true;
   }
 
@@ -486,7 +492,9 @@ export class InteractLayer implements Layer {
     // what we were looking at, before the walker / car goes away
     const focus = restore ? this.focusPoint() : null;
     if (this.op) {
+      if (this.opSim) this.traffic()?.driveTrip?.(null);
       this.traffic()?.keepTrip?.(null);
+      this.opSim = false;
       this.transit.overrides.delete(this.op.info.trip);
       this.op = null;
     }
@@ -538,6 +546,14 @@ export class InteractLayer implements Layer {
   /** Current pose of the attached vehicle (centre). Returns false if gone. */
   private targetPose(t: number): boolean {
     if (this.op) {
+      const pts = this.opSim ? this.traffic()?.tripPath?.(this.op.info.trip) : null;
+      if (pts && pts.length >= 6) {
+        this.simPath = simPath(pts, this.simPath);
+        samplePath(this.simPath, this.simPath.L / 2, _agentP, _agentD);
+        Object.assign(this.pose, { e: _agentP[0], n: _agentP[1], z: _agentP[2], heading: Math.atan2(_agentD[1], _agentD[0]), pitch: 0 });
+        return true;
+      }
+      this.simPath = null;
       this.op.path.pose(this.op.s, 6, this.pose);
       return true;
     }
@@ -560,8 +576,8 @@ export class InteractLayer implements Layer {
   }
 
   private currentDist(): number {
-    if (this.op) return this.op.s;
     if (this.simPath) return this.simPath.L / 2;
+    if (this.op) return this.op.s;
     return this.vsTmp?.dist ?? 0;
   }
 
@@ -575,13 +591,25 @@ export class InteractLayer implements Layer {
     if (op) {
       const vb = this.system.tripCount > 0 ? this.system.vehicles : null;
       const prevDoors = op.doors;
-      op.step(Math.min(simDt, 2), t, vb);
+      op.step(Math.min(simDt, 2), t, this.opSim ? null : vb);
+      if (this.opSim) {
+        const tr = this.traffic();
+        tr?.setTripSpeed?.(op.v);
+        const ds = tr?.drivenState?.();
+        if (ds) {
+          op.v = Math.min(op.v, ds.v);
+          op.trainAhead = ds.gap < 3000 ? ds.gap : null;
+          const bd = (op.v * op.v) / (2 * op.dyn.brake);
+          op.aspect = ds.gap < 30 + bd * 0.5 ? 'red' : ds.gap < 200 + bd * 1.5 ? 'yellow' : 'green';
+        }
+      }
       if (prevDoors !== op.doors) {
         if (op.doors === 'opening') doorsOpen();
         if (op.doors === 'closing') doorChime();
       }
-      const p = op.path.pose(op.s, 6, this.pose);
-      if (this.view !== 'chase') this.transit.overrides.set(op.info.trip, null);
+      const p = op.path.pose(op.s, 6, _railPose);
+      if (this.opSim) this.traffic()?.hideTrip?.(this.view !== 'chase' ? op.info.trip : null);
+      else if (this.view !== 'chase') this.transit.overrides.set(op.info.trip, null);
       else this.transit.overrides.set(op.info.trip, { x: p.e, y: p.n, z: p.z, heading: p.heading, mode: op.mode, route: op.route, pattern: op.path.pattern, dist: op.s });
     }
     if (this.mode === 'walk' && this.walker) {
@@ -691,13 +719,13 @@ export class InteractLayer implements Layer {
     const mode = this.tripInfo!.mode;
     const dyn = DYN[mode];
     // the consist actually drawn (car by car) sets where the cab is
-    const L2 = (this.simPath && !this.op ? this.simPath.L : this.trip !== null ? this.transit.vehicleLength(this.trip) : 0) / 2 || dyn.length / 2;
+    const L2 = (this.simPath ? this.simPath.L : this.trip !== null ? this.transit.vehicleLength(this.trip) : 0) / 2 || dyn.length / 2;
     const s = this.currentDist();
     const reverse = this.op?.reverse ?? false;
     const dir = reverse ? -1 : 1;
     const path = this.path;
     const tmp = [0, 0, 0];
-    const at = this.op ? null : this.simPath;
+    const at = this.simPath;
     const rail = (sAt: number, lift: number): [number, number, number] => {
       if (at) {
         samplePath(at, sAt, tmp, _agentD);

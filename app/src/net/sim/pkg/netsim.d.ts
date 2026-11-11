@@ -8,6 +8,8 @@ export class World {
     clear_walker(): void;
     clock(): number;
     count(): number;
+    drive_trip(trip: number): void;
+    driven_state(): Float32Array;
     drop_trip(trip: number): void;
     export_free(): Float32Array;
     export_state(): Float32Array;
@@ -24,6 +26,7 @@ export class World {
     set_clock(service_seconds: number): void;
     set_player_input(throttle: number, brake: number, steer: number, handbrake: boolean, ground: number): void;
     set_targets(cars: number, buses: number, trams: number, trains: number, peds: number): void;
+    set_trip_speed(v: number): void;
     set_walker(x: number, y: number, z: number): void;
     signal(node: number, group: number): number;
     solids_near(x: number, y: number, r: number): Float32Array;
@@ -43,6 +46,8 @@ export interface InitOutput {
     readonly world_clear_walker: (a: number) => void;
     readonly world_clock: (a: number) => number;
     readonly world_count: (a: number) => number;
+    readonly world_drive_trip: (a: number, b: number) => void;
+    readonly world_driven_state: (a: number) => [number, number];
     readonly world_drop_trip: (a: number, b: number) => void;
     readonly world_export_free: (a: number) => [number, number];
     readonly world_export_state: (a: number) => [number, number];
@@ -59,6 +64,7 @@ export interface InitOutput {
     readonly world_set_clock: (a: number, b: number) => void;
     readonly world_set_player_input: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
     readonly world_set_targets: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+    readonly world_set_trip_speed: (a: number, b: number) => void;
     readonly world_set_walker: (a: number, b: number, c: number, d: number) => void;
     readonly world_signal: (a: number, b: number, c: number) => number;
     readonly world_solids_near: (a: number, b: number, c: number, d: number) => [number, number];

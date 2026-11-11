@@ -78,6 +78,9 @@ pub struct World {
     done: Vec<u32>,
     clock0: f64,
     next_id: u32,
+    driven: i32,
+    driven_cmd: f32,
+    driven_out: [f32; 3],
 }
 
 const LOOK: f32 = 90.0;
@@ -513,7 +516,7 @@ impl World {
         let net = Net::from_json(json).map_err(|e| JsValue::from_str(&e))?;
         let n = net.lanes.len();
         let nn = net.node_kind.len();
-        Ok(World { net, agents: Vec::new(), rng: Rng::new(seed as u64), t: 0.0, occ: vec![Vec::new(); n], owner: vec![-1; n], gate: vec![0.0; nn], out: Vec::new(), target: [0; 5], done: Vec::new(), clock0: 0.0, next_id: 0 })
+        Ok(World { net, agents: Vec::new(), rng: Rng::new(seed as u64), t: 0.0, occ: vec![Vec::new(); n], owner: vec![-1; n], gate: vec![0.0; nn], out: Vec::new(), target: [0; 5], done: Vec::new(), clock0: 0.0, next_id: 0, driven: -1, driven_cmd: 0.0, driven_out: [0.0; 3] })
     }
 
     pub fn set_targets(&mut self, cars: u32, buses: u32, trams: u32, trains: u32, peds: u32) {
@@ -588,6 +591,10 @@ impl World {
                 gap = (limit - 8.0).max(0.0);
                 lv = 0.0;
             }
+            let driven = self.driven >= 0 && self.agents[i].trip == self.driven;
+            if driven {
+                self.agents[i].stops.clear();
+            }
             if let Some(&(sl, sd, dep)) = self.agents[i].stops.front() {
                 let a = &self.agents[i];
                 let mut ahead = None;
@@ -628,6 +635,11 @@ impl World {
                     }
                 }
             }
+            let cmd = self.driven_cmd;
+            if driven {
+                self.driven_out = [0.0, (lv * lv + 2.0 * 1.1 * (gap - 6.0).max(0.0)).sqrt(), gap];
+            }
+            let safe = self.driven_out[1];
             let a = &mut self.agents[i];
             let p = match kind {
                 AKind::Train => idm::IdmParams { a: 0.7, b: 0.9, t: 2.0, s0: 8.0 },
@@ -638,7 +650,7 @@ impl World {
             let v0 = a.v0.min(self.net.lanes[a.lane as usize].speed * 1.05).max(1.0);
             let acc = idm::accel(&p, a.v, v0, gap, a.v - lv);
             a.acc = acc;
-            let nv = (a.v + acc * dt).max(0.0);
+            let nv = if driven { cmd.min(safe).max(0.0) } else { (a.v + acc * dt).max(0.0) };
             let mv = ((a.v + nv) * 0.5 * dt).min(gap.max(0.0) + 0.05).max(0.0);
             a.v = nv;
             if a.v < 0.1 {
@@ -650,6 +662,9 @@ impl World {
                 a.stopped = 0.0;
             }
             a.d += mv;
+            if driven {
+                self.driven_out[0] = nv;
+            }
             self.advance(i);
         }
         self.agents.retain(|a| a.alive);
@@ -956,6 +971,23 @@ impl World {
         self.next_id += 1;
         self.agents.last_mut().unwrap().id = self.next_id;
         true
+    }
+
+    pub fn drive_trip(&mut self, trip: i32) {
+        self.driven = trip;
+        self.driven_cmd = 0.0;
+    }
+
+    pub fn set_trip_speed(&mut self, v: f32) {
+        self.driven_cmd = v.max(0.0);
+    }
+
+    pub fn driven_state(&self) -> Vec<f32> {
+        if self.driven >= 0 && self.agents.iter().any(|a| a.trip == self.driven) {
+            self.driven_out.to_vec()
+        } else {
+            Vec::new()
+        }
     }
 
     pub fn drop_trip(&mut self, trip: u32) {

@@ -6,6 +6,8 @@ export const world_add_trip: (a: number, b: number, c: number, d: number, e: num
 export const world_clear_walker: (a: number) => void;
 export const world_clock: (a: number) => number;
 export const world_count: (a: number) => number;
+export const world_drive_trip: (a: number, b: number) => void;
+export const world_driven_state: (a: number) => [number, number];
 export const world_drop_trip: (a: number, b: number) => void;
 export const world_export_free: (a: number) => [number, number];
 export const world_export_state: (a: number) => [number, number];
@@ -22,6 +24,7 @@ export const world_release_player: (a: number) => void;
 export const world_set_clock: (a: number, b: number) => void;
 export const world_set_player_input: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
 export const world_set_targets: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
+export const world_set_trip_speed: (a: number, b: number) => void;
 export const world_set_walker: (a: number, b: number, c: number, d: number) => void;
 export const world_signal: (a: number, b: number, c: number) => number;
 export const world_solids_near: (a: number, b: number, c: number, d: number) => [number, number];
