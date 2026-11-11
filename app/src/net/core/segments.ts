@@ -2,7 +2,8 @@ import type { Mat } from './assets';
 import type { Ctx, Variant } from './ctx';
 import type { Seg } from './model';
 import { offsetLine, type PathPt } from './path';
-import { PORTAL, crown } from './terrain';
+import type { P3 } from './mesh';
+import { PORTAL, SLOPE, crown, underSpan, underZ } from './terrain';
 
 const MARK_Z = 0.025;
 
@@ -137,15 +138,63 @@ function bridge(ctx: Ctx, seg: Seg, s0: number, s1: number) {
   for (const s of [s0, s1]) {
     const f = seg.path.at(s);
     const g = ctx.terrainAt(f.x, f.y);
-    if (g === null || f.z - dd - g < 0.3) continue;
+    const zu = underAt(ctx, seg, s, f.x, f.y);
+    if (g === null || f.z - dd - Math.min(g, zu) < 0.3) continue;
     const nx = -f.ty, ny = f.tx;
     const top = [
       { x: f.x + nx * L.l, y: f.y + ny * L.l, z: f.z - dd, s: 0 },
       { x: f.x + nx * R.r, y: f.y + ny * R.r, z: f.z - dd, s: W },
     ];
-    const bot = top.map((p) => ({ ...p, z: (ctx.terrainAt(p.x, p.y) ?? g) - 1 }));
-    sink.wallBetween('wall', s === s0 ? top : [...top].reverse(), s === s0 ? bot : [...bot].reverse(), true);
+    const bot = top.map((p) => ({ ...p, z: Math.min(ctx.terrainAt(p.x, p.y) ?? g, zu) - 1 }));
+    const face = s === s0;
+    sink.wallBetween('wall', face ? top : [...top].reverse(), face ? bot : [...bot].reverse(), true);
+    if (zu === Infinity) continue;
+    for (const [lat, side, h] of [[L.l, 1, L.hl], [R.r, -1, R.hr]] as const) {
+      const wt: P3[] = [], wb: P3[] = [];
+      for (let d = 0; d <= 16; d += 1) {
+        const x = f.x + nx * (lat + side * d), y = f.y + ny * (lat + side * d);
+        if (d > 0 && insideOther(ctx, seg, x, y)) break;
+        const ze = f.z + h;
+        const out = Math.min(Math.max(ctx.terrainAt(x, y) ?? ze, ze - SLOPE * d), ze + SLOPE * d);
+        const z = Math.min(out, f.z);
+        if (d > 0 && z <= zu + SLOPE * d + 0.05) break;
+        wt.push({ x, y, z });
+        wb.push({ x, y, z: zu - 1 });
+      }
+      if (wt.length < 2) continue;
+      const fwd = face === (side > 0);
+      sink.wallBetween('wall', fwd ? wt : [...wt].reverse(), fwd ? wb : [...wb].reverse(), true);
+    }
   }
+}
+
+function underAt(ctx: Ctx, seg: Seg, s: number, x: number, y: number) {
+  let z = Infinity;
+  for (const u of ctx.under) {
+    if (u.up !== seg) continue;
+    const span = underSpan(ctx, u);
+    if (span && s >= span[0] - 0.5 && s <= span[1] + 0.5) z = Math.min(z, underZ(u, x, y));
+  }
+  return z;
+}
+
+const boxes = new WeakMap<Seg, [number, number, number, number]>();
+
+function insideOther(ctx: Ctx, seg: Seg, x: number, y: number) {
+  for (const o of ctx.segs) {
+    if (o === seg || o.asset.family === 'path') continue;
+    let b = boxes.get(o);
+    if (!b) {
+      const P = o.path, m = Math.max(o.lay[0].l, -o.lay[o.lay.length - 1].r) + 0.5;
+      b = [Infinity, Infinity, -Infinity, -Infinity];
+      for (let i = 0; i < P.n; i++) { b[0] = Math.min(b[0], P.x[i] - m); b[1] = Math.min(b[1], P.y[i] - m); b[2] = Math.max(b[2], P.x[i] + m); b[3] = Math.max(b[3], P.y[i] + m); }
+      boxes.set(o, b);
+    }
+    if (x < b[0] || y < b[1] || x > b[2] || y > b[3]) continue;
+    const q = o.path.project({ x, y });
+    if (q.s > 0.1 && q.s < o.path.length - 0.1 && q.lat <= o.lay[0].l + 0.2 && q.lat >= o.lay[o.lay.length - 1].r - 0.2) return true;
+  }
+  return false;
 }
 
 function blockedBelow(ctx: Ctx, seg: Seg, x: number, y: number): 'lane' | 'median' | null {
@@ -376,6 +425,7 @@ function slots(ctx: Ctx, seg: Seg, sa: number, sb: number) {
         if (vk === 'bridge' && (slot.kind === 'tree' || slot.kind === 'tree_small' || slot.kind === 'hydrant')) continue;
         const f = seg.path.at(s);
         const x = f.x - f.ty * lat, y = f.y + f.tx * lat;
+        if (TALL.has(slot.kind) && underDeck(ctx, seg, x, y)) continue;
         const tang = Math.atan2(f.ty, f.tx);
         const along = slot.kind === 'canopy' || slot.kind === 'platform_lamp' || slot.kind === 'ocs_pole';
         const face = along ? tang : lat > 0 ? tang - Math.PI / 2 : tang + Math.PI / 2;
@@ -383,6 +433,19 @@ function slots(ctx: Ctx, seg: Seg, sa: number, sb: number) {
       }
     }
   }
+}
+
+const TALL = new Set(['tree', 'tree_small', 'lamp', 'lamp_res', 'ocs_pole', 'pole_wood']);
+
+function underDeck(ctx: Ctx, seg: Seg, x: number, y: number) {
+  for (const u of ctx.under) {
+    if (u.lo !== seg) continue;
+    const span = underSpan(ctx, u);
+    if (!span) continue;
+    const q = u.up.path.project({ x, y });
+    if (q.s >= span[0] && q.s <= span[1] && q.lat <= u.up.lay[0].l + 1 && q.lat >= u.up.lay[u.up.lay.length - 1].r - 1) return true;
+  }
+  return false;
 }
 
 function variantOf(vs: Variant[], s: number) {
