@@ -8,6 +8,7 @@ export class World {
     clear_walker(): void;
     clock(): number;
     count(): number;
+    drop_trip(trip: number): void;
     export_free(): Float32Array;
     export_state(): Float32Array;
     frame2(): Float32Array;
@@ -42,6 +43,7 @@ export interface InitOutput {
     readonly world_clear_walker: (a: number) => void;
     readonly world_clock: (a: number) => number;
     readonly world_count: (a: number) => number;
+    readonly world_drop_trip: (a: number, b: number) => void;
     readonly world_export_free: (a: number) => [number, number];
     readonly world_export_state: (a: number) => [number, number];
     readonly world_frame: (a: number) => [number, number];

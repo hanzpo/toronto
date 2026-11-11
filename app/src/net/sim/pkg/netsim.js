@@ -71,6 +71,12 @@ export class World {
         return ret >>> 0;
     }
     /**
+     * @param {number} trip
+     */
+    drop_trip(trip) {
+        wasm.world_drop_trip(this.__wbg_ptr, trip);
+    }
+    /**
      * @returns {Float32Array}
      */
     export_free() {

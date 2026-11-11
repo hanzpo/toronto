@@ -14,7 +14,6 @@ import type { TransitLayer } from '../layers/TransitLayer';
 import { MODES, STATE_DWELL, type Mode, type TripInfo, type VehicleState } from '../transit';
 import { pathForTrip, type PatternPath, type Pose } from './path';
 import { DYN, EB, MAX_NOTCH, TrainOperator } from './operate';
-import { RAILP } from '../transit/protocol';
 import { Walker, WALKER_R } from './walker';
 import { WalkCollider, type Box } from './walkCollide';
 import { useInteract, type CamMode, type WalkInfo } from './state';
@@ -34,7 +33,7 @@ interface TrafficApi {
   getPlayer?(): { e: number; n: number; elev?: number; heading?: number; speed?: number; roadName?: string | null; drawZ?: number } | null;
   pickCarMajor?(e: number, n: number, radius?: number, perClass?: number): number | null;
   handles?(trip: number): boolean;
-  tripPose?(trip: number): { e: number; n: number; z: number; h: number } | null;
+  tripPose?(trip: number): { e: number; n: number; z: number; h: number; v: number } | null;
   hideTrip?(trip: number | null): void;
   transitBodies?(): { trip: number; ae: number; an: number; be: number; bn: number; z: number }[];
   pickPed?(e: number, n: number, radius?: number): { e: number; n: number; z: number; heading: number; colour: number } | null;
@@ -44,14 +43,8 @@ interface TrafficApi {
   solidsNear?(e: number, n: number, r: number, out?: Box[]): Box[];
   setPlayerInput?(inp: { throttle: number; brake: number; steer: number; handbrake?: boolean }): void;
   releasePlayer?(): void;
-  // player train in the signalled rail sim
-  railPlayerAttach?(agency: string, trip: number): Promise<boolean>;
-  railPlayerRelease?(): void;
-  setRailCommand?(cmd: number, emergency?: boolean): void;
-  railPlayerState?(): Float64Array | null;
-  /** rail sim train being ridden: never retired / handed back while ridden (null = none) */
-  setRailKeep?(id: number | null): void;
-  railRide?(agency: string, trip: number): Promise<number>;
+  tripPath?(trip: number): Float32Array | null;
+  keepTrip?(trip: number | null): void;
 }
 
 export interface PickResult {
@@ -123,8 +116,7 @@ export class InteractLayer implements Layer {
   private visAcc = 1;
   private vsTmp: VehicleState | null = null;
   /** rail sim train being ridden (followed across trip changes) and its track this frame */
-  private agentId: number | undefined;
-  private agentAt: ReturnType<TransitLayer['agentTrack']> = null;
+  private simPath: SimPath | null = null;
   private pose: Pose = { e: 0, n: 0, z: 0, heading: 0, pitch: 0 };
   private walkNear: { trip: number; label: string } | null = null;
 
@@ -249,15 +241,7 @@ export class InteractLayer implements Layer {
     this.selectVehicle(trip);
     useInteract.getState().set({ mode: 'operate', trip, ride: null, walk: null });
     op.flash(vs.state === STATE_DWELL ? 'You have control — close doors (C) when ready' : 'You have control — W/S to notch, O/C doors', 5);
-    // trains run in the signalled rail sim: the player's train becomes an agent there
-    // (signals and ATP apply; AI trains hold behind it)
-    const tr = this.traffic();
-    const loc = this.system.tripLocal(trip);
-    if (loc && loc.kind === 'rail' && info.mode !== 'streetcar' && tr?.railPlayerAttach) {
-      void tr.railPlayerAttach(loc.agency, loc.local).then((ok) => {
-        if (ok && this.op === op) op.external = true;
-      });
-    }
+    this.traffic()?.keepTrip?.(trip);
     return true;
   }
 
@@ -457,7 +441,7 @@ export class InteractLayer implements Layer {
 
 
 
-  private traffic(): TrafficApi | null {
+  traffic(): TrafficApi | null {
     return (this.engine.layers.find((l) => l.id === 'traffic') as unknown as TrafficApi) ?? null;
   }
 
@@ -476,14 +460,6 @@ export class InteractLayer implements Layer {
     this.enterRig();
     this.selectVehicle(trip);
     useInteract.getState().set({ mode, trip, op: null, walk: null });
-    // a rail trip: ride the sim's train (placed now if it is not yet) and keep it
-    const loc = this.system.tripLocal(trip);
-    const tr = this.traffic();
-    if (loc && loc.kind === 'rail' && tr?.railRide) {
-      void tr.railRide(loc.agency, loc.local).then((id) => {
-        if (id >= 0 && this.trip === trip && this.agentId === undefined) this.agentId = id;
-      });
-    }
   }
 
   private enterRig() {
@@ -505,12 +481,12 @@ export class InteractLayer implements Layer {
   /** Leave the current mode. restore = put the free camera back. */
   private leave(restore: boolean, keepWalker = false) {
     const prev = this.mode;
-    if (this.agentId !== undefined) { this.traffic()?.setRailKeep?.(null); this.agentId = undefined; this.agentAt = null; }
+    this.simPath = null;
     if (prev === 'free') { if (!keepWalker) this.hideWalker(); return; }
     // what we were looking at, before the walker / car goes away
     const focus = restore ? this.focusPoint() : null;
     if (this.op) {
-      if (this.op.external) this.traffic()?.railPlayerRelease?.();
+      this.traffic()?.keepTrip?.(null);
       this.transit.overrides.delete(this.op.info.trip);
       this.op = null;
     }
@@ -566,57 +542,26 @@ export class InteractLayer implements Layer {
       return true;
     }
     if (this.trip === null) return false;
-    const sp = this.traffic()?.tripPose?.(this.trip);
-    if (sp) {
-      Object.assign(this.pose, { e: sp.e, n: sp.n, z: sp.z, heading: sp.h, pitch: 0 });
-      this.vsTmp = this.system.vehicleAt(this.trip, t);
-      this.agentAt = null;
+    const pts = this.traffic()?.tripPath?.(this.trip);
+    this.vsTmp = this.system.vehicleAt(this.trip, t);
+    if (pts && pts.length >= 6) {
+      this.simPath = simPath(pts, this.simPath);
+      const sp = this.simPath;
+      samplePath(sp, sp.L / 2, _agentP, _agentD);
+      Object.assign(this.pose, { e: _agentP[0], n: _agentP[1], z: _agentP[2], heading: Math.atan2(_agentD[1], _agentD[0]), pitch: 0 });
       return true;
     }
-    // a rail agent: sit on the consist the sim drives (late / early / off its timetable,
-    // and on into its next trip or empty-stock move), not on the timetable ghost
-    const at = this.transit.agentTrack(this.trip, this.agentId);
-    this.agentAt = at;
-    if (at) {
-      if (this.agentId !== at.id) this.traffic()?.setRailKeep?.(at.id);
-      this.agentId = at.id;
-      if (at.trip >= 0 && at.trip !== this.trip) this.switchTrip(at.trip);
-      const q = at.shape.point(Math.max(0, at.centre), _agentP);
-      const d = at.shape.direction(Math.max(0, at.centre), _agentD);
-      Object.assign(this.pose, { e: q[0], n: q[1], z: q[2], heading: Math.atan2(d[1], d[0]), pitch: 0 });
-      this.vsTmp = this.system.vehicleAt(this.trip, t);
-      return true;
-    }
-    const vs = this.system.vehicleAt(this.trip, t);
-    this.vsTmp = vs;
-    if (!vs) {
-      // outside its timetable (running late / empty-stock move) but drawn by the rail sim
-      const dv = this.transit.drawnVehicle(this.trip);
-      if (!dv) return false;
-      Object.assign(this.pose, { e: dv.x, n: dv.y, z: dv.z, heading: dv.heading, pitch: 0 });
-      return true;
-    }
-    // held behind traffic? follow what is drawn, not the timetable ghost
-    vs.dist = this.transit.displayDist(this.trip, vs.dist);
+    this.simPath = null;
+    const vs = this.vsTmp;
+    if (!vs) return false;
     if (this.path) this.path.pose(vs.dist, 6, this.pose);
     else Object.assign(this.pose, { e: vs.x, n: vs.y, z: vs.z, heading: vs.heading, pitch: vs.pitch });
     return true;
   }
 
-  /** the ridden train went on to its next trip: follow it there */
-  private switchTrip(trip: number) {
-    const info = this.system.tripInfo(trip);
-    if (!info) return;
-    this.trip = trip;
-    this.tripInfo = info;
-    this.path = pathForTrip(this.system, info);
-    this.selectVehicle(trip);
-    useInteract.getState().set({ trip });
-  }
-
   private currentDist(): number {
     if (this.op) return this.op.s;
-    if (this.agentAt) return this.agentAt.centre;
+    if (this.simPath) return this.simPath.L / 2;
     return this.vsTmp?.dist ?? 0;
   }
 
@@ -630,15 +575,6 @@ export class InteractLayer implements Layer {
     if (op) {
       const vb = this.system.tripCount > 0 ? this.system.vehicles : null;
       const prevDoors = op.doors;
-      if (op.external) {
-        // position / speed come from the rail sim; send the controller
-        const tr = this.traffic();
-        const doorsShut = op.doors === 'closed';
-        const cmd = op.notch === EB ? -1 : !doorsShut ? -1 : op.notch / MAX_NOTCH;
-        tr?.setRailCommand?.(cmd, op.notch === EB);
-        const rs = tr?.railPlayerState?.();
-        if (rs && rs[RAILP.ACTIVE]) op.syncFromSim(rs);
-      }
       op.step(Math.min(simDt, 2), t, vb);
       if (prevDoors !== op.doors) {
         if (op.doors === 'opening') doorsOpen();
@@ -755,22 +691,16 @@ export class InteractLayer implements Layer {
     const mode = this.tripInfo!.mode;
     const dyn = DYN[mode];
     // the consist actually drawn (car by car) sets where the cab is
-    const L2 = (this.trip !== null ? this.transit.vehicleLength(this.trip) : 0) / 2 || dyn.length / 2;
+    const L2 = (this.simPath && !this.op ? this.simPath.L : this.trip !== null ? this.transit.vehicleLength(this.trip) : 0) / 2 || dyn.length / 2;
     const s = this.currentDist();
     const reverse = this.op?.reverse ?? false;
     const dir = reverse ? -1 : 1;
     const path = this.path;
     const tmp = [0, 0, 0];
-    const at = this.op ? null : this.agentAt;
+    const at = this.op ? null : this.simPath;
     const rail = (sAt: number, lift: number): [number, number, number] => {
       if (at) {
-        // along the agent's own track; straight on past its ends
-        const L = at.shape.length;
-        const u = Math.min(Math.max(sAt, 0), L);
-        const q = at.shape.point(u, _agentP);
-        const d = at.shape.direction(u, _agentD);
-        const ex = sAt - u;
-        tmp[0] = q[0] + d[0] * ex; tmp[1] = q[1] + d[1] * ex; tmp[2] = q[2];
+        samplePath(at, sAt, tmp, _agentD);
       } else if (path) {
         // pose() extrapolates past the path ends (train front at a terminus)
         const q = path.pose(sAt, 6, _railPose);
@@ -788,7 +718,7 @@ export class InteractLayer implements Layer {
     if (this.view === 'cab') {
       const front = s + dir * (L2 - 1.2);
       eye = rail(front, dyn.eye);
-      const ahead = rail(front + dir * Math.max(25, 12 + (this.op?.v ?? at?.speed ?? this.vsTmp?.speed ?? 0) * 1.2), dyn.eye - 0.4);
+      const ahead = rail(front + dir * Math.max(25, 12 + (this.op?.v ?? (this.trip !== null ? this.traffic()?.tripPose?.(this.trip)?.v : undefined) ?? this.vsTmp?.speed ?? 0) * 1.2), dyn.eye - 0.4);
       const hd = Math.atan2(ahead[1] - eye[1], ahead[0] - eye[0]) + this.lookYaw;
       const dd = Math.hypot(ahead[0] - eye[0], ahead[1] - eye[1]);
       const pz = ahead[2] - eye[2] + Math.tan(this.lookPitch) * dd;
@@ -804,7 +734,7 @@ export class InteractLayer implements Layer {
       const yaw = hd - Math.PI / 2 + 0.25 + this.lookYaw;
       look = [eye[0] + Math.cos(yaw) * 20, eye[1] + Math.sin(yaw) * 20, eye[2] - 1.2 + Math.tan(this.lookPitch) * 20];
       this.setCam(eye, look, dt, 30);
-    } else if (underground && path) {
+    } else if (underground && (path || at)) {
       // chase inside the tunnel: camera on the track behind the train
       const back = s - dir * (L2 + Math.min(this.dist * 0.25, 30));
       eye = rail(back, 3.4);
@@ -1049,18 +979,14 @@ export class InteractLayer implements Layer {
         op: {
           trip: op.info.trip, route: meta.short, routeColor: meta.color, routeText: meta.textColor,
           headsign: op.info.headsign, mode: op.mode, speed: op.v, limit: op.currentLimit(),
-          nextLimit: op.external
-            ? (op.simNextDist > 0 && op.simNextDist < Math.max(300, (op.v * op.v) / op.dyn.brake * 1.5) ? { v: op.simNextLimit, at: op.simNextDist } : null)
-            : op.path.nextLowerLimit(op.s + op.dyn.length / 2, Math.max(300, (op.v * op.v) / op.dyn.brake * 1.5), op.currentLimit()),
+          nextLimit: op.path.nextLowerLimit(op.s + op.dyn.length / 2, Math.max(300, (op.v * op.v) / op.dyn.brake * 1.5), op.currentLimit()),
           notch: op.notch, maxNotch: MAX_NOTCH, accel: op.a,
           nextStop: ns?.name ?? '—', nextStopDist: err ?? 0, stopTol: op.dyn.tol, canOpen: op.canOpen(),
           doors: op.doors,
           boarding: b ? { on: Math.round(b.on), off: Math.round(b.off), target: b.target, done: b.done } : null,
           deviation: op.doors !== 'closed' ? null : op.deviation(t), departIn,
           aspect: op.aspect, trainAhead: op.trainAhead, reverse: op.reverse,
-          message: op.external
-            ? op.atcTrip ? 'ATP: penalty brake — stop, then brake to release' : op.atpWarn >= 0 ? `ATP: overspeed — brake now (${op.atpWarn.toFixed(0)} s)` : op.message
-            : op.atcTrip ? 'ATC: emergency brake — train ahead!' : op.overspeed ? 'ATC: overspeed — brakes applied' : op.message,
+          message: op.atcTrip ? 'ATC: emergency brake — train ahead!' : op.overspeed ? 'ATC: overspeed — brakes applied' : op.message,
           progress: op.path.length ? op.s / op.path.length : 0, finished: op.finished,
           inTunnel: false, view: this.view === 'cab' ? 'cab' : 'chase',
         },
@@ -1549,3 +1475,27 @@ const _tagV = new THREE.Vector3();
 const _railPose: Pose = { e: 0, n: 0, z: 0, heading: 0, pitch: 0 };
 
 const _agentP = [0, 0, 0], _agentD = [0, 0];
+
+interface SimPath { xyz: Float32Array; cum: Float32Array; L: number }
+
+function simPath(pts: Float32Array, prev: SimPath | null): SimPath {
+  const n = pts.length / 3;
+  const cum = prev && prev.cum.length === n ? prev.cum : new Float32Array(n);
+  cum[0] = 0;
+  for (let i = 1; i < n; i++) cum[i] = cum[i - 1] + Math.hypot(pts[i * 3] - pts[i * 3 - 3], pts[i * 3 + 1] - pts[i * 3 - 2]);
+  return { xyz: pts, cum, L: cum[n - 1] };
+}
+
+function samplePath(p: SimPath, s: number, out: number[], dir: number[]) {
+  const n = p.cum.length;
+  let i = 0;
+  while (i < n - 2 && p.cum[i + 1] < s) i++;
+  const a = i * 3, b = a + 3;
+  const seg = p.cum[i + 1] - p.cum[i] || 1;
+  const u = (s - p.cum[i]) / seg;
+  dir[0] = (p.xyz[b] - p.xyz[a]) / seg;
+  dir[1] = (p.xyz[b + 1] - p.xyz[a + 1]) / seg;
+  out[0] = p.xyz[a] + (p.xyz[b] - p.xyz[a]) * u;
+  out[1] = p.xyz[a + 1] + (p.xyz[b + 1] - p.xyz[a + 1]) * u;
+  out[2] = p.xyz[a + 2] + (p.xyz[b + 2] - p.xyz[a + 2]) * Math.min(1, Math.max(0, u));
+}

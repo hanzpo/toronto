@@ -15,7 +15,8 @@ export type SimIn =
   | { type: 'input'; throttle: number; brake: number; steer: number; handbrake: boolean; ground: number }
   | { type: 'release' }
   | { type: 'walker'; x: number; y: number; z: number }
-  | { type: 'clearWalker' };
+  | { type: 'clearWalker' }
+  | { type: 'drop'; trip: number };
 
 export interface SimReply { type: 'reply'; id: number; ok: boolean; player: number[] }
 export interface SimRegion { type: 'region'; trips: number[] }
@@ -93,6 +94,7 @@ self.onmessage = (ev: MessageEvent<SimIn>) => {
   if (m.type === 'release') world?.release_player();
   if (m.type === 'walker') world?.set_walker(m.x, m.y, m.z);
   if (m.type === 'clearWalker') world?.clear_walker();
+  if (m.type === 'drop') world?.drop_trip(m.trip);
   if (m.type === 'trips' && world && index) {
     world.set_clock(m.clock);
     const accepted: number[] = [];

@@ -33,10 +33,9 @@ export function VehiclePanel({ trip }: { trip: number }) {
   const t = serviceSec();
   const operated = opTrip === trip && ia?.op;
   const vs = sys.vehicleAt(trip, t);
-  // trains driven by the rail sim: its position / speed / delay, not the timetable's
-  const ag = getTransit()?.agentInfo?.(trip) ?? null;
-  const dist = operated ? ia!.op!.s : ag && Number.isFinite(ag.dist) ? ag.dist : vs?.dist ?? 0;
-  const speed = operated ? ia!.op!.v : ag ? ag.speed : vs?.speed ?? 0;
+  const sim = ia?.traffic()?.tripPose?.(trip) ?? null;
+  const dist = operated ? ia!.op!.s : vs?.dist ?? 0;
+  const speed = operated ? ia!.op!.v : sim ? sim.v : vs?.speed ?? 0;
   const len = info.stops[info.stops.length - 1]?.dist || 1;
   const real = info.stops.filter((s) => !s.virtual);
   const upcoming = real.filter((s) => s.dist >= dist - 5).slice(0, 7);
@@ -46,9 +45,7 @@ export function VehiclePanel({ trip }: { trip: number }) {
   const late = (d: number) => (Math.abs(d) < 60 ? 'On time' : d > 0 ? `${Math.round(d / 60)} min late` : `${Math.round(-d / 60)} min early`);
   const status = operated
     ? `${late(dev)} (you)`
-    : ag
-      ? ag.deadhead ? 'Not in service' : ag.dwell ? `At ${shortStop(upcoming[0]?.name ?? '')} · ${late(ag.delay)}` : late(ag.delay)
-      : !vs ? 'Not in service' : dwell ? `At ${shortStop(sys.stopName(vs!.nextStop))}` : 'On schedule';
+    : !vs ? 'Not in service' : dwell ? `At ${shortStop(sys.stopName(vs!.nextStop))}` : 'On schedule';
   const rail = (RAIL_MODES as readonly string[]).includes(info.mode) || info.mode === 'bus';
   const attached = mode !== 'free';
   return (

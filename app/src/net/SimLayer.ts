@@ -24,6 +24,7 @@ export class SimLayer implements Layer {
   private sentSpeed = -1;
   private handed = new Set<number>();
   private pending = new Set<number>();
+  private kept = new Set<number>();
   private nextHand = 0;
 
   init(engine: Engine) {
@@ -131,6 +132,15 @@ export class SimLayer implements Layer {
 
   hideTrip(trip: number | null) { this.agents.hide = trip; }
 
+  tripPath(trip: number): Float32Array | null { return this.agents.paths.get(trip) ?? null; }
+
+  keepTrip(trip: number | null) {
+    for (const t of this.kept) if (t !== trip) this.kept.delete(t);
+    if (trip === null) return;
+    this.kept.add(trip);
+    if (this.handed.delete(trip)) this.worker?.postMessage({ type: 'drop', trip });
+  }
+
   transitBodies(): { trip: number; ae: number; an: number; be: number; bn: number; z: number }[] {
     const f = this.frame?.agents;
     if (!f) return [];
@@ -219,7 +229,7 @@ export class SimLayer implements Layer {
     const trips: TripIn[] = [];
     for (let i = 0; i < v.count; i++) {
       const trip = v.trip[i];
-      if (this.handed.has(trip) || this.pending.has(trip)) continue;
+      if (this.handed.has(trip) || this.pending.has(trip) || this.kept.has(trip)) continue;
       if (v.x[i] < box[0] || v.x[i] > box[2] || v.y[i] < box[1] || v.y[i] > box[3]) continue;
       const mode = v.mode[i];
       const kind = mode === 6 ? 1 : mode === 1 || mode === 2 ? 2 : 3;

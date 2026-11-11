@@ -958,6 +958,10 @@ impl World {
         true
     }
 
+    pub fn drop_trip(&mut self, trip: u32) {
+        self.agents.retain(|a| a.trip != trip as i32);
+    }
+
     pub fn has_trip(&self, trip: u32) -> bool {
         self.agents.iter().any(|a| a.trip == trip as i32)
     }

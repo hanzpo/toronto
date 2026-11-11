@@ -39,7 +39,8 @@ export class NetVehicles {
   private phase = new Map<number, number>();
   private tmp = new Float32Array(600);
   private white = new THREE.Color(1, 1, 1);
-  readonly poses = new Map<number, { e: number; n: number; z: number; h: number }>();
+  readonly poses = new Map<number, { e: number; n: number; z: number; h: number; v: number }>();
+  readonly paths = new Map<number, Float32Array>();
   hide: number | null = null;
   highlight: Map<number, number> | null = null;
 
@@ -87,6 +88,7 @@ export class NetVehicles {
     for (const p of this.peds) p.count = 0;
     this.consists.begin();
     this.poses.clear();
+    this.paths.clear();
     const seen = new Set<number>();
     for (const [id, b1] of f1.bodies) {
       const b0 = f0.bodies.get(id);
@@ -122,7 +124,10 @@ export class NetVehicles {
       }
       if (b1.trip >= 0) {
         const k = Math.floor((n - 1) / 2) * 3;
-        this.poses.set(b1.trip, { e: P[k], n: P[k + 1], z: P[k + 2], h: Math.atan2(P[1] - P[(n - 1) * 3 + 1], P[0] - P[(n - 1) * 3]) });
+        this.poses.set(b1.trip, { e: P[k], n: P[k + 1], z: P[k + 2], h: Math.atan2(P[1] - P[(n - 1) * 3 + 1], P[0] - P[(n - 1) * 3]), v: b1.v });
+        const path = new Float32Array(n * 3);
+        for (let j = 0; j < n; j++) { path[j * 3] = P[(n - 1 - j) * 3]; path[j * 3 + 1] = P[(n - 1 - j) * 3 + 1]; path[j * 3 + 2] = P[(n - 1 - j) * 3 + 2]; }
+        this.paths.set(b1.trip, path);
         if (b1.trip === this.hide) continue;
       }
       const m = b1.trip >= 0 ? meta(b1.trip) : null;
