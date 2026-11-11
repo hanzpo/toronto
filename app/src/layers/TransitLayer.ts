@@ -52,6 +52,8 @@ export class TransitLayer implements Layer {
   /** trip -> outline kind (render/overlay/OutlineSet: 1 hover, 2 selected) */
   readonly highlight = new Map<number, number>();
   hideLines = false;
+  /** trips the network sim drives and draws itself */
+  simOwns: ((trip: number) => boolean) | null = null;
   lastT = 0;
   stats = { cars: 0, near: 0 };
   /** pickable vehicle spans drawn this frame: [trip, e0, n0, e1, n1, z] × pickCount */
@@ -197,7 +199,7 @@ export class TransitLayer implements Layer {
       if (!mode) continue;
       if (!near && !an[STYLE[mode].key]) continue;
       const trip = v.trip[i];
-      if (this.overrides.has(trip)) continue;
+      if (this.overrides.has(trip) || this.simOwns?.(trip)) continue;
       const dc = Math.hypot(v.x[i] - camE, v.y[i] - camN);
       if (dc > markerMax) continue;
       const sty = STYLE[mode];

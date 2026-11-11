@@ -498,7 +498,7 @@ export class InteractLayer implements Layer {
       this.transit.overrides.delete(this.op.info.trip);
       this.op = null;
     }
-    if (this.trip !== null && !this.traffic()?.handles?.(this.trip)) this.transit.overrides.delete(this.trip);
+    if (this.trip !== null) this.transit.overrides.delete(this.trip);
     this.traffic()?.hideTrip?.(null);
     if (this.drivingCar) {
       try { this.traffic()?.releasePlayer?.(); } catch { /* ignore */ }

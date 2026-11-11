@@ -82,7 +82,9 @@ export class SimLayer implements Layer {
       this.handoff();
     }
     if (this.frame) {
-      this.agents.highlight ??= this.transit()?.highlight ?? null;
+      const tl = this.transit();
+      if (tl && !tl.simOwns) tl.simOwns = (t) => this.handed.has(t);
+      this.agents.highlight ??= tl?.highlight ?? null;
       this.agents.update(performance.timeOrigin + performance.now(), ctx.anchor, ctx.cameraPos.x, -ctx.cameraPos.z, ctx.dt, (trip) => this.meta(trip));
       this.agents.group.visible = ctx.altitude < 3000;
     }
@@ -215,17 +217,19 @@ export class SimLayer implements Layer {
   }
 
   private keepOnly(keep: Set<number>) {
-    const tr = this.transit();
-    for (const t of [...this.handed]) if (!keep.has(t)) { tr?.overrides.delete(t); this.handed.delete(t); }
+    this.handed.clear();
+    for (const t of keep) this.own(t);
     this.pending.clear();
   }
 
-
-
   private onTrips(m: SimTrips) {
-    const tr = this.transit();
-    for (const t of m.accepted) { this.handed.add(t); this.pending.delete(t); tr?.overrides.set(t, null); }
-    for (const t of m.done) { this.handed.delete(t); tr?.overrides.delete(t); }
+    for (const t of m.accepted) { this.own(t); this.pending.delete(t); }
+    for (const t of m.done) this.handed.delete(t);
+  }
+
+  private own(t: number) {
+    if (this.kept.has(t)) this.worker?.postMessage({ type: 'drop', trip: t });
+    else this.handed.add(t);
   }
 
   private handoff() {
