@@ -10,14 +10,13 @@
 //   __qa.gotoPose(pose)       jump to {e, n, h?, dist, heading°, pitch°}
 //   __qa.ready(timeoutMs)     resolves when no tiles are pending
 //
-// Counters (each {count, examples[≤20]}):
-//   carOverlap          sim car bodies (OBBs) intersecting each other
-//   carBelowGround      car elevation < rendered terrain − 0.3 m (not bridge/tunnel)
-//   transitOverlap      surface transit vehicles intersecting each other or cars
+// Counters (each {count, examples[≤20]}), for the timetable-driven surface transit (the sim's own
+// vehicles run on the network model's lanes by construction):
+//   transitOverlap      surface transit vehicles intersecting each other
 //   transitBelowGround  rendered transit cars 0.3–3 m under the terrain (deeper = tunnel)
-//   vehicleOffRoad      car / bus centre outside every carriageway ribbon (L0 roads,
-//                       classes 0–7, no tunnels); streetcar / LRT centre > 2.5 m from a track
-//   vehicleWrongWay     car / surface transit heading > 90° off a one-way ribbon under it
+//   vehicleOffRoad      bus centre outside every carriageway of the network model (net/far/0
+//                       tiles, classes 0–7, no tunnels); streetcar / LRT centre > 2.5 m from a track
+//   vehicleWrongWay     surface transit heading > 90° off a one-way carriageway under it
 //   vehicleLeftSide     centre on the left half of a two-way ribbon (≥ 2 lanes, ≥ 7 m wide)
 //                       relative to its heading (right-hand traffic); junction boxes
 //                       (overlapping ribbons of different roads) are skipped
@@ -29,10 +28,8 @@
 //   extra.houseInBuilding  house boxes inside an extruded footprint;   workers/houseFront.ts houseRoofQa)
 import type { Engine } from '../engine/Engine';
 import { fetchTbn } from '../data/tbn';
-import { CAR_LENGTH } from '../layers/traffic/models';
 
-const HALF_W = [0.92, 0.9, 0.98, 1.01, 1.0, 1.25];
-const ROAD_W_DEFAULT = [24, 18, 14, 12, 10, 8, 5, 5, 2.2, 3];
+const ROAD_W_MIN = [10, 10, 7, 6, 6, 5, 3.5, 3];
 const TILE = 1024;
 const CELL = 32;
 const MAX_EX = 20;
@@ -44,8 +41,8 @@ interface Example { e: number; n: number; [k: string]: unknown }
 interface Counter { count: number; examples: Example[] }
 export interface QaSample {
   at: number; focus: { e: number; n: number }; radius: number;
-  cars: number; transit: number;
-  carOverlap: Counter; carBelowGround: Counter; transitOverlap: Counter; transitBelowGround: Counter;
+  transit: number;
+  transitOverlap: Counter; transitBelowGround: Counter;
   vehicleOffRoad: Counter; vehicleWrongWay: Counter; vehicleLeftSide: Counter; vehicleDoubleRender: Counter; longFrames: Counter & { maxMs: number };
   tilesReady: boolean;
   extra?: Record<string, Counter>;
@@ -54,8 +51,6 @@ export interface Pose { e: number; n: number; h?: number; z?: number; dist?: num
 interface Issue { id: string; cat: string; rank: number; e: number; n: number; z?: number; view?: { dist?: number; heading?: number; pitch?: number } }
 
 // ---------------------------------------------------------------- duck types
-interface Snap { count: number; oe: number; on: number; f: Float32Array; u: Uint32Array }
-interface TrafficLike { snapshot(): Snap | null }
 interface GroundVeh { e: number; n: number; heading: number; length: number; width: number; speed: number; trip: number }
 interface PoolLike { count: number; geom: { boundingBox: { min: { x: number; y: number; z: number }; max: { x: number; y: number; z: number } } | null; computeBoundingBox(): void }; mesh: { instanceMatrix: { array: ArrayLike<number> } } }
 interface TransitLike {
@@ -135,7 +130,7 @@ class Ground {
       }
   }
   private async load(tx: number, ty: number) {
-    const t = await fetchTbn(`${this.root}/tiles/0/${tx}_${ty}.bin.gz`);
+    const t = await fetchTbn(`${this.root}/net/far/0/${tx}_${ty}.bin.gz`);
     if (!t) return;
     const a = t.arrays, ox = tx * TILE, oy = ty * TILE;
     const off = a.r_off as Uint32Array | undefined, xyz = a.r_xyz as Float32Array | undefined;
@@ -144,8 +139,7 @@ class Ground {
       for (let r = 0; r < off.length - 1; r++) {
         const c = cls[r] ?? 5;
         if (c > 7 || (fl && fl[r] & 4)) continue;
-        let w = wid && wid[r] > 0 ? wid[r] : ROAD_W_DEFAULT[c] ?? 6;
-        w = Math.max(w, c <= 1 ? 10 : 2);
+        const w = Math.max(wid?.[r] ?? 0, ROAD_W_MIN[c] ?? 3);
         const ow = fl && fl[r] & 1 ? 1 : 0, ln = lanes ? lanes[r] : 0, rid = this.roads++;
         for (let k = off[r]; k < off[r + 1] - 1; k++)
           this.add(this.g.road, xyz[k * 3] + ox, xyz[k * 3 + 1] + oy, xyz[k * 3 + 3] + ox, xyz[k * 3 + 4] + oy, w / 2, ow, ln, rid);
@@ -228,8 +222,8 @@ export function installQa(engine: Engine) {
     void ground.ensure(f.e, f.n);
     const near = (e: number, n: number) => Math.abs(e - f.e) < R && Math.abs(n - f.n) < R;
     const out: QaSample = {
-      at: performance.now(), focus: { e: r1(f.e), n: r1(f.n) }, radius: R, cars: 0, transit: 0,
-      carOverlap: mk(), carBelowGround: mk(), transitOverlap: mk(), transitBelowGround: mk(),
+      at: performance.now(), focus: { e: r1(f.e), n: r1(f.n) }, radius: R, transit: 0,
+      transitOverlap: mk(), transitBelowGround: mk(),
       vehicleOffRoad: mk(), vehicleWrongWay: mk(), vehicleLeftSide: mk(), vehicleDoubleRender: mk(), longFrames: { ...mk(), maxMs: 0 }, tilesReady: pending() === 0,
     };
     const haveGround = ground.g.seg.length > 0;
@@ -243,31 +237,6 @@ export function installQa(engine: Engine) {
       if (r.lanes >= 2 && r.hw * 2 >= 7 && Math.abs(c) > 0.5 && r.side * Math.sign(c) > 0.3)
         push(out.vehicleLeftSide, { e: r1(e), n: r1(n), ids, kind, offset: r1(Math.abs(r.side)) });
     };
-    // ---- sim cars
-    const cars: Box[] = [];
-    const snap = (w.__traffic as TrafficLike | undefined)?.snapshot?.();
-    if (snap) {
-      const { f: fa, u, count, oe, on } = snap;
-      for (let i = 0; i < count; i++) {
-        const o = i * 8;
-        const e = fa[o] + oe, n = fa[o + 1] + on;
-        if (!near(e, n)) continue;
-        const kind = u[o + 6] & 0xff, id = u[o + 7];
-        const structure = ((u[o + 6] >>> 24) & 8) !== 0;
-        const b: Box = { e, n, h: fa[o + 3], hl: (CAR_LENGTH[kind] ?? 4.7) / 2, hw: HALF_W[kind] ?? 0.95, id };
-        cars.push(b);
-        const g = engine.heightAt(e, n);
-        const elev = structure || !Number.isFinite(g) ? fa[o + 2] : g + 0.06;
-        if (!structure && Number.isFinite(g) && elev < g - 0.3) push(out.carBelowGround, { e: r1(e), n: r1(n), ids: [id], depth: r1(g - elev) });
-        if (haveGround && !structure) {
-          const d = ground.offRoad(e, n);
-          if (d > ROAD_TOL) push(out.vehicleOffRoad, { e: r1(e), n: r1(n), ids: [id], kind: 'car', off: Number.isFinite(d) ? r1(d) : null });
-          else dirCheck(e, n, fa[o + 3], [id], 'car');
-        }
-      }
-      out.cars = cars.length;
-      for (const [a, b] of overlapPairs(cars, () => true)) push(out.carOverlap, { e: r1((a.e + b.e) / 2), n: r1((a.n + b.n) / 2), ids: [a.id, b.id] });
-    }
     // ---- surface transit
     const tr = w.__transit as TransitLike | undefined;
     if (tr?.groundVehicles) {
@@ -288,9 +257,7 @@ export function installQa(engine: Engine) {
         }
       }
       out.transit = boxes.length;
-      const all = boxes.concat(cars);
-      const isT = (b: Box) => typeof b.id === 'string';
-      for (const [a, b] of overlapPairs(all, (a, b) => isT(a) || isT(b))) push(out.transitOverlap, { e: r1((a.e + b.e) / 2), n: r1((a.n + b.n) / 2), ids: [a.id, b.id] });
+      for (const [a, b] of overlapPairs(boxes, () => true)) push(out.transitOverlap, { e: r1((a.e + b.e) / 2), n: r1((a.n + b.n) / 2), ids: [a.id, b.id] });
     }
     // ---- rendered transit cars (pool instances): below ground + double representation
     const pools = tr?.pools?.pools;
@@ -357,7 +324,7 @@ export function installQa(engine: Engine) {
     return out;
   }
 
-  const COUNTERS = ['carOverlap', 'carBelowGround', 'transitOverlap', 'transitBelowGround', 'vehicleOffRoad', 'vehicleWrongWay', 'vehicleLeftSide', 'vehicleDoubleRender', 'longFrames'] as const;
+  const COUNTERS = ['transitOverlap', 'transitBelowGround', 'vehicleOffRoad', 'vehicleWrongWay', 'vehicleLeftSide', 'vehicleDoubleRender', 'longFrames'] as const;
   async function watch(seconds = 5, opts: { radius?: number } = {}) {
     const acc: Record<string, { max: number; sum: number }> = {};
     let n = 0, last: QaSample | null = null;
