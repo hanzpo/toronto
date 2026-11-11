@@ -41,6 +41,8 @@ CURB_PEN = 0.15
 SAMPLE = 10.0
 BLEND = 40.0
 JOIN = 0.5
+BRIDGE = 35.0
+BRIDGE_PEN = 40.0
 
 
 class Lanes:
@@ -154,6 +156,15 @@ class Net:
         self.S_t = np.vstack(tg) if tg else np.zeros((0, 2))
         order = np.argsort(self.S_e, kind="stable")
         self.S_xy, self.S_e, self.S_s, self.S_t = self.S_xy[order], self.S_e[order], self.S_s[order], self.S_t[order]
+        ent, ent_xy = [], []
+        for e in np.nonzero(self.ok)[0]:
+            ent.append((int(e), 1))
+            ent_xy.append(lanes.xyz[lanes.off[e], :2])
+            if lanes.bidir[e]:
+                ent.append((int(e), -1))
+                ent_xy.append(lanes.xyz[lanes.off[e + 1] - 1, :2])
+        self.entries = ent
+        self.entry_tree = cKDTree(np.array(ent_xy)) if ent else None
         self.first = {int(e): int(i) for i, e in reversed(list(enumerate(self.S_e)))}
         self.count = dict(zip(*np.unique(self.S_e, return_counts=True))) if len(self.S_e) else {}
         self.tree = cKDTree(self.S_xy) if len(self.S_xy) else None
@@ -184,9 +195,33 @@ class Net:
                 c = pen + (TURN_PEN if turn > 0.5 else 0.0)
                 if c < out.get((j, dj), math.inf):
                     out[(j, dj)] = c
+        if not out and self.entry_tree is not None:
+            out = self.bridge(e, d, h_in)
         v = [(j, dj, c) for (j, dj), c in out.items()]
         self._succ[k] = v
         return v
+
+
+    def bridge(self, e: int, d: int, h_in: float) -> dict[tuple[int, int], float]:
+        """A lane that ends with nowhere to go (a junction the model left without turning paths for
+        this mode): continue on the lanes that start just ahead, in the same direction."""
+        end = self.L.ends(e, d)[1][:2]
+        out: dict[tuple[int, int], float] = {}
+        ux, uy = math.cos(h_in), math.sin(h_in)
+        for q in self.entry_tree.query_ball_point(end, BRIDGE):
+            j, dj = self.entries[q]
+            if j == e:
+                continue
+            start = self.L.ends(j, dj)[0][:2]
+            v = start - end
+            dist = float(np.hypot(*v))
+            if dist > 0.5 and (v[0] * ux + v[1] * uy) < 0.7 * dist:
+                continue
+            h = self.heading(j, dj, False)
+            if math.cos(h - h_in) < 0.5:
+                continue
+            out[(j, dj)] = BRIDGE_PEN + dist
+        return out
 
 
 class _Ctx:
