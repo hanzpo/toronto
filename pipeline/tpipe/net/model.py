@@ -36,6 +36,7 @@ class Edge:
     dead: bool = False
     events: list[tuple[str, float, int]] = field(default_factory=list)
     tile: tuple[int, int] = (0, 0)
+    under: bool = False
 
 
 @dataclass
