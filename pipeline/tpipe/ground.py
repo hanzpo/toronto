@@ -94,7 +94,7 @@ TRACK_SPORTS = {"running", "athletics", "multi", None}
 W = {}  # prepared globals (shared with forked workers)
 
 # ------------------------------------------------------------------ portals / trenches
-# Rail kinds (rail_graph): 0 rail · 1 subway · 2 light rail · 3 tram.
+# Rail kinds (network tracks, tpipe.net.lanes.tracks): 0 rail · 1 subway · 2 light rail · 3 tram.
 # Tunnel mouth height above the rail (m) and the half-width of the cut per track.
 MOUTH_H = {0: 7.0, 1: 5.0, 2: 5.6, 3: 5.6}
 CUT_HW = {0: 2.9, 1: 2.4, 2: 2.5, 3: 2.3}
@@ -114,25 +114,22 @@ def _portal_cfg():
 
 
 def _trenches(terrain):
-    """Open cuts where tunnel track (as the trains run it: rail_graph geometry)
+    """Open cuts where tunnel track (the network model's tracks, as the trains run them)
     is below the ground but not yet deep enough to be in a tunnel; they end at a
     portal (headwall + mouth) where the depth reaches mouth height + HEAD."""
+    from .net.lanes import tracks as net_tracks
+
     try:
-        from . import rail_graph
-        g = rail_graph.load()
-    except Exception as ex:  # rail graph not built: no portals
-        print(f"ground: no rail graph ({ex}), no portals")
+        found = net_tracks()
+    except FileNotFoundError:
+        print("ground: no network tracks (app/scripts/net-bake.mjs --rail), no portals")
         return None
     cfg = _portal_cfg()
     skip = [c for c in cfg if c.get("skip")]
     pieces, tracks = [], []  # tracks: (xyz (n,3) of the cut part incl. depth, kind)
-    for e in range(len(g.geom)):
-        P, _, f = g.geom[e]
-        if P.shape[0] < 2 or P.shape[1] < 3 or not (np.asarray(f) & 2).any():
+    for P, kind, f in found:
+        if len(P) < 2 or not (f & 2).any():
             continue
-        kind = int(g.e_kind[e])
-        if int(g.e_svc[e]) != 0:
-            continue  # sidings / yards (covered shop tracks are tagged as tunnels)
         P = np.asarray(P, np.float64)
         # densify to 2 m so depth crossings are found precisely
         seg = np.hypot(*np.diff(P[:, :2], axis=0).T)

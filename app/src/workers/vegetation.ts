@@ -1,12 +1,12 @@
 // Vegetation placement (tile worker). Deterministic: every choice is hashed
 // from tile + feature ids, so a tile always grows the same trees.
 //
-// Level 0 (1024 m tiles, 4 m land-cover raster, roads, buildings, houses):
+// Level 0 (1024 m tiles, 4 m land-cover raster, the network build of the tile, buildings, houses;
+// run in the network worker, net/worker.ts):
 //   · OSM trees (species from the genus tag when mapped)
-//   · street trees: per block one planted species (City practice) with species
-//     spacing, boulevard beyond the sidewalk on residential streets, tree pits
-//     at the curb only on commercial frontages; none within the sight triangle
-//     of a junction, in front of driveways, at lamps, in travel lanes
+//   · street trees: the network engine's tree slots (boulevards, furniture
+//     bands), one planted species per block (City practice) picked from the
+//     frontage behind them
 //   · yards: front-yard tree / foundation shrubs, 0–3 backyard trees behind
 //     each house, cedar hedges along some rear / side lot lines
 //   · parks, ravines, cemeteries, wetlands: raster scatter with grove noise,
@@ -17,7 +17,8 @@
 // Output: VEG_STRIDE records (species.ts) sorted into 64 m cells × family so
 // the renderer can move whole cells between LOD pools.
 import type { TypedArray } from '../data/tbn';
-import { BLVD_L, BLVD_R, BLVD_W, PAVER_W, PAVERS, ROAD_W_DEFAULT, SIDEWALK_W, SW_L, SW_R, type StreetRoad, type Terrain } from './roads';
+import type { Built } from '../net/core/model';
+import type { Terrain } from './farNet';
 import { familyOf, GENUS, S, SPECIES, VEG_STRIDE } from '../layers/vegetation/species';
 
 export const VEG_CELLS = 16; // per tile side (64 m cells)
@@ -69,24 +70,22 @@ const SUBURB_R = 13000;
 
 export interface VegSeg { x0: number; y0: number; x1: number; y1: number; hw: number; cls: number }
 
+export interface StreetTree { x: number; y: number; small: boolean }
+
 export interface VegEnv {
   S: number; tx: number; ty: number;
   terr: Terrain;
   ground: Uint8Array;
-  /** raw tile arrays (r_* roads, l_* rail, p_* points, j_* junctions): the exclusion index uses the unclipped geometry */
-  a: Record<string, TypedArray>;
   gAt(x: number, y: number): number;
   inBuilding(x: number, y: number, margin: number): boolean;
   airfield(x: number, y: number): boolean;
-  /** road segments near a point (24 m grid cell) */
+  /** carriageway segments near a point (24 m grid cell) */
   roadsAt(x: number, y: number): VegSeg[] | undefined;
-  streets: StreetRoad[];
-  /** lamp posts placed so far (stride 5: x, n, …) */
-  lamps: number[];
+  /** the network engine's tree slots (tile-local) */
+  streetTrees: StreetTree[];
   houses: { xy: Float32Array; angle: Float32Array; len: Float32Array; wid: Float32Array; type?: Uint8Array } | null;
   osm: { kind: Uint8Array; xy: Float32Array; v?: Uint8Array } | null;
-  /** exclusion index already built for this tile (street.ts shares it) */
-  ex?: Exclusion;
+  ex: Exclusion;
 }
 
 export interface VegBuf {
@@ -190,8 +189,6 @@ export class Exclusion {
   private tris: number[] = [];
   private tcells = new Map<number, number[]>();
   private size = 16;
-  /** the tile carries its neighbours' border pieces (xr_* / xl_*) */
-  hasBorder = false;
   private k(i: number, j: number) { return (i + 1024) * 8192 + (j + 1024); }
   private cover(map: Map<number, number[]>, x0: number, y0: number, x1: number, y1: number, id: number) {
     const s = this.size;
@@ -298,72 +295,48 @@ function sd(x: number, y: number, ax: number, ay: number, bx: number, by: number
   return Math.hypot(x - ax - dx * u, y - ay - dy * u);
 }
 
-/**
- * Exclusion index for a tile from its raw arrays (unclipped pieces, so roads
- * just beyond the tile edge count) plus the neighbours' border pieces. `widen`
- * matches the meshing's far-level road widening.
- */
-export function buildExclusion(a: Record<string, TypedArray>, _streets: StreetRoad[] | null, widen = 1, maxClass = 9): Exclusion {
+const ROAD_W_MIN = [10, 10, 7, 6, 6, 5, 3.5, 3, 2.2, 3];
+
+/** Exclusion index from the far road / rail arrays of a tile (net/bake.ts): carriageway half-widths, track beds. */
+export function farExclusion(a: Record<string, TypedArray>, widen: number, maxClass: number): Exclusion {
   const ex = new Exclusion();
-  addRoads(ex, a, 'r', widen, maxClass, 0);
-  addRoads(ex, a, 'xr', widen, maxClass, 1.2); // no per-vertex edges: symmetric width + margin
-  for (const p of ['l', 'xl']) {
-    const lo = a[`${p}_off`] as Uint32Array | undefined, lx = a[`${p}_xyz`] as Float32Array | undefined, lf = a[`${p}_flags`] as Uint8Array | undefined;
-    if (!lo || !lx) continue;
-    for (let i = 0; i < lo.length - 1; i++) {
-      if (lf && lf[i] & 4) continue;
-      for (let k = lo[i]; k < lo[i + 1] - 1; k++) ex.add(lx[k * 3], lx[k * 3 + 1], lx[k * 3 + 3], lx[k * 3 + 4], 0, 0, EX_RAIL);
+  for (const p of ['r', 'l'] as const) {
+    const off = a[`${p}_off`] as Uint32Array | undefined, xyz = a[`${p}_xyz`] as Float32Array | undefined, vf = a[`${p}_vf`] as Uint8Array | undefined;
+    if (!off || !xyz) continue;
+    const cls = a[`${p}_class`] as Uint8Array, wid = a.r_width as Float32Array | undefined;
+    for (let i = 0; i < off.length - 1; i++) {
+      const c = cls[i];
+      if (p === 'r' && c > maxClass) continue;
+      const hw = p === 'r' ? (Math.max(wid?.[i] ?? 0, ROAD_W_MIN[c] ?? 3) * widen) / 2 : 0;
+      const type = p === 'l' ? EX_RAIL : c <= 1 ? EX_HIGHWAY : EX_ROAD;
+      for (let k = off[i]; k < off[i + 1] - 1; k++) {
+        if (vf && vf[k] & vf[k + 1] & 2) continue;
+        ex.add(xyz[k * 3], xyz[k * 3 + 1], xyz[k * 3 + 3], xyz[k * 3 + 4], hw, hw, type);
+      }
     }
   }
-  ex.hasBorder = !!a.xr_off || !!a.xl_off;
-  const jxy = a.j_xy as Float32Array | undefined, jao = a.j_arm_off as Uint32Array | undefined, jar = a.j_arm_r as Float32Array | undefined;
-  if (jxy && jao && jar) {
-    for (let i = 0; i < jxy.length / 2; i++) {
-      let r = 0;
-      for (let k = jao[i]; k < jao[i + 1]; k++) r = Math.max(r, jar[k]);
-      const R = r * widen + 1.5;
-      ex.add(jxy[i * 2], jxy[i * 2 + 1], jxy[i * 2], jxy[i * 2 + 1], R, R, EX_JBOX);
-    }
-  }
-  const js = a.js_xy as Float32Array | undefined, jt = a.js_tri as Uint32Array | undefined;
-  if (js && jt) for (let i = 0; i + 2 < jt.length; i += 3) {
-    const A = jt[i] * 2, B = jt[i + 1] * 2, C = jt[i + 2] * 2;
-    ex.tri(js[A], js[A + 1], js[B], js[B + 1], js[C], js[C + 1]);
-  }
-  const pk = a.p_kind as Uint8Array | undefined, pxy = a.p_xy as Float32Array | undefined;
-  if (pk && pxy) for (let i = 0; i < pk.length; i++) if (pk[i] === 2) ex.disc(pxy[i * 2], pxy[i * 2 + 1], 5);
   return ex;
 }
 
-function addRoads(ex: Exclusion, a: Record<string, TypedArray>, p: string, widen: number, maxClass: number, margin: number) {
-  const off = a[`${p}_off`] as Uint32Array | undefined, xyz = a[`${p}_xyz`] as Float32Array | undefined;
-  const cls = a[`${p}_class`] as Uint8Array | undefined, wid = a[`${p}_width`] as Float32Array | undefined, fl = a[`${p}_flags`] as Uint8Array | undefined;
-  const pl = a[`${p}_pl`] as Float32Array | undefined, pr = a[`${p}_pr`] as Float32Array | undefined;
-  const sw = a[`${p}_sw`] as Uint8Array | undefined, vf = a[`${p}_vf`] as Uint8Array | undefined;
-  if (!off || !xyz || !cls) return;
-  for (let i = 0; i < off.length - 1; i++) {
-    const f = fl ? fl[i] : 0;
-    const c = cls[i] ?? 5;
-    if (f & 4 || c > maxClass) continue; // tunnels: trees may grow above
-    let w = wid && wid[i] > 0 ? wid[i] : ROAD_W_DEFAULT[c] ?? 6;
-    w = Math.max(w, c <= 1 ? 10 : 2) * widen;
-    const hw = w / 2 + margin;
-    const ws = SIDEWALK_W[c] ?? 0;
-    for (let k = off[i]; k < off[i + 1] - 1; k++) {
-      if (vf && ((vf[k] | vf[k + 1]) & 2)) continue; // tunnel section
-      const bridge = (f & 2) !== 0 || (vf ? ((vf[k] | vf[k + 1]) & 1) !== 0 : false);
-      const type = bridge ? EX_BRIDGE : c <= 1 ? EX_HIGHWAY : EX_ROAD;
-      const e = (A: Float32Array | undefined, j: number) => (A && A[j] > 0 && Number.isFinite(A[j]) ? A[j] * widen + margin : hw);
-      // sidewalk bands per side: [boulevard grass | pavers] then the walk (roads.ts sidewalk())
-      let bl = 0, wl = 0, br = 0, wr = 0;
-      if (ws > 0 && c >= 2 && c <= 6) {
-        const bits = sw ? (sw[k] | sw[k + 1]) : p === 'xr' ? SW_L | SW_R : 0;
-        if (bits & SW_L) { wl = ws; bl = bits & BLVD_L ? BLVD_W : bits & PAVERS ? PAVER_W : 0; }
-        if (bits & SW_R) { wr = ws; br = bits & BLVD_R ? BLVD_W : bits & PAVERS ? PAVER_W : 0; }
-      }
-      ex.seg(xyz[k * 3], xyz[k * 3 + 1], xyz[k * 3 + 3], xyz[k * 3 + 4], e(pl, k), e(pl, k + 1), e(pr, k), e(pr, k + 1), bl, wl, br, wr, type);
+/**
+ * Exclusion index from the network build of a tile (world coordinates in, tile-local out): every
+ * vehicle lane and turning path at its width (highway lanes with the clear zone, decks with the
+ * crown clearance), sidewalks and paths as walk bands (tree pits only), rail and tram track beds.
+ */
+export function netExclusion(b: Built, ox: number, oy: number, terr: Terrain): Exclusion {
+  const ex = new Exclusion();
+  for (const l of b.lanes) {
+    const hw = l.width / 2;
+    for (let k = 0; k < l.pts.length - 1; k++) {
+      const p = l.pts[k], q = l.pts[k + 1];
+      const x0 = p.x - ox, y0 = p.y - oy, x1 = q.x - ox, y1 = q.y - oy;
+      if (l.kind === 'walk' || l.kind === 'bike') { ex.seg(x0, y0, x1, y1, 0, 0, 0, 0, -hw, l.width, -hw, l.width, EX_ROAD); continue; }
+      if (l.kind === 'rail' || (l.kind === 'tram' && !l.cls.includes('car'))) { ex.add(x0, y0, x1, y1, 0, 0, EX_RAIL); continue; }
+      const deck = (p.z + q.z) / 2 - terr.at((x0 + x1) / 2, (y0 + y1) / 2) > 3;
+      ex.add(x0, y0, x1, y1, hw, hw, deck ? EX_BRIDGE : l.speed > 20.5 ? EX_HIGHWAY : EX_ROAD);
     }
   }
+  return ex;
 }
 
 function segDist(s: VegSeg, x: number, y: number) {
@@ -386,11 +359,9 @@ export function placeVegetation(env: VegEnv): VegBuf {
   const suburb = distDT > SUBURB_R;
   const hp = Math.hypot(e0 + T / 2 - HIGH_PARK[0], n0 + T / 2 - HIGH_PARK[1]) < HIGH_PARK[2] + T;
   const inTile = (x: number, y: number) => x >= 0 && x < T && y >= 0 && y < T;
-  const ex = env.ex ?? buildExclusion(env.a, env.streets);
+  const ex = env.ex;
   const trunks = new Points(8); // trees (trunk + crown clearance)
   const drives = new Segs(16);
-  const lampPts = new Points(8);
-  for (let i = 0; i < env.lamps.length; i += 5) lampPts.add(env.lamps[i], env.lamps[i + 1], 1.5);
 
   const nearWater = (x: number, y: number, r: number) => {
     for (let k = 0; k < 8; k++) {
@@ -410,12 +381,6 @@ export function placeVegetation(env: VegEnv): VegBuf {
     const g = gAt(x, y);
     if (NO_TREE.has(g) && !(o.plaza && g === 21)) return false;
     if (railNear(x, y) || env.airfield(x, y)) return false;
-    // tiles built before border pieces existed: a carriageway or track just
-    // outside the tile is invisible here, so keep a clear band along the edges
-    if (!ex.hasBorder) {
-      const de = Math.min(x, y, T - x, T - y);
-      if (de < Math.max(6, t + 4.5, c + 8)) return false;
-    }
     if (ex.blocked(x, y, t, c, o.pit)) return false;
     return !env.inBuilding(x, y, o.bld ?? Math.max(1.2, c * 0.3));
   };
@@ -558,62 +523,24 @@ export function placeVegetation(env: VegEnv): VegBuf {
     }
   }
 
-  // ------------------------------------------------------------ street trees
-  let ri = 0;
-  for (const r of env.streets) {
-    ri++;
-    if (!r.urban || r.cls < 2 || r.cls > 5) continue;
-    /** centreline point, miter offset (as the meshing uses it), unit normal, pavement edge and sidewalk bits of side sd at s */
-    const at = (s: number, sd: number) => {
-      let k = 0;
-      while (k < r.s.length - 2 && r.s[k + 1] < s) k++;
-      const t = Math.max(0, Math.min(1, (s - r.s[k]) / Math.max(1e-6, r.s[k + 1] - r.s[k])));
-      const ox = r.ox[k] + (r.ox[k + 1] - r.ox[k]) * t, oy = r.oy[k] + (r.oy[k + 1] - r.oy[k]) * t;
-      const l = Math.hypot(ox, oy) || 1;
-      const E = sd > 0 ? r.pl : r.pr;
-      const e = E ? E[k] + (E[k + 1] - E[k]) * t : r.hw;
-      const sw = r.sw ? r.sw[t < 0.5 ? k : k + 1] : r.side;
-      const x = r.x[k] + (r.x[k + 1] - r.x[k]) * t, y = r.y[k] + (r.y[k + 1] - r.y[k]) * t;
-      // curb line point (edge along the miter offset), then outward along the unit normal
-      return { cx: x + sd * ox * e, cy: y + sd * oy * e, nx: ox / l, ny: oy / l, sw };
-    };
-    const rk = tx * 92821 + ty * 68917 + ri * 131;
-    for (const sd of [1, -1]) {
-      const bit = sd === 1 ? SW_L : SW_R, blvdBit = sd === 1 ? BLVD_L : BLVD_R;
-      const hasSW = r.sw ? r.sw.some((v) => (v & bit) !== 0) : (r.side & bit) !== 0;
-      const ws = hasSW ? r.ws : 0;
-      let blk = 0;
-      for (const [c0, c1] of r.clear) {
-        blk++;
-        const bk = rk + sd * 7 + blk * 1013;
-        // frontage type from the land cover just behind the curb
-        const mid = at((c0 + c1) / 2, sd);
-        const probe = gAt(mid.cx + sd * mid.nx * (ws + 3), mid.cy + sd * mid.ny * (ws + 3));
-        const pit = hasSW && (probe === 5 || probe === 6 || probe === 11 || probe === 21);
-        if (r.cls === 2 && !pit && probe !== 4 && probe !== 2 && probe !== 17) continue; // arterials: only pits / residential / park frontage
-        const mix = pit ? STREET_PIT : suburb ? STREET_SUB : r.cls <= 3 ? STREET_ART : STREET_RES;
-        const main = pick(mix, rnd(bk, 1));
-        const age = (suburb ? 0.55 : 0.7) + rnd(bk, 2) * 0.4; // block planting age
-        const fill = pit ? 0.72 : probe === 4 || probe === 0 ? 0.8 : probe === 2 || probe === 17 ? 0.75 : probe === 12 ? 0.6 : 0.25;
-        const big = main === S.PLANE || main === S.OAK || main === S.SILVER || main === S.SUGAR;
-        const step = (pit ? 8.5 : big ? 11.5 : main === S.COLUMNAR || main === S.ORNAMENTAL ? 7.5 : 9.5) + rnd(bk, 3) * 1.5;
-        // sight triangle: no trees within ~10 m of the junction box
-        for (let s = c0 + 10 + rnd(bk, 4) * step * 0.5; s < c1 - 10; s += step) {
-          const kk = bk * 97 + Math.round(s);
-          if (rnd(kk, 1) > fill) continue;
-          const js = s + (rnd(kk, 2) - 0.5) * 1.2;
-          const p = at(js, sd);
-          // pits: in the paver strip / sidewalk by the curb; boulevards: mid-boulevard;
-          // otherwise behind the sidewalk (or the road edge where there is none)
-          const onWalk = (p.sw & bit) !== 0;
-          const off = pit ? 1.0 : onWalk && p.sw & blvdBit ? BLVD_W / 2 : onWalk ? (p.sw & PAVERS ? PAVER_W : 0) + ws + 1.4 + rnd(kk, 3) * 0.8 : 2.6 + rnd(kk, 3) * 0.8;
-          const x = p.cx + sd * p.nx * off, y = p.cy + sd * p.ny * off;
-          if (!inTile(x, y) || drives.near(x, y, 3) || lampPts.near(x, y, 1.8) || trunks.near(x, y, 2.5)) continue;
-          const sp = rnd(kk, 4) < 0.7 ? main : pick(mix, rnd(kk, 5));
-          tree(x, y, sp, (pit ? 0.75 : 1) * age * (0.85 + rnd(kk, 6) * 0.3), kk, { pit, plaza: pit });
-        }
-      }
-    }
+  // ------------------------------------------------------------ street trees (the network engine's tree slots)
+  // one planted species per block (~80 m cell), from the frontage behind the trees
+  for (let i = 0; i < env.streetTrees.length; i++) {
+    const st = env.streetTrees[i];
+    const x = st.x, y = st.y;
+    const bk = (Math.floor((e0 + x) / 80) * 92821) ^ (Math.floor((n0 + y) / 80) * 68917);
+    const probe = gAt(x, y);
+    const pit = probe === 5 || probe === 6 || probe === 11 || probe === 21;
+    const mix = pit ? STREET_PIT : suburb ? STREET_SUB : probe === 4 || probe === 0 ? STREET_RES : STREET_ART;
+    const main = pick(mix, rnd(bk, 1));
+    const age = (suburb ? 0.55 : 0.7) + rnd(bk, 2) * 0.4;
+    const k = tx * 7907 + ty * 104723 + i * 31;
+    const sp = st.small ? pick([[S.ORNAMENTAL, 3], [S.COLUMNAR, 2]], rnd(k, 1)) : rnd(k, 4) < 0.7 ? main : pick(mix, rnd(k, 5));
+    const s0 = SPECIES[sp];
+    const h = Math.max(1.5, (s0.h[0] + (s0.h[1] - s0.h[0]) * rnd(k, 1, 31)) * (pit ? 0.75 : 1) * age * (0.85 + rnd(k, 6) * 0.3));
+    const w = Math.max(1, h * (s0.w[0] + (s0.w[1] - s0.w[0]) * rnd(k, 2, 31)));
+    push(x, y, rnd(k, 3, 31), h, w, sp);
+    trunks.add(x, y, Math.max(1.2, w * 0.22));
   }
 
   // ------------------------------------------------------------ land cover scatter (4 m raster)
@@ -706,7 +633,7 @@ const CANOPY: Record<number, [number, Mix]> = {
 export function buildCanopy(a: Record<string, TypedArray>, ground: Uint8Array, terr: Terrain, tx: number, ty: number, T: number): Float32Array {
   const out: number[] = [];
   // level-1 roads are classes ≤ 3, drawn 1.6× wide; rail as at level 0
-  const ex = buildExclusion(a, null, 1.6, 3);
+  const ex = farExclusion(a, 1.6, 3);
   const gAt = (x: number, y: number) => ground[Math.min(255, Math.max(0, Math.floor((y / T) * 256))) * 256 + Math.min(255, Math.max(0, Math.floor((x / T) * 256)))];
   const px = T / 256;
   const e0 = tx * T, n0 = ty * T;
@@ -741,4 +668,117 @@ export function buildCanopy(a: Record<string, TypedArray>, ground: Uint8Array, t
     }
   }
   return Float32Array.from(out);
+}
+
+// ---------------------------------------------------------------------------- level 0 from the network build
+
+class Grid<T> {
+  cells = new Map<number, T[]>();
+  readonly size: number;
+  constructor(size: number) { this.size = size; }
+  private k(i: number, j: number) { return (i + 4096) * 8192 + (j + 4096); }
+  add(x0: number, y0: number, x1: number, y1: number, item: T) {
+    const s = this.size;
+    for (let j = Math.floor(y0 / s); j <= Math.floor(y1 / s); j++) {
+      for (let i = Math.floor(x0 / s); i <= Math.floor(x1 / s); i++) {
+        const key = this.k(i, j);
+        let c = this.cells.get(key);
+        if (!c) { c = []; this.cells.set(key, c); }
+        c.push(item);
+      }
+    }
+  }
+  at(x: number, y: number): T[] | undefined { return this.cells.get(this.k(Math.floor(x / this.size), Math.floor(y / this.size))); }
+}
+
+interface Poly { xy: Float32Array; a: number; b: number }
+
+function inPoly(p: Poly, x: number, y: number): boolean {
+  let inside = false;
+  const xy = p.xy;
+  for (let i = p.a, j = p.b - 1; i < p.b; j = i++) {
+    const xi = xy[i * 2], yi = xy[i * 2 + 1], xj = xy[j * 2], yj = xy[j * 2 + 1];
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * Trees, shrubs and hedges of a level-0 tile: land cover, OSM trees, buildings and houses from the
+ * tile arrays (tile-local), roads, rail and street-tree slots from the network build (world).
+ */
+export function placeNetTile(a: Record<string, TypedArray>, b: Built, tx: number, ty: number, S: number, terr: Terrain): VegBuf {
+  const ground = a.ground as Uint8Array;
+  const ox = tx * S, oy = ty * S;
+  const gAt = (x: number, y: number) => ground[Math.min(255, Math.max(0, Math.floor((y / S) * 256))) * 256 + Math.min(255, Math.max(0, Math.floor((x / S) * 256)))];
+  const airfield = (x: number, y: number) => {
+    for (const [dx, dy] of [[0, 0], [24, 0], [-24, 0], [0, 24], [0, -24]]) {
+      const g = gAt(x + dx, y + dy);
+      if (g === 14 || g === 20 || g === 23) return true;
+    }
+    return false;
+  };
+  const roads = new Grid<VegSeg>(24);
+  for (const l of b.lanes) {
+    if (l.kind !== 'drive') continue;
+    const hw = l.width / 2;
+    for (let k = 0; k < l.pts.length - 1; k++) {
+      const s: VegSeg = { x0: l.pts[k].x - ox, y0: l.pts[k].y - oy, x1: l.pts[k + 1].x - ox, y1: l.pts[k + 1].y - oy, hw, cls: l.speed > 20.5 ? 1 : 4 };
+      const m = hw + 4;
+      roads.add(Math.min(s.x0, s.x1) - m, Math.min(s.y0, s.y1) - m, Math.max(s.x0, s.x1) + m, Math.max(s.y0, s.y1) + m, s);
+    }
+  }
+  const blds = new Grid<Poly>(32);
+  const ro = a.b_ring_off as Uint32Array | undefined, vo = a.b_vert_off as Uint32Array | undefined, bxy = a.b_xy as Float32Array | undefined;
+  if (ro && vo && bxy) {
+    for (let i = 0; i < ro.length - 1; i++) {
+      const r0 = ro[i];
+      if (ro[i + 1] <= r0) continue;
+      const p: Poly = { xy: bxy, a: vo[r0], b: vo[r0 + 1] };
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (let k = p.a; k < p.b; k++) { const x = bxy[k * 2], y = bxy[k * 2 + 1]; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+      blds.add(x0 - 2, y0 - 2, x1 + 2, y1 + 2, p);
+    }
+  }
+  const xo = a.xb_off as Uint32Array | undefined, xxy = a.xb_xy as Float32Array | undefined;
+  if (xo && xxy) {
+    for (let i = 0; i < xo.length - 1; i++) {
+      const p: Poly = { xy: xxy, a: xo[i], b: xo[i + 1] };
+      if (p.b - p.a < 3) continue;
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (let k = p.a; k < p.b; k++) { const x = xxy[k * 2], y = xxy[k * 2 + 1]; x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+      blds.add(x0 - 2, y0 - 2, x1 + 2, y1 + 2, p);
+    }
+  }
+  const houses = new Grid<number>(32);
+  const hxy = a.h_xy as Float32Array | undefined, hang = a.h_angle as Float32Array | undefined, hl = a.h_len as Float32Array | undefined, hwd = a.h_wid as Float32Array | undefined;
+  if (hxy && hang && hl && hwd) {
+    for (let i = 0; i < hxy.length / 2; i++) {
+      const r = Math.hypot(hl[i], hwd[i]) / 2 + 2;
+      houses.add(hxy[i * 2] - r, hxy[i * 2 + 1] - r, hxy[i * 2] + r, hxy[i * 2 + 1] + r, i);
+    }
+  }
+  const inBuilding = (x: number, y: number, m: number) => {
+    const c = blds.at(x, y);
+    if (c) for (const p of c) if (inPoly(p, x, y) || (m > 0 && (inPoly(p, x + m, y) || inPoly(p, x - m, y) || inPoly(p, x, y + m) || inPoly(p, x, y - m)))) return true;
+    const h = houses.at(x, y);
+    if (h && hxy && hang && hl && hwd) {
+      for (const i of h) {
+        const dx = x - hxy[i * 2], dy = y - hxy[i * 2 + 1];
+        const ca = Math.cos(hang[i]), sa = Math.sin(hang[i]);
+        const u = dx * ca + dy * sa, v = -dx * sa + dy * ca;
+        if (Math.abs(u) < hl[i] / 2 + m + 0.5 && Math.abs(v) < hwd[i] / 2 + m + 0.5) return true;
+      }
+    }
+    return false;
+  };
+  const streetTrees: StreetTree[] = [];
+  for (const p of b.props) if (p.kind === 'tree' || p.kind === 'tree_small') streetTrees.push({ x: p.x - ox, y: p.y - oy, small: p.kind === 'tree_small' });
+  const pk = a.p_kind as Uint8Array | undefined, pxy = a.p_xy as Float32Array | undefined, pv = a.p_var as Uint8Array | undefined;
+  return placeVegetation({
+    S, tx, ty, terr, ground, gAt, inBuilding, airfield, streetTrees, ex: netExclusion(b, ox, oy, terr),
+    roadsAt: (x, y) => roads.at(x, y),
+    houses: hxy && hang && hl && hwd ? { xy: hxy, angle: hang, len: hl, wid: hwd, type: a.h_type as Uint8Array | undefined } : null,
+    osm: pk && pxy ? { kind: pk, xy: pxy, v: pv } : null,
+  });
 }

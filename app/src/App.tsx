@@ -62,12 +62,14 @@ export default function App() {
         await engine.addLayer(new (await mods.urban).UrbanLayer());
         const net = new (await import('./net/NetLayer')).NetLayer();
         await engine.addLayer(net);
+        await engine.addLayer(new (await import('./layers/VegetationLayer')).VegetationLayer(net));
         const netsim = engine.tiles.netTiles.size ? new (await import('./net/SimLayer')).SimLayer() : null;
         if (netsim) { await engine.addLayer(netsim); net.signals = netsim; }
         Object.assign(window as object, { __net: net, __netsim: netsim });
         const transit = new (await mods.transit).TransitLayer(engine.dataRoot);
         await engine.addLayer(transit);
         Object.assign(window as object, { __transit: transit });
+        await engine.addLayer(new (await import('./layers/CongestionLayer')).CongestionLayer());
         await yieldTask();
         await engine.addLayer(new (await mods.interact).InteractLayer());
         { const stations = new (await mods.stations).StationsLayer(transit.system); await engine.addLayer(stations); Object.assign(window as object, { __stations: stations }); }

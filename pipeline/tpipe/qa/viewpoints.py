@@ -6,10 +6,10 @@ Writes app/public/data/qa/viewpoints.json. The poses are stratified by context
 and seeded, so the same data and seed always give the same poses:
   motorway_along / motorway_above   one motorway/trunk sample per MW_CELL grid cell:
                                     shoulder-height view along the road + ~40 m above
-  junction_signal / junction_roundabout / junction_ramp / junction_median / level_crossing
+  level_crossing                    a road vertex on a track
   bridge_below / bridge_deck        road bridges seen from under the deck and along it
   station                           every rail station in transit/index.json
-  rail_curve                        rail graph edges with the tightest curves
+  rail_curve                        drawn tracks with the tightest curves
   shoreline, park                   raster water edges / park land
   street_residential / street_commercial / street_industrial
   airport                           every airport in air/airports.json
@@ -28,12 +28,12 @@ import sys
 import numpy as np
 
 from .. import geo, tbn
-from .data import F_BRIDGE, F_LINK, F_ROUNDABOUT, F_TUNNEL, S0, load_tile, manifest
+from .data import F_BRIDGE, F_TUNNEL, S0, load_tile, manifest
 
 OUT = geo.OUT / "qa" / "viewpoints.json"
 MW_CELL = 1500.0  # m
 CAP = {  # max poses per tag
-    "junction_signal": 60, "junction_roundabout": 30, "junction_ramp": 50, "junction_median": 40, "level_crossing": 40,
+    "level_crossing": 40,
     "bridge_below": 60, "bridge_deck": 60, "rail_curve": 60, "shoreline": 60, "park": 40,
     "street_residential": 60, "street_commercial": 60, "street_industrial": 50,
 }
@@ -97,11 +97,11 @@ def build(seed: int = 1, bbox=None) -> dict:
                 ni = int(a["r_name"][p]) if "r_name" in a else 0xFFFF
                 nm = names[ni] if ni < len(names) else ""
                 ln = float(np.sum(np.hypot(*np.diff(xyz[v0:v1, :2], axis=0).T)))
-                segs.append((x, y, b, c, f, nm, float(a["r_osm"][p]), ln, float(xyz[k, 2])))
+                segs.append((x, y, b, c, f, nm, 0.0, ln, float(xyz[k, 2])))
         for s in segs:
             x, y, b, c, f, nm, o, ln, z = s
             E, N = ox + x, oy + y
-            if c <= 1 and not f & F_LINK:
+            if c == 0:
                 cell = (math.floor(E / MW_CELL), math.floor(N / MW_CELL))
                 r = float(rng.random())
                 if cell not in mw or r < mw[cell][0]:
@@ -109,43 +109,12 @@ def build(seed: int = 1, bbox=None) -> dict:
             if f & F_BRIDGE and c <= 5 and ln > 30:
                 cand["bridge_deck"].append((E, N, z, b, nm or "bridge", rng.random()))
                 cand["bridge_below"].append((E, N, _terrain(a, x, y), b + math.pi / 2, nm or "bridge", rng.random()))
-            if 3 <= c <= 5 and not f & (F_BRIDGE | F_LINK):
+            if 3 <= c <= 5 and not f & F_BRIDGE:
                 gc = gat(x, y)
                 tag = {4: "street_residential", 5: "street_commercial", 6: "street_industrial"}.get(gc)
                 if tag:
                     cand[tag].append((E, N, _terrain(a, x, y), b, nm, rng.random()))
-            if f & F_ROUNDABOUT:
-                cand["junction_roundabout"].append((E, N, _terrain(a, x, y), b, nm or "roundabout", rng.random()))
-        # junctions
-        jxy = a.get("j_xy")
-        if jxy is not None and len(jxy):
-            p = jxy.reshape(-1, 2)
-            ao = a["j_arm_off"]
-            lxy = a.get("l_xyz")
-            lcl = a.get("l_class")
-            lr = None
-            if lxy is not None and len(lxy):
-                L = lxy.reshape(-1, 3)
-                lo = a["l_off"]
-                lr = L[:, :2][np.isin(np.repeat(np.arange(len(lo) - 1), np.diff(lo.astype(np.int64))), np.nonzero(lcl == 3)[0])]
-            for q in range(len(p)):
-                x, y = float(p[q, 0]), float(p[q, 1])
-                if not (0 <= x < S0 and 0 <= y < S0):
-                    continue
-                arms = range(int(ao[q]), int(ao[q + 1]))
-                b = float(a["j_arm_ang"][ao[q]]) if len(arms) else 0.0
-                E, N, h = ox + x, oy + y, _terrain(a, x, y)
-                item = (E, N, h, b + math.pi, f"junction {int(a['j_osm'][q])}", rng.random())
-                if a["j_flags"][q] & 1:
-                    cand["junction_signal"].append(item)
-                if lr is not None and len(lr) and np.min(np.hypot(lr[:, 0] - x, lr[:, 1] - y)) < 30:
-                    cand["junction_median"].append(item)
-                elif len(arms) >= 5:
-                    cand["junction_median"].append(item)
-        # ramps: junction-free link ends near motorways -> use link midpoints
-        links = [s for s in segs if s[4] & F_LINK]
-        for s in links[:PER_TILE]:
-            cand["junction_ramp"].append((ox + s[0], oy + s[1], s[8], s[2], s[5] or "ramp", rng.random()))
+        lxy = a.get("l_xyz")
         # level crossings: road vertex == rail vertex
         if roff is not None and lxy is not None and len(lxy) and len(roff) > 1:
             R = a["r_xyz"].reshape(-1, 3)[:, :2]
@@ -181,7 +150,6 @@ def build(seed: int = 1, bbox=None) -> dict:
         poses.append(_pose("motorway_along", i, E + math.cos(b) * 25, N + math.sin(b) * 25, h, 30.0, b, 10.0, nm))
         poses.append(_pose("motorway_above", i, E, N, h, 60.0, b + 0.6, 42.0, nm))
     view = {  # tag -> (dist, pitch, look offset)
-        "junction_signal": (45, 30), "junction_roundabout": (70, 35), "junction_ramp": (60, 30), "junction_median": (50, 30),
         "level_crossing": (45, 25), "bridge_below": (35, 4), "bridge_deck": (35, 10), "rail_curve": (70, 30),
         "shoreline": (70, 20), "park": (40, 15), "street_residential": (30, 10), "street_commercial": (30, 10),
         "street_industrial": (35, 12),
@@ -199,13 +167,13 @@ def build(seed: int = 1, bbox=None) -> dict:
                 continue
             ang = np.arctan2(np.diff(Q[:, 1]), np.diff(Q[:, 0]))
             turn = abs((ang[-1] - ang[0] + math.pi) % (2 * math.pi) - math.pi)
-            ln = float(r["e_len"][e])
+            ln = float(np.hypot(*np.diff(Q[:, :2], axis=0).T).sum())
             if turn > math.radians(20) and ln > 50:
                 m = Q[len(Q) // 2]
                 if bbox and not (bbox[0] <= m[0] < bbox[2] and bbox[1] <= m[1] < bbox[3]):
                     continue
                 cand["rail_curve"].append((float(m[0]), float(m[1]), float(m[2]), float(ang[len(ang) // 2]) + math.pi / 2,
-                                           f"rail edge {e}", float(rng.random())))
+                                           f"track {e}", float(rng.random())))
     for tag, lst in sorted(cand.items()):
         lst = sorted(lst, key=lambda t: t[-1])[:CAP[tag]]
         d, p = view[tag]

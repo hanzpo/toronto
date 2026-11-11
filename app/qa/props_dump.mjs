@@ -20,6 +20,7 @@ import zlib from 'node:zlib';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '../..');
 const TILES = path.join(ROOT, 'app/public/data/tiles/0');
+const NET = path.join(ROOT, 'app/public/data/net');
 const OUT = path.join(ROOT, 'pipeline/work/qa_props');
 
 if (isMainThread) {
@@ -31,7 +32,7 @@ if (isMainThread) {
   const t0 = Date.now();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'qa-props-'));
   await build({
-    configFile: false, root: path.join(ROOT, 'app'), logLevel: 'error',
+    configFile: false, root: path.join(ROOT, 'app'), logLevel: 'error', ssr: { noExternal: true },
     build: { ssr: path.join(HERE, 'props_entry.ts'), outDir: tmp, emptyOutDir: false, minify: false,
       rollupOptions: { output: { format: 'es', entryFileNames: 'props.mjs' } } },
   });
@@ -41,15 +42,14 @@ if (isMainThread) {
   const stampF = path.join(OUT, 'STAMP');
   const stamp = fs.existsSync(stampF) ? fs.readFileSync(stampF, 'utf8').trim() : '';
   const redoAll = force || stamp !== hash;
-  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'app/public/data/manifest.json'), 'utf8'));
-  let tiles = manifest.tiles['0'];
+  let tiles = JSON.parse(fs.readFileSync(path.join(NET, 'index.json'), 'utf8')).tiles.map((t) => t.tile);
   if (bbox) tiles = tiles.filter(([tx, ty]) => (tx + 1) * 1024 > bbox[0] && tx * 1024 < bbox[2] && (ty + 1) * 1024 > bbox[1] && ty * 1024 < bbox[3]);
   const todo = tiles.filter(([tx, ty]) => {
     if (redoAll) return true;
     const o = path.join(OUT, `${tx}_${ty}.bin`);
     if (!fs.existsSync(o)) return true;
-    const src = path.join(TILES, `${tx}_${ty}.bin.gz`);
-    return fs.existsSync(src) && fs.statSync(src).mtimeMs > fs.statSync(o).mtimeMs;
+    const src = [path.join(TILES, `${tx}_${ty}.bin.gz`), path.join(NET, `${tx}_${ty}.json.gz`)];
+    return src.some((f) => fs.existsSync(f) && fs.statSync(f).mtimeMs > fs.statSync(o).mtimeMs);
   });
   let done = 0, errors = 0;
   const chunks = Array.from({ length: nw }, (_, w) => todo.filter((_, i) => i % nw === w));
@@ -64,14 +64,15 @@ if (isMainThread) {
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log(JSON.stringify({ tiles: tiles.length, placed: done, skipped: tiles.length - todo.length, errors, hash, s: (Date.now() - t0) / 1000 }));
 } else {
-  const { placeTile, setZones } = await import(pathToFileURL(workerData.bundle).href);
-  // station zones (paved, tree-free platforms / Union deck), as the client's tile worker gets them
-  try { setZones(JSON.parse(fs.readFileSync(path.join(ROOT, 'app/public/data/stations.json'), 'utf8')).zones ?? []); } catch { /* optional */ }
+  const { placeTile } = await import(pathToFileURL(workerData.bundle).href);
   for (const [tx, ty] of workerData.list) {
     try {
       const raw = zlib.gunzipSync(fs.readFileSync(path.join(TILES, `${tx}_${ty}.bin.gz`)));
       const ab = raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
-      const out = placeTile(ab, tx, ty);
+      const json = zlib.gunzipSync(fs.readFileSync(path.join(NET, `${tx}_${ty}.json.gz`))).toString();
+      const dtmF = path.join(NET, `${tx}_${ty}.dtm.gz`);
+      const dtm = fs.existsSync(dtmF) ? new Uint8Array(zlib.gunzipSync(fs.readFileSync(dtmF))) : null;
+      const out = placeTile(ab, json, dtm, tx, ty);
       fs.writeFileSync(path.join(OUT, `${tx}_${ty}.bin`), Buffer.from(out.buffer, out.byteOffset, out.byteLength));
       parentPort.postMessage({ ok: 1 });
     } catch (e) {

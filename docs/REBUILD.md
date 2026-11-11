@@ -35,14 +35,31 @@ model.
 - Player driving and walking run in the new sim.
 - Deleted: the old street, props, crossings and traffic layers, the old sim
   crate, the net2 slice, the unified-surface prototype and the old tunnel
-  builder.
-- Still on the old stack: far road and rail LOD (tile levels 1 and 2), bus and
-  rail shape matching in the transit pipeline (roadnet, rail_graph), the
-  congestion overlay (old graph), and the old QA checks.
+  builder; the old road and rail model (roadnet, rail_geom, rail_graph,
+  rail_routes, transit_rail), the bus road router, the sim graph, the old roads
+  worker and the QA checks of those layers.
+- Derived from the network model by `app/scripts/net-bake.mjs`, which runs the
+  engine on the net tiles:
+  - far road and rail ribbons for every pyramid level (`net/far/{L}`); the tile
+    worker draws them beyond the network layer's range and hands their road and
+    rail arrays to the level-0 consumers (buildings, urban, ground, canopy);
+  - the vehicle lanes per 4x4 block (`work/net/lanes`), onto which the transit
+    pipeline matches bus, streetcar and rail shapes, so timetable vehicles
+    follow the drawn lanes and tracks with their solved z;
+  - the drawn tracks (`rail/network.bin.gz`: stations, open cuts, the Union
+    deck) and the major roads of the congestion overlay
+    (`congestion/majors.bin.gz`).
+- Trees: placed in the network worker from the tile's network build (the
+  engine's tree slots become street trees) and drawn by the vegetation layer.
 
 ## Commands
 - Map the region: `cd pipeline && uv run python -m tpipe.net --region`
 - One area: `uv run python -m tpipe.net --bbox=W,S,E,N --name NAME`
+- Bake from the network model: `cd app && node scripts/net-bake.mjs
+  --net=public/data/net --far=public/data/net/far --lanes=../pipeline/work/net/lanes
+  --rail=public/data/rail/network.bin.gz --majors=public/data/congestion/majors.bin.gz
+  [--bbox=W,S,E,N]`
+- Transit on the lanes: `cd pipeline && uv run python -m tpipe.transit [agency ...]`
 - Engine tests: `cd app && npx vitest run src/net/test`
 - Sim tests: `cd netsim && cargo test --release`
 - Bench: `/bench.html?l=<layout>` or `?map=tx,ty` for a mapped tile

@@ -44,11 +44,9 @@ export interface TileMeshes {
   buildings: MeshBuf | null;
   /** building footprints for camera collision / label occlusion (level 0) */
   collide?: import('./collide').FootprintBuf | null;
-  /** roads, sidewalks and (appended) rail: one draw; rail indices start at `railStart` */
+  /** far road ribbons and (appended) rail beds from the network model: one draw; rail indices start at `railStart` */
   roads: MeshBuf | null;
   railStart: number;
-  /** index count of the near-only prefix of `roads` (curb faces, tactile plates: sub-pixel beyond a few hundred m) */
-  roadNear?: number;
   /** levels 1–2: start of the half-resolution index range appended to `terrain` (0 = none) */
   terrainCoarse?: number;
   houses: HouseBuf | null;
@@ -57,51 +55,6 @@ export interface TileMeshes {
   /** rooftop equipment, construction sites, laneways (level 0), consumed by UrbanLayer */
   urban?: import('./urban').UrbanBuf | null;
   counts: { buildings: number; houses: number; roads: number; rails: number };
-}
-
-/**
- * Concatenate two meshes with identical attribute layouts (roads + rail share
- * the street material, so they become one draw call per tile).
- */
-export function concatMeshes(a: MeshBuf | null, b: MeshBuf | null): MeshBuf | null {
-  if (!a || !b) return a ?? b;
-  const na = a.position.length / 3, nb = b.position.length / 3;
-  const cat = <T extends Float32Array | Int8Array | Uint8Array>(x: T, y: T): T => {
-    const o = new (x.constructor as new (n: number) => T)(x.length + y.length);
-    o.set(x); o.set(y, x.length);
-    return o;
-  };
-  const n = na + nb;
-  const index = n < 65536 ? new Uint16Array(a.index.length + b.index.length) : new Uint32Array(a.index.length + b.index.length);
-  index.set(a.index);
-  for (let i = 0; i < b.index.length; i++) index[a.index.length + i] = b.index[i] + na;
-  const out: MeshBuf = { position: cat(a.position, b.position), normal: cat(a.normal, b.normal), index };
-  if (a.color && b.color) out.color = cat(a.color, b.color);
-  if (a.attrs && b.attrs) {
-    out.attrs = {};
-    for (const k in a.attrs) if (b.attrs[k]) out.attrs[k] = { array: cat(a.attrs[k].array, b.attrs[k].array), size: a.attrs[k].size };
-  }
-  return out;
-}
-
-/**
- * Move the triangles of the given road surfaces (rm.y = cls + 16·oneway + 32·surf)
- * to the front of the index range [0, end), keeping the order within each part.
- * Returns the index count of that prefix: far tiles draw from there on.
- */
-export function frontSurfaces(m: MeshBuf, end: number, surfs: ReadonlySet<number>): number {
-  const rm = m.attrs?.rm;
-  if (!rm) return 0;
-  const idx = m.index, a = rm.array, st = rm.size;
-  const near: number[] = [], rest: number[] = [];
-  for (let i = 0; i < end; i += 3) {
-    const surf = Math.floor(a[idx[i] * st + 1] / 32);
-    (surfs.has(surf) ? near : rest).push(idx[i], idx[i + 1], idx[i + 2]);
-  }
-  if (!near.length) return 0;
-  idx.set(near, 0);
-  idx.set(rest, near.length);
-  return near.length;
 }
 
 // --------------------------------------------------------------------------- growable builder
@@ -258,8 +211,6 @@ export function buildTerrain(hdm: Int16Array, G: number, S: number, level: numbe
 // --------------------------------------------------------------------------- buildings
 // (facade-attributed extrusion lives in ./buildings)
 export { buildBuildings } from './buildings';
-
-export { buildRoads, buildRail } from './roads';
 
 // --------------------------------------------------------------------------- houses
 

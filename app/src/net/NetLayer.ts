@@ -14,6 +14,8 @@ const MAX_ALT = 3500;
 
 interface NetTile { key: string; tx: number; ty: number; state: 'loading' | 'ready' | 'empty'; view?: NetView; group?: THREE.Group; nodeIds?: string[]; terrain?: Built['terrain']; solids?: { e: number; n: number; r: number }[] }
 
+export interface VegSink { setNear(key: string, e0: number, n0: number, veg: Float32Array, cells: Uint32Array): void; dropNear(key: string): void }
+
 export interface SignalSource { signal(node: string, group: number): 'red' | 'amber' | 'green'; gate(node: string): number }
 
 export class NetLayer implements Layer {
@@ -28,6 +30,7 @@ export class NetLayer implements Layer {
   private next = 1;
   readonly group = new THREE.Group();
   signals: SignalSource | null = null;
+  vegetation: VegSink | null = null;
 
   async init(engine: Engine) {
     this.engine = engine;
@@ -117,6 +120,7 @@ export class NetLayer implements Layer {
     const R: Record<string, number> = { lamp: 0.16, lamp_res: 0.18, tree: 0.3, hydrant: 0.22, bin: 0.3, bench: 0.5, signal_pole: 0.2, stop_sign: 0.06, ocs_pole: 0.18, gate: 0.35, crossbuck: 0.08, shelter: 1.2, pier: 1.0 };
     t.solids = b.props.filter((p) => R[p.kind]).map((p) => ({ e: p.x, n: p.y, r: R[p.kind] }));
     t.state = 'ready';
+    if (b.veg && b.vegCells) this.vegetation?.setNear(t.key, t.tx * S, t.ty * S, b.veg, b.vegCells);
     this.engine.tiles.netReady.add(t.key);
   }
 
@@ -137,6 +141,7 @@ export class NetLayer implements Layer {
       t.group.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) m.geometry.dispose(); });
     }
     this.engine.tiles.netReady.delete(t.key);
+    this.vegetation?.dropNear(t.key);
     this.tiles.delete(t.key);
   }
 

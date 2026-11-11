@@ -32,7 +32,7 @@ function segGeometry(d: SegDesc, a: Asset, pa0: V2, pb0: V2): V2[] {
   return fillet(ctrl, d.r ?? Math.max(a.rh, 8));
 }
 
-export function build(desc: NetDesc, opts: { origin?: { x: number; y: number }; lanesOnly?: boolean } = {}): Built {
+export function prepare(desc: NetDesc): Ctx {
   if (desc.assets) registerAssets(desc.assets);
   const ctx = new Ctx(desc);
   const nodes = new Map<string, Node>();
@@ -64,6 +64,12 @@ export function build(desc: NetDesc, opts: { origin?: { x: number; y: number }; 
   }
   for (const n of ctx.nodes) setbacks(ctx, n);
   resolveStructures(ctx);
+  return ctx;
+}
+
+export function build(desc: NetDesc, opts: { origin?: { x: number; y: number }; lanesOnly?: boolean } = {}): Built {
+  const ctx = prepare(desc);
+  const segs = ctx.segs;
   const ownS = desc.own ? new Set(desc.own.segs) : null, ownN = desc.own ? new Set(desc.own.nodes) : null;
   const guarded = (owned: boolean, f: () => void) => {
     if (owned && !opts.lanesOnly) { f(); return; }

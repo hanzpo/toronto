@@ -24,7 +24,7 @@ async page => {
         const s = window.__qa.sample();
         const c = {};
         for (const [k, v] of Object.entries(s)) if (v && typeof v === 'object' && 'count' in v) c[k] = { count: v.count, ex: v.examples.slice(0, 3) };
-        return { cars: s.cars, transit: s.transit, counters: c, extra: s.extra };
+        return { transit: s.transit, counters: c, extra: s.extra };
       });
       await page.screenshot({ path: `${job.dir}/${it.file}` });
     } catch (e) { err = String(e?.message ?? e).slice(0, 300); }

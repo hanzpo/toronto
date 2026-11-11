@@ -54,7 +54,7 @@ def _tracks():
     s = s[s < len(xyz) - 1]
     e = np.repeat(np.arange(len(off) - 1), np.diff(off))[s]
     return {"x0": xyz[s, 0], "y0": xyz[s, 1], "x1": xyz[s + 1, 0], "y1": xyz[s + 1, 1], "z": xyz[s, 2],
-            "kind": a["e_kind"][e].astype(int), "osm": a["e_osm"][e], "edge": e}
+            "kind": a["e_kind"][e].astype(int), "edge": e}
 
 
 def run_global(cats: set, bbox=None) -> list[dict]:
@@ -93,7 +93,7 @@ def run_global(cats: set, bbox=None) -> list[dict]:
                 if ln >= 1.0:
                     c = thr[0]
                     out.append(finding("platform_track_clearance", "track_through_platform", 10 + ln / 5, cx, cy, float(T["z"][c]),
-                                       [T["osm"][c]], f"{lab}: track (graph edge {int(T['edge'][c])}) runs {ln:.0f} m through the platform",
+                                       [], f"{lab}: track {int(T["edge"][c])} runs {ln:.0f} m through the platform",
                                        key=("platform_track_clearance", I["id"], round(cx), round(cy), "thr"), bearing=pb))
             # the two long edges
             n = max(2, int(I["len"] * EDGE_SPAN / EDGE_STEP))
@@ -141,6 +141,6 @@ def run_global(cats: set, bbox=None) -> list[dict]:
                     continue
                 seen.add(q)
                 d = float(shapely.distance(shapely.Point(C[q]), lines[c]))
-                out.append(finding("station_column_clearance", "column", (COLUMN_MIN - d) * 5 + 2, C[q, 0], C[q, 1], float(T["z"][c]), [T["osm"][c]],
+                out.append(finding("station_column_clearance", "column", (COLUMN_MIN - d) * 5 + 2, C[q, 0], C[q, 1], float(T["z"][c]), [],
                                    f"{s.get('name')}: column {d:.2f} m from a track centreline (< {COLUMN_MIN} m)"))
     return out

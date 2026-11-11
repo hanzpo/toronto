@@ -14,18 +14,15 @@ import sys
 import time
 import urllib.request
 from collections import Counter, defaultdict
+from pathlib import Path
 
 import numpy as np
 import polars as pl
 import shapely
 
 from . import geo, tbn, terrain
-from .grade import profile as grade_profile
+from .net.lanes import Lanes, Matcher
 from .transit_gtfs import PROFILES, Feed, parse_times, pick_dates, service_calendar
-from .transit_rail import RailNet, densify_xy
-from . import rail_graph
-from .rail_routes import Router, consist_len
-from .bus_roads import BusRouter, RoadNet
 from .transit_sources import SOURCES
 
 OUTDIR = geo.OUT / "transit"
@@ -33,18 +30,15 @@ GTFS = geo.RAW / "gtfs"
 
 MODES = ["subway", "lrt", "streetcar", "commuter_rail", "airport_rail", "intercity_rail", "bus"]
 RAIL_MODES = set(MODES[:6])
-RAIL_AGENCIES = {"ttc", "go", "up", "via", "grt"}
-# vertical profile parameters: (tunnel cover, bridge clearance)
-COVER = {"subway": 14.0, "lrt": 10.0, "streetcar": 8.0}
 DWELL = {"subway": 25, "lrt": 20, "streetcar": 12, "commuter_rail": 45, "airport_rail": 40, "intercity_rail": 60, "bus": 8}
 # must match app/src/transit/motion.ts MODE_ACCEL
 ACCEL = {"subway": 1.0, "lrt": 1.0, "streetcar": 1.1, "commuter_rail": 0.6, "airport_rail": 0.8, "intercity_rail": 0.5, "bus": 1.2}
 VMAX = {"subway": 24.4, "lrt": 19.4, "streetcar": 16.7, "commuter_rail": 41.7, "airport_rail": 40.0, "intercity_rail": 44.4, "bus": 22.2}
 BUS_SIMPLIFY = 1.5
+LANE_TOL = {"bus": 0.5, "streetcar": 0.3}
 PLATFORM = re.compile(r"\s*(-\s*)?\b(\w+bound\s+|LRT\s+)?platform\b.*$", re.I)
 REPLACEMENT_BUS = re.compile(r"replacement bus|bus replacement|shuttle bus|bus shuttle", re.I)
-BUS_DRAPE_STEP = 60.0
-RAIL_DRAPE_STEP = 10.0
+DRAPE_STEP = 30.0
 RAIL_TOL = 0.3
 
 
@@ -170,6 +164,15 @@ def rdp3(p: np.ndarray, tol: float) -> np.ndarray:
     return keep
 
 
+def densify(xy: np.ndarray, step: float) -> np.ndarray:
+    d = np.hypot(*np.diff(xy, axis=0).T)
+    n = np.maximum(1, np.ceil(d / step).astype(int))
+    seg = np.repeat(np.arange(len(d)), n)
+    k = np.concatenate([np.arange(c) for c in n]) if len(n) else np.zeros(0, int)
+    t = ((k + 1) / np.repeat(n, n))[:, None]
+    return np.vstack([xy[:1], xy[seg] + (xy[seg + 1] - xy[seg]) * t])
+
+
 def cumlen(xy: np.ndarray) -> np.ndarray:
     return np.concatenate([[0.0], np.cumsum(np.hypot(*np.diff(xy[:, :2], axis=0).T))])
 
@@ -188,16 +191,14 @@ def cut_line(xy: np.ndarray, cum: np.ndarray, d0: float, d1: float) -> np.ndarra
 
 # ----------------------------------------------------------------------------
 class Agency:
-    def __init__(self, key: str, rail: RailNet | None, router: Router | None = None, bus_router: BusRouter | None = None) -> None:
+    def __init__(self, key: str, matcher: Matcher | None) -> None:
         self.key = key
-        self.router = router
-        self.bus_router = bus_router
-        self.bus_matched = [0, 0]
-        self.route_stats: list = []
+        self.matcher = matcher
+        self.matched = [0, 0]
         self.src = SOURCES[key]
         self.feed = Feed(GTFS / f"{key}.zip")
-        self.railnet = rail
         self.ter = terrain.get()
+        self.geoms: list[np.ndarray] = []
 
     def load(self) -> None:
         f = self.feed
@@ -362,36 +363,36 @@ class Agency:
         if i1 < len(sidx) - 1:
             virt_hi = self._crossing(sll, cum, dist[i1], dist[i1 + 1], bbox, entering=False)
             d_hi = virt_hi
-        clipped = virt_lo is not None or virt_hi is not None
         if d_hi - d_lo < 1.0:
             return -1
         part = cut_line(sxy, cum, d_lo, d_hi)
-        if mode in RAIL_MODES and self.router is not None:
-            p = self._make_rail_pattern(rid, direc, head, mode, sidx, i0, i1, dist, d_lo, d_hi, virt_lo, virt_hi, part, cache)
-            if p is not None:
-                return p
-        if mode == "bus" and self.bus_router is not None:
-            # follow the road graph in the curb lane (bus_roads.py)
+        lane = None
+        if self.matcher is not None:
             sdp = np.clip(np.asarray(dist[i0 : i1 + 1], float) - d_lo, 0.0, d_hi - d_lo)
-            rkey = ("road", np.round(part, 0).tobytes(), np.round(sdp, 0).tobytes())
-            rg = cache.get(rkey)
-            if rg is None:
-                rg = self.bus_router.route(np.asarray(part, float)[:, :2], sdp, f"{self.key}:{self.routes[rid]['short']}:{head}")
-                cache[rkey] = rg if rg is not None else False
-            self.bus_matched[0] += 1
-            if rg is not False and rg is not None and len(rg) >= 2:
-                part = rg
-                self.bus_matched[1] += 1
-        gkey = (np.round(part, 0).tobytes(), mode)
+            if virt_lo is not None:
+                sdp = np.concatenate([[0.0], sdp])
+            if virt_hi is not None:
+                sdp = np.concatenate([sdp, [d_hi - d_lo]])
+            rkey = ("lane", mode, np.round(part, 0).tobytes(), np.round(sdp, 0).tobytes())
+            lane = cache.get(rkey)
+            if lane is None:
+                lane = self.matcher.route(mode, np.asarray(part, float)[:, :2], sdp, f"{self.key}:{self.routes[rid]['short']}:{head}")
+                cache[rkey] = lane if lane is not None and len(lane) >= 2 else False
+                lane = cache[rkey]
+            self.matched[0] += 1
+            if lane is not False:
+                self.matched[1] += 1
+            else:
+                lane = None
+        gkey = (np.round(part if lane is None else lane, 1).tobytes(), mode)
         g = cache.get(gkey)
         if g is None:
-            g = self._geometry(part, mode)
+            g = self._geometry(part, mode) if lane is None else self._lane_geometry(lane, mode)
             cache[gkey] = g
         gid, gxy = g
         # stop list (with virtual boundary stops)
         stops = list(sidx[i0 : i1 + 1])
         flags = [0] * len(stops)
-        vxy = []
         if virt_lo is not None:
             stops.insert(0, -1)
             flags.insert(0, 1)
@@ -419,50 +420,6 @@ class Agency:
         ))
         return len(self.patterns) - 1
 
-    def _make_rail_pattern(self, rid, direc, head, mode, sidx, i0, i1, dist, d_lo, d_hi, virt_lo, virt_hi, part, cache):
-        """Pattern routed through the rail graph (rail_routes); None if routing failed."""
-        stops = list(sidx[i0 : i1 + 1])
-        flags = [0] * len(stops)
-        sd = list(np.asarray(dist[i0 : i1 + 1], float) - d_lo)
-        if virt_lo is not None:
-            stops.insert(0, -1)
-            flags.insert(0, 1)
-            sd.insert(0, 0.0)
-        if virt_hi is not None:
-            stops.append(-2)
-            flags.append(1)
-            sd.append(d_hi - d_lo)
-        sd = np.maximum.accumulate(np.clip(np.array(sd), 0.0, d_hi - d_lo))
-        L = consist_len(mode, self.routes[rid]["short"])
-        pxy = np.asarray(part, float)[:, :2]
-        gkey = ("rail", np.round(pxy, 0).tobytes(), mode, np.round(sd, 0).tobytes(), round(L, 1))
-        g = cache.get(gkey)
-        if g is None:
-            rr = self.router.route(pxy, sd, [bool(f) for f in flags], mode, L)
-            if rr.xyz is None or len(rr.xyz) < 2:
-                cache[gkey] = False
-                return None
-            if not hasattr(self, "geoms"):
-                self.geoms = []
-                self.snap_stats = []
-            self.geoms.append(rr.xyz)
-            self.snap_stats.append(1.0 if rr.ok else 0.0)
-            self.route_stats.append((self.routes[rid]["short"], mode, rr.ok, rr.breaks, len(rr.edges)))
-            g = (len(self.geoms) - 1, rr)
-            cache[gkey] = g
-        elif g is False:
-            return None
-        gid, rr = g
-        fr = np.array(rr.fronts)
-        cen = np.where(np.array(flags) > 0, fr, fr - L * 0.5)
-        cen = np.maximum.accumulate(np.clip(cen, 0.0, rr.length))
-        self.patterns.append(dict(
-            route=rid, dir=int(direc) if direc not in (None, "") else 0, head=head or "",
-            geom=gid, stops=stops, flags=flags, dist=cen, mode=mode,
-            i0=i0, i1=i1, vlo=virt_lo, vhi=virt_hi, rawdist=dist, rr=rr, clen=L,
-        ))
-        return len(self.patterns) - 1
-
     def _crossing(self, sll, cum, da, db, bbox, entering):
         """Along-line distance where the shape crosses the bbox between da and db."""
         w, s, e, n = bbox
@@ -477,30 +434,23 @@ class Agency:
         return float(cum[idx[k[0] - 1]]) if len(k) and k[0] > 0 else float(da)
 
     def _geometry(self, xy: np.ndarray, mode: str):
-        if not hasattr(self, "geoms"):
-            self.geoms = []
-            self.snap_stats = []
-        if mode in RAIL_MODES and self.railnet is not None:
-            sxy, bri, tun, frac = self.railnet.snap(xy, mode)
-            self.snap_stats.append(frac)
-            dxy, seg = densify_xy(sxy, RAIL_DRAPE_STEP)
-            # flags: a densified vertex takes the flag of its source segment when both ends agree
-            b2 = bri[seg] & bri[np.minimum(seg + 1, len(bri) - 1)]
-            t2 = tun[seg] & tun[np.minimum(seg + 1, len(tun) - 1)]
-            b2[0], t2[0] = bri[0], tun[0]
-            ground = self.ter.sample(dxy[:, 0], dxy[:, 1])
-            z = grade_profile(dxy, ground, b2, t2, clearance=6.0, cover=COVER.get(mode, 10.0), ramp=150.0,
-                              open_ends=True, covered_way=0.0 if mode == "streetcar" else 250.0)  # as rail_graph.COVERED_WAY
-            out = np.column_stack([dxy, z])
-            out = out[rdp3(out, RAIL_TOL)]
-        else:
-            ls = shapely.LineString(xy)
-            if mode == "bus":
-                ls = ls.simplify(BUS_SIMPLIFY)
-            dxy, _ = densify_xy(np.asarray(ls.coords), BUS_DRAPE_STEP)
-            z = self.ter.sample(dxy[:, 0], dxy[:, 1])
-            out = np.column_stack([dxy, z])
-            out = out[rdp3(out, 1.0)]
+        """GTFS shape draped on the terrain (no lanes to follow)."""
+        ls = shapely.LineString(xy)
+        if mode == "bus":
+            ls = ls.simplify(BUS_SIMPLIFY)
+        dxy = densify(np.asarray(ls.coords), DRAPE_STEP)
+        out = np.column_stack([dxy, self.ter.sample(dxy[:, 0], dxy[:, 1])])
+        out = out[rdp3(out, 1.0)]
+        self.geoms.append(out)
+        return len(self.geoms) - 1, out[:, :2]
+
+    def _lane_geometry(self, g: np.ndarray, mode: str):
+        """Lane centrelines with their solved z; stretches kept from the GTFS shape (gaps) draped."""
+        g = g.copy()
+        gap = np.isnan(g[:, 2])
+        if gap.any():
+            g[gap, 2] = self.ter.sample(g[gap, 0], g[gap, 1])
+        out = g[rdp3(g, LANE_TOL.get(mode, RAIL_TOL))]
         self.geoms.append(out)
         return len(self.geoms) - 1, out[:, :2]
 
@@ -694,7 +644,7 @@ class Agency:
         del arrays["tp_dep"]
         route_meta = [self.routes[r] for r in routes]
         header = dict(
-            laneShapes=bool(kind == "bus" and self.bus_router is not None),
+            laneShapes=bool(kind == "bus" and self.matcher is not None),
             version=1, agency=self.key, profile=prof, date=date.isoformat(), kind=kind,
             modes=MODES, routes=route_meta,
             headsigns=list(heads), stopIds=[s[0] for s in stop_list], stopNames=[s[1] for s in stop_list],
@@ -702,10 +652,8 @@ class Agency:
         )
         durs = np.array([tps[r[2]][0][-1] for r in recs])
         header["maxDuration"] = int(durs.max()) if len(durs) else 0
-        if kind == "rail":
-            self._rail_arrays(arrays, recs, pats, header)
-        else:
-            arrays["trip_next"] = self._trip_next(recs)
+        arrays["trip_next"] = self._trip_next(recs)
+        if kind == "bus":
             tripnames = []
             for r in recs:
                 tr = self.trips[r[0].split("#")[0]]
@@ -717,32 +665,6 @@ class Agency:
         meta = dict(trips=len(recs), patterns=len(pats), shapes=len(geoms), stops=len(stop_list), vertices=int(shape_off[-1]))
         self.last_stops = (stop_list, stop_z, pats, pat_off, pat_stop)
         return size, meta
-
-    def _rail_arrays(self, arrays: dict, recs: list, pats: list, header: dict) -> None:
-        """Rail routes through data/rail/network.bin.gz + vehicle blocks (see docs/RAIL.md)."""
-        emap = getattr(self.router, "out_map", None) if self.router is not None else None
-        r_off, r_edge, r_start, r_flags, p_len = [0], [], [], [], []
-        for p in pats:
-            pat = self.patterns[p]
-            rr = pat.get("rr")
-            ok = rr is not None and emap is not None and all(emap[e] >= 0 for e, _ in rr.edges)
-            if ok:
-                for e, d in rr.edges:
-                    r_edge.append(int(emap[e]) * 2 + (0 if d > 0 else 1))
-                r_start.append(rr.start)
-                r_flags.append(1 if rr.ok else 2)
-            else:
-                r_start.append(0.0)
-                r_flags.append(0)
-            r_off.append(len(r_edge))
-            p_len.append(pat.get("clen", 0.0))
-        arrays["pat_len"] = np.array(p_len, dtype=np.float32)
-        arrays["pat_rflags"] = np.array(r_flags, dtype=np.uint8)
-        arrays["pat_rstart"] = np.array(r_start, dtype=np.float32)
-        arrays["pat_redge_off"] = np.array(r_off, dtype=np.uint32)
-        arrays["pat_redge"] = np.array(r_edge, dtype=np.uint32)
-        arrays["trip_next"] = self._trip_next(recs)
-        header["railNetwork"] = getattr(self.router, "net_hash", "")
 
     def _trip_next(self, recs: list) -> np.ndarray:
         """Next trip (index in `recs`) of the same GTFS vehicle block that starts at the stop
@@ -795,12 +717,6 @@ class Agency:
         return out
 
 
-def bus_roads_gaps_path():
-    from .bus_roads import GAPS
-
-    return GAPS
-
-
 def main(argv: list[str]) -> None:
     keys = [a for a in argv if not a.startswith("-")] or list(SOURCES)
     if "--download" in argv:
@@ -813,23 +729,10 @@ def main(argv: list[str]) -> None:
     keys = [k for k in keys if (GTFS / f"{k}.zip").exists()]
     OUTDIR.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
-    rail = RailNet()
-    print(f"rail network: {len(rail.kind)} ways ({time.time()-t0:.1f}s)")
-    bus_router = None
-    if "--no-bus-roads" not in argv:
-        rn = RoadNet()
-        bus_router = BusRouter(rn)
-        print(f"road net for buses: {len(rn.frm)} edges ({time.time()-t0:.0f}s)")
-    router = None
-    if any(k in RAIL_AGENCIES for k in keys):
-        g = rail_graph.load()
-        for line in g.log:
-            print("  " + line)
-        info = g.write()
-        print("  " + g.log[-1])
-        router = Router(g)
-        router.out_map = g.out_map
-        router.net_hash = info["hash"]
+    matcher = None
+    if "--no-lanes" not in argv:
+        lanes_dir = next((a.split("=", 1)[1] for a in argv if a.startswith("--lanes=")), None)
+        matcher = Matcher(Lanes(Path(lanes_dir)) if lanes_dir else Lanes())
     idx_path = OUTDIR / "index.json"
     old = json.loads(idx_path.read_text()) if idx_path.exists() else {}
     agencies = {a["id"]: a for a in old.get("agencies", [])}
@@ -837,17 +740,11 @@ def main(argv: list[str]) -> None:
     stations = {s["id"]: s for s in old.get("stations", [])}
     for k in keys:
         print(f"== {k}")
-        ag = Agency(k, rail, router if k in RAIL_AGENCIES else None, bus_router)
+        ag = Agency(k, matcher)
         ag.load()
         ag.build()
-        if ag.bus_matched[0]:
-            print(f"  [{k}] bus shapes on roads: {ag.bus_matched[1]}/{ag.bus_matched[0]} patterns")
-        if ag.route_stats:
-            bad = [r for r in ag.route_stats if not r[2]]
-            print(f"  [{k}] rail routes: {len(ag.route_stats)}, broken {len(bad)} {sorted({(b[0], b[3]) for b in bad})[:20]}")
-        if getattr(ag, "snap_stats", None):
-            st = np.array(ag.snap_stats)
-            print(f"  [{k}] rail snap: {len(st)} shapes, mean matched {st.mean():.2f}, min {st.min():.2f}")
+        if ag.matched[0]:
+            print(f"  [{k}] shapes on lanes: {ag.matched[1]}/{ag.matched[0]} patterns")
         info = ag.write()
         agencies[k] = info
         routes = {rid: r for rid, r in routes.items() if r["agency"] != k}
@@ -869,9 +766,9 @@ def main(argv: list[str]) -> None:
         stations=sorted(stations.values(), key=lambda s: s["id"]),
     )
     idx_path.write_text(json.dumps(index, separators=(",", ":")))
-    if bus_router is not None:
-        bus_router.write_gaps(keys)
-        print(f"bus road gaps (missing roads): {len(bus_router.gaps)} -> {bus_roads_gaps_path()}")
+    if matcher is not None:
+        matcher.write_gaps(keys)
+        print(f"lane gaps (stretches with no lanes to follow): {len(matcher.gaps)}")
     print(f"done in {time.time()-t0:.0f}s")
 
 

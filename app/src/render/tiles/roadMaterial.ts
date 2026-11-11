@@ -1,6 +1,6 @@
 // Street surface material: world-space asphalt / concrete / pavers / grass
 // textures and procedural, box-filtered (alias-free at any distance) Ontario
-// road markings driven by the per-vertex attributes written in workers/roads.ts
+// road markings driven by per-vertex attributes (far ribbons: workers/farNet.ts)
 // (docs/ROADS.md, OTM Book 11 / 15 / 18):
 //   white dashed lane lines (3 m on / 6 m off; 3/9 on freeways) laid out from
 //   per-vertex edge-line offsets and the nominal lane width, so tapers and added

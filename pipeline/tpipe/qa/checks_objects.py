@@ -1,7 +1,7 @@
 """Props, vegetation, buildings and ground checks.
 
 Props / trees come from the *client's own placement*: app/qa/props_dump.mjs
-runs workers/street.ts + vegetation.ts for every level-0 tile and writes
+builds every level-0 tile with the network engine and runs workers/vegetation.ts, and writes
 pipeline/work/qa_props/{tx}_{ty}.bin. Tiles without a dump fall back to the
 OSM points in the tile (p_kind 3 trees, 4 lamps) and signal poles re-derived
 from the junction arms exactly as street.ts places them.
@@ -30,7 +30,7 @@ import shapely
 
 from .. import geo
 from .core import finding
-from .data import F_BRIDGE, F_LINK, F_TUNNEL, S0, Block, seg_point_dist
+from .data import F_BRIDGE, F_TUNNEL, S0, Block, seg_point_dist
 
 PROPS = geo.WORK / "qa_props"
 
@@ -128,44 +128,15 @@ def load_props(B: Block) -> dict:
         Lm["x"].append(P["x"][lp])
         Lm["y"].append(P["y"][lp])
         Lm["z"].append(B.terrain(P["x"][lp], P["y"][lp]))
-        sx, sy, sj = _signal_poles(B)
-        st = B.tile_index(sx, sy)
-        sm = (st >= 0) & miss[np.maximum(st, 0)]
-        Sg["x"].append(sx[sm])
-        Sg["y"].append(sy[sm])
-        Sg["z"].append(B.terrain(sx[sm], sy[sm]))
-        Sg["j"].append(sj[sm])
     cat = lambda d: {k: (np.concatenate(v) if v else np.zeros(0)) for k, v in d.items()}  # noqa: E731
     return {"trees": cat(T), "lamps": cat(Lm), "signals": cat(Sg), "props": cat(Pr), "have": have}
 
 
-def _signal_poles(B: Block):
-    """street.ts: a pole on the far-right corner of every approach of a signalized junction."""
-    J = B.junc
-    xs, ys, js = [], [], []
-    for q in range(len(J["x"])):
-        if not (J["flags"][q] & 1):
-            continue
-        arms = J["arms"][q]
-        for ai, (ang, r, hw, _) in enumerate(arms):
-            ca, sa = math.cos(ang), math.sin(ang)
-            tX, tY = -ca, -sa
-            rX, rY = tY, -tX
-            oi = min(range(len(arms)), key=lambda o: (math.cos(arms[o][0] - ang), o))
-            far = (arms[oi][1] if oi != ai else r) + 1.8
-            xs.append(J["x"][q] + tX * far + rX * (hw + 1.2))
-            ys.append(J["y"][q] + tY * far + rY * (hw + 1.2))
-            js.append(J["osm"][q])
-    return np.array(xs), np.array(ys), np.array(js)
-
-
 class Carriageway:
-    """Owned road segments (classes 0-6, no tunnels) as drawn by workers/roads.ts: network-model tiles
-    offset the pavement edges per vertex, `r_pl` left and `r_pr` right of the centreline (asymmetric on
-    one-way pairs, tapers, merges); older tiles draw the symmetric piece width. `hw` is the reference
-    half-width of a segment (the larger side); `near` returns an *equivalent* centreline distance
-    d = hw - depth, where depth is how far the point is inside the drawn edge on its own side (flat caps:
-    a point past a segment end is never inside it; the next segment covers it)."""
+    """Owned road segments of the network model (classes 0-6, no tunnels) at their carriageway width.
+    `hw` is the half-width of a segment; `near` returns an *equivalent* centreline distance d = hw -
+    depth, where depth is how far the point is inside the carriageway edge (flat caps: a point past a
+    segment end is never inside it; the next segment covers it)."""
 
     def __init__(self, B: Block, max_cls: int = 6):
         R = B.roads
@@ -182,18 +153,8 @@ class Carriageway:
         self.seg, self.sp = s[s_ok], sp[s_ok]
         s = self.seg
         self.x0, self.y0, self.x1, self.y1 = R.X[s], R.Y[s], R.X[s + 1], R.Y[s + 1]
-        hw_piece = R.attrs["w"][self.sp] / 2
-        pl, pr = R.vattrs.get("pl"), R.vattrs.get("pr")
-
-        def side(a, k):
-            if a is None or not len(a):
-                return hw_piece
-            v = a[k]
-            return np.where(np.isfinite(v) & (v > 0), v, hw_piece)
-
-        self.pl0, self.pl1 = side(pl, s), side(pl, s + 1)
-        self.pr0, self.pr1 = side(pr, s), side(pr, s + 1)
-        self.hw = np.maximum.reduce([self.pl0, self.pl1, self.pr0, self.pr1])
+        hw = R.attrs["w"][self.sp] / 2
+        self.pl0 = self.pl1 = self.pr0 = self.pr1 = self.hw = hw
         self.cls = c[self.sp]
         self.flags = f[self.sp]
         self.osm = R.attrs["osm"][self.sp]
@@ -259,7 +220,7 @@ CLASS_NAME = ["motorway", "trunk", "primary", "secondary", "tertiary", "resident
 
 
 def _road_lbl(cw: Carriageway, b: int) -> str:
-    return f"{CLASS_NAME[min(int(cw.cls[b]), 7)]}{' bridge' if cw.bridge[b] else ''}{' ramp' if cw.flags[b] & F_LINK else ''} (way {int(cw.osm[b])})"
+    return f"{CLASS_NAME[min(int(cw.cls[b]), 7)]}{' bridge' if cw.bridge[b] else ''}"
 
 
 def check_props(B: Block, cats: set) -> list[dict]:
@@ -271,10 +232,8 @@ def check_props(B: Block, cats: set) -> list[dict]:
     out: list[dict] = []
     cw = Carriageway(B)
     src = "client placement" if P["have"].any() else "OSM/derived"
-    # ---- poles and lamps in lanes: the drawn carriageway = segment pavements (r_pl / r_pr) plus the
-    # junction surfaces (js_*); a prop on a raised corner sidewalk (jw_*) or a curbed median (md_*) is fine
+    # ---- poles and lamps in lanes: the network model's carriageways
     if {"prop_in_lane", "prop_in_crosswalk"} & cats and cw.ok:
-        js = B.street_polys("js")
         Pt = B.pts
         xk = Pt["kind"] == 2
         xing = shapely.STRtree(shapely.points(Pt["x"][xk], Pt["y"][xk]).tolist()) if xk.any() else None
@@ -285,15 +244,9 @@ def check_props(B: Block, cats: set) -> list[dict]:
                 m = Pp["k"] == kid
                 if m.any():
                     kinds.append((name, {"x": Pp["x"][m], "y": Pp["y"][m], "z": Pp["z"][m]}, PROP_WEIGHT.get(name, 1.0)))
-        raised = np.concatenate([B.street_polys("jw"), B.street_polys("md")])
-        js_tree = shapely.STRtree(js) if len(js) else None
-        raised_tree = shapely.STRtree(raised) if len(raised) else None
         for kind, D, w in kinds:
             px, py, pz = D["x"], D["y"], D["z"]
             idx = np.nonzero(B.in_core(px, py))[0]
-            if raised_tree is not None and len(idx):
-                on, _ = raised_tree.query(shapely.points(px[idx], py[idx]), predicate="intersects")
-                idx = np.delete(idx, np.unique(on))
             a, b, d = cw.near(px[idx], py[idx], -PROP_MARGIN)
             a = idx[a]
             k = np.abs(cw.z[b] - pz[a]) < DECK_ABOVE
@@ -304,16 +257,6 @@ def check_props(B: Block, cats: set) -> list[dict]:
                 i, s = a[q], b[q]
                 hit[i] = (float(depth[q]), float(cw.hw[s]), f"the carriageway of {_road_lbl(cw, s)}", [cw.osm[s]],
                           math.atan2(cw.y1[s] - cw.y0[s], cw.x1[s] - cw.x0[s]))
-            if js_tree is not None and len(idx):
-                pts = shapely.points(px[idx], py[idx])
-                qa_, qb = js_tree.query(pts, predicate="within")
-                if len(qa_):
-                    dj = shapely.distance(pts[qa_], shapely.boundary(js[qb]))
-                    tz = B.terrain(px[idx][qa_], py[idx][qa_])
-                    for q in np.nonzero((dj > PROP_MARGIN) & ~(np.abs(tz - pz[idx][qa_]) >= DECK_ABOVE))[0]:
-                        i = idx[qa_[q]]
-                        if i not in hit or hit[i][0] < dj[q]:
-                            hit[i] = (float(dj[q]), 6.0, "a junction surface", [], None)
             near_x = set()
             if xing is not None and hit:
                 ii = np.array(sorted(hit))
@@ -321,10 +264,10 @@ def check_props(B: Block, cats: set) -> list[dict]:
                 near_x = set(ii[np.unique(qa2)].tolist())
             for i in sorted(hit):
                 dep, hw, what, osm, bearing = hit[i]
-                cat = "prop_in_crosswalk" if what == "a junction surface" or i in near_x else "prop_in_lane"
+                cat = "prop_in_crosswalk" if i in near_x else "prop_in_lane"
                 if cat not in cats:
                     continue
-                if cat == "prop_in_crosswalk" and what != "a junction surface":
+                if cat == "prop_in_crosswalk":
                     what = "a marked crossing on " + what
                 out.append(finding(cat, kind, w * (1 + dep / max(hw, 0.5)), px[i], py[i], pz[i], osm,
                                    f"{kind.replace('_', ' ')} stands {dep:.1f} m inside {what} ({src})", bearing=bearing))

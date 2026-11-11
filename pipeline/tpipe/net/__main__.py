@@ -155,8 +155,9 @@ def write_index(out: Path, index: list[dict[str, object]]) -> None:
 
 
 def region_tiles() -> set[tuple[int, int]]:
-    m = json.loads((geo.OUT / "manifest.json").read_text())
-    return {(int(a), int(b)) for a, b in m["tiles"]["0"]}
+    from .. import region
+
+    return region.level0_tiles()
 
 
 def run_area(read_box: tuple[float, float, float, float], name: str, tiles: set[tuple[int, int]], out: Path, fresh: bool) -> dict[str, object]:

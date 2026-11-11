@@ -47,13 +47,11 @@ export interface Tile {
   buildings: THREE.Mesh | null;
   /** building footprints (level 0) for camera collision / label occlusion */
   collide?: import('../../workers/collide').FootprintBuf | null;
-  /** roads + sidewalks + rail in one mesh; rail = indices from `railStart` */
+  /** far road ribbons + rail beds from the network model in one mesh; rail = indices from `railStart` */
   roads: THREE.Mesh | null;
   railStart: number;
-  /** draw range state last applied (1 roads on, 2 rail on, 4 near-only road surfaces on) */
+  /** draw range state last applied (1 roads on, 2 rail on) */
   streetMask: number;
-  /** index count of the near-only prefix of the roads mesh */
-  roadNear: number;
   /** levels 1–2: start of the terrain's half-resolution index range (0 = none), and whether it is drawn */
   terrainCoarse?: number;
   terrainFarLod?: boolean;
@@ -130,8 +128,6 @@ const UPLOAD_BUDGET = 12 * 1024 * 1024;
 
 /** house tiles this close (tile-edge distance, m) stay in the pools whatever the view direction (shadow casters) */
 const HOUSE_ALWAYS = 450;
-/** level-0 tiles closer than this (m, tile distance) draw curb faces and tactile plates; beyond, they are < 0.5 px */
-const ROAD_NEAR = CULL ? 400 : Infinity;
 /** level-2 / level-1 terrain beyond these tile distances (m) draws its half-resolution grid (512 / 128 m) */
 const TERRAIN_COARSE_L2 = 25000, TERRAIN_COARSE_L1 = 8000;
 /** occlusion horizon below this altitude (m); `?horizon=0` switches it off (A/B checks) */
@@ -214,7 +210,7 @@ export class TileManager {
         const S = this.manifest.tileSize[L];
         const t: Tile = {
           key: key(l, tx, ty), L: l, tx, ty, S, state: 'none', jobId: 0, group: null, terrain: null, terrainFar: null,
-          buildings: null, roads: null, railStart: 0, streetMask: 7, roadNear: 0, heights: null, grid: 0, minH: 0, maxH: 120, topH: 470,
+          buildings: null, roads: null, railStart: 0, streetMask: 3, heights: null, grid: 0, minH: 0, maxH: 120, topH: 470,
           houses: null, housesShown: false, canopy: null, page: null, layer: -1, bytes: 0, lastUsed: 0, drawn: false,
           requestedAt: 0, priority: 0, kids: null, counts: null, retryAt: 0, refined: false,
         };
@@ -394,22 +390,18 @@ export class TileManager {
           t.buildings.layers.set(hidden ? SHADOW_ONLY_LAYER : 0);
         }
         if (t.roads) {
-          // bit 4: near tile, draws the near-only prefix (curb faces, tactile plates) too
-          const near = d < (t.streetMask & 4 ? ROAD_NEAR * 1.15 : ROAD_NEAR);
-          const mask = (layers.roads ? 1 : 0) | (layers.rail ? 2 : 0) | (near ? 4 : 0);
+          const mask = (layers.roads ? 1 : 0) | (layers.rail ? 2 : 0);
           if (mask !== t.streetMask) {
             t.streetMask = mask;
             const g = t.roads.geometry, n = g.index!.count, rs = t.railStart;
-            const a = near ? 0 : Math.min(t.roadNear, rs);
-            if ((mask & 3) === 3) g.setDrawRange(a, n - a);
-            else if ((mask & 3) === 1) g.setDrawRange(a, rs - a);
-            else if ((mask & 3) === 2) g.setDrawRange(rs, n - rs);
+            if (mask === 3) g.setDrawRange(0, n);
+            else if (mask === 1) g.setDrawRange(0, rs);
+            else if (mask === 2) g.setDrawRange(rs, n - rs);
           }
           // ring 2+: street surfaces of far tiles seen at a grazing angle
           // (< ~1.2°) cover no pixels worth a draw call
           const grazing = sliver || (d > ctx.view.r1 && (H - t.maxH) < d * 0.02);
-          const m3 = mask & 3;
-          t.roads.visible = !net && !grazing && !hidden && m3 !== 0 && !(m3 === 1 && t.railStart === 0) && !(m3 === 2 && t.railStart === t.roads.geometry.index!.count);
+          t.roads.visible = !net && !grazing && !hidden && mask !== 0 && !(mask === 1 && t.railStart === 0) && !(mask === 2 && t.railStart === t.roads.geometry.index!.count);
         }
       }
       if (t.houses) {
@@ -764,8 +756,7 @@ export class TileManager {
     t.buildings = add(r.buildings, this.buildingMat, 'buildings', true);
     t.roads = add(r.roads, this.roadMat, 'roads', false);
     t.railStart = r.railStart;
-    t.roadNear = r.roadNear ?? 0;
-    t.streetMask = 7;
+    t.streetMask = 3;
     if (t.roads) t.roads.renderOrder = 1;
     t.heights = r.heights;
     t.grid = r.grid;
@@ -801,7 +792,7 @@ export class TileManager {
     if (t.page && t.layer >= 0) t.page.release(t.layer);
     this.bytes -= t.bytes;
     Object.assign(t, {
-      group: null, terrain: null, terrainFar: null, buildings: null, collide: null, roads: null, railStart: 0, streetMask: 7, roadNear: 0, heights: null, houses: null, canopy: null, cuts: null, emb: null, urban: null,
+      group: null, terrain: null, terrainFar: null, buildings: null, collide: null, roads: null, railStart: 0, streetMask: 3, heights: null, houses: null, canopy: null, cuts: null, emb: null, urban: null,
       page: null, layer: -1, bytes: 0, state: 'none', counts: null,
     });
     this.readyCount--;

@@ -133,7 +133,7 @@ class LidarTerrain:
         return self.sample(gx, gy)
 
     def report(self) -> dict:
-        """per level-0 tile: samples from each source (logged in roadnet_report.json)"""
+        """per level-0 tile: samples from each source"""
         out = {}
         for key, (c, h) in sorted(self.log.items()):
             tx = int(round(key / 100003))

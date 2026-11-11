@@ -16,7 +16,7 @@ const counters = (run) => {
   const c = run?.sample?.counters;
   if (!c) return run?.err ? `<div class="err">${esc(run.err)}</div>` : '';
   const bad = Object.entries(c).filter(([, v]) => v.count > 0).map(([k, v]) => `${k} ${v.count}`);
-  return `<div class="ctr">cars ${run.sample.cars ?? 0} · transit ${run.sample.transit ?? 0}${bad.length ? ' · <b>' + esc(bad.join(' · ')) + '</b>' : ''}${run.pending ? ` · <b>tiles pending ${run.pending}</b>` : ''}</div>`;
+  return `<div class="ctr">transit ${run.sample.transit ?? 0}${bad.length ? ' · <b>' + esc(bad.join(' · ')) + '</b>' : ''}${run.pending ? ` · <b>tiles pending ${run.pending}</b>` : ''}</div>`;
 };
 
 let title, groups = new Map(), meta = '';
