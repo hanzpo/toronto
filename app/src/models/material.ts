@@ -16,9 +16,7 @@
 //                          whose positionNode does its own instancing
 //                          (MarkerOverlay); pass the heading-rotated normal.
 import * as THREE from 'three/webgpu';
-import {
-  attribute, clamp, dot, float, floor, fract, max, mix, mod, normalView, positionViewDirection, pow, step, vec3, vec4,
-} from 'three/tsl';
+import { attribute, clamp, dot, float, floor, fract, max, mix, mod, normalView, positionViewDirection, pow, step, vec3, vec4 } from 'three/tsl';
 import { U } from '../render/uniforms';
 
 type N = ReturnType<typeof float>;
@@ -100,4 +98,30 @@ export function vehicleShade(nWorld: N3, o: VehicleShadingOpts = {}) {
   const skyRefl = mix(U.skyHorizon, U.skyZenith, max(n.y, 0)).mul(s.glass).mul(0.35).mul(day.mul(0.85).add(0.15));
   const c = s.albedo.mul(light).add(skyRefl).add(vec3(spec, spec, spec)).add(s.emissive);
   return vec4(c, 1);
+}
+
+/** Vehicle shading for packed instanced pools: per-vertex `tags` (livery, lamp, sign, glass), per-instance `iColF` (rgb tint, flags: 1 brake, 4 / 8 indicators, 16 headlights). */
+export function packedVehicleMaterial(name: string): THREE.MeshStandardNodeMaterial {
+  const m = new THREE.MeshStandardNodeMaterial();
+  m.name = name;
+  const vc = attribute('color', 'vec3');
+  const tags = attribute('tags', 'vec4');
+  const inst = attribute('iColF', 'vec4');
+  const liv = tags.x, lamp = tags.y, sign = tags.z, glass = tags.w;
+  const flags = inst.w;
+  const bit = (v: number) => step(0.5, mod(floor(flags.div(v)), 2));
+  const is = (k: number) => step(k - 0.5, lamp).mul(step(lamp, k + 0.5));
+  const night = U.night;
+  const blink = step(0.5, fract(U.time.mul(1.5)));
+  const head = is(1).mul(float(0.25).add(night.mul(2.8)).add(bit(16).mul(1.5)));
+  const tail = is(2).mul(night.mul(1.1).add(bit(1).mul(2.4)));
+  const ind = is(3).mul(bit(4)).add(is(4).mul(bit(8))).mul(blink).mul(2.5);
+  m.emissiveNode = vec3(1.0, 0.93, 0.78).mul(head)
+    .add(vec3(1.0, 0.06, 0.03).mul(tail))
+    .add(vec3(1.0, 0.5, 0.05).mul(ind))
+    .add(vec3(1.0, 0.62, 0.12).mul(sign.mul(float(0.3).add(night.mul(1.4)))));
+  m.colorNode = mix(vc.mul(mix(vec3(1, 1, 1), inst.xyz, liv)), vec3(0.02, 0.025, 0.03), glass);
+  m.roughnessNode = mix(mix(float(0.62), float(0.22), liv), float(0.04), glass);
+  m.metalnessNode = mix(mix(float(0.05), float(0.45), liv), float(0.0), glass);
+  return m;
 }

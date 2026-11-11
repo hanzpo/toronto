@@ -1,6 +1,6 @@
 import * as THREE from 'three/webgpu';
-import { attribute, clamp, cos, dot, float, floor, fract, mix, mod, normalView, positionGeometry, positionLocal, positionViewDirection, pow, sin, step, vec3, abs as tslAbs } from 'three/tsl';
-import { U } from '../../render/uniforms';
+import { attribute, cos, float, mix, positionGeometry, positionLocal, sin, vec3, abs as tslAbs } from 'three/tsl';
+import { packedVehicleMaterial } from '../../models/material';
 
 export class Pool {
   mesh: THREE.InstancedMesh;
@@ -75,32 +75,7 @@ export function packPed(g: THREE.BufferGeometry): THREE.BufferGeometry {
  * `tags` / `iColF` attributes. Instance flags: 1 brake, 4 / 8 indicators, 16 headlights.
  */
 export function carMaterial(): THREE.MeshStandardNodeMaterial {
-  const m = new THREE.MeshStandardNodeMaterial({ roughness: 0.5, metalness: 0.05 });
-  m.name = 'traffic-cars';
-  const vc = attribute('color', 'vec3');
-  const tags = attribute('tags', 'vec4');
-  const inst = attribute('iColF', 'vec4');
-  const liv = tags.x, lamp = tags.y, sign = tags.z, glass = tags.w;
-  const flags = inst.w;
-  const bit = (v: number) => step(0.5, mod(floor(flags.div(v)), 2));
-  const is = (k: number) => step(k - 0.5, lamp).mul(step(lamp, k + 0.5));
-  const night = U.night;
-  const blink = step(0.5, fract(U.time.mul(1.5)));
-  const head = is(1).mul(float(0.25).add(night.mul(2.8)).add(bit(16).mul(1.5)));
-  const tail = is(2).mul(night.mul(1.1).add(bit(1).mul(2.4)));
-  const ind = is(3).mul(bit(4)).add(is(4).mul(bit(8))).mul(blink).mul(2.5);
-  const emissive = vec3(1.0, 0.93, 0.78).mul(head)
-    .add(vec3(1.0, 0.06, 0.03).mul(tail))
-    .add(vec3(1.0, 0.5, 0.05).mul(ind))
-    .add(vec3(1.0, 0.62, 0.12).mul(sign.mul(float(0.3).add(night.mul(1.4)))));
-  const f = pow(float(1).sub(clamp(dot(normalView, positionViewDirection), 0, 1)), 3);
-  const sky = mix(U.skyHorizon, U.skyZenith, 0.35);
-  const refl = sky.mul(glass).mul(f.mul(0.32).add(0.03)).mul(float(1).sub(night.mul(0.85)));
-  m.colorNode = vc.mul(mix(vec3(1, 1, 1), inst.xyz, liv));
-  m.roughnessNode = mix(float(0.5), float(0.08), glass);
-  m.metalnessNode = mix(float(0.12), float(0.0), glass);
-  m.emissiveNode = emissive.add(refl);
-  return m;
+  return packedVehicleMaterial('traffic-cars');
 }
 
 /** Pedestrians: clothing tint + limb walk cycle (models/traffic pedestrianWalkNode, packed attributes). */
