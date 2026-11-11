@@ -13,27 +13,18 @@
 import * as THREE from 'three/webgpu';
 
 class T {
-  pos: number[] = []; nrm: number[] = []; va: number[] = []; vb: number[] = [];
-  v(p: number[], n: number[], a: number[], b: number[]) { this.pos.push(...p); this.nrm.push(...n); this.va.push(...a); this.vb.push(...b); }
+  pos: number[] = []; nrm: number[] = []; va: number[] = []; vb: number[] = []; uv: number[] = [];
+  v(p: number[], n: number[], a: number[], b: number[], uv: number[] = [0, 0]) { this.pos.push(...p); this.nrm.push(...n); this.va.push(...a); this.vb.push(...b); this.uv.push(...uv); }
   build(): THREE.BufferGeometry {
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(this.pos, 3));
     g.setAttribute('normal', new THREE.Float32BufferAttribute(this.nrm, 3));
     g.setAttribute('va', new THREE.Float32BufferAttribute(this.va, 4));
     g.setAttribute('vb', new THREE.Float32BufferAttribute(this.vb, 4));
+    g.setAttribute('uv', new THREE.Float32BufferAttribute(this.uv, 2));
     return g;
   }
   get tris() { return this.pos.length / 9; }
-}
-
-/** unit icosahedron (detail 0 or 1) triangles, outward winding */
-function ico(detail: number): number[][] {
-  const g = new THREE.IcosahedronGeometry(1, detail);
-  const p = g.getAttribute('position');
-  const out: number[][] = [];
-  for (let i = 0; i < p.count; i++) out.push([p.getX(i), p.getY(i), p.getZ(i)]);
-  g.dispose();
-  return out;
 }
 
 /** trunk: n-sided open cylinder, t ∈ [0, 1] along the axis (shader scales / tapers) */
@@ -73,6 +64,35 @@ function lobe(t: T, lc: number[], r: number, tris: number[][], hash: number) {
   }
 }
 
+/** foliage lobe as `n` crossed leaf cards (alpha-cut in the shader), same lobe space as `lobe` */
+function cardLobe(t: T, lc: number[], r: number, hash: number, n: number) {
+  const L = Math.hypot(lc[0], lc[1], lc[2]);
+  const out = L > 1e-3 ? [lc[0] / L, lc[1] / L, lc[2] / L] : [0, 1, 0];
+  let h = hash * 9301 + 49297;
+  const rnd = () => { h = (h * 9301 + 49297) % 233280; return h / 233280; };
+  for (let k = 0; k < n; k++) {
+    const z = rnd() * 2 - 1, a = rnd() * Math.PI * 2, s = Math.sqrt(1 - z * z);
+    let nx = Math.cos(a) * s + out[0] * 0.6, ny = z + out[1] * 0.6, nz = Math.sin(a) * s + out[2] * 0.6;
+    const nl = Math.hypot(nx, ny, nz) || 1;
+    nx /= nl; ny /= nl; nz /= nl;
+    let ax = [nz, 0, -nx];
+    const al = Math.hypot(ax[0], ax[2]);
+    ax = al > 0.05 ? [ax[0] / al, 0, ax[2] / al] : [1, 0, 0];
+    const ay = [ny * ax[2] - nz * ax[1], nz * ax[0] - nx * ax[2], nx * ax[1] - ny * ax[0]];
+    const S = 1.3;
+    const c = (u: number, v: number) => [(ax[0] * u + ay[0] * v) * S, (ax[1] * u + ay[1] * v) * S, (ax[2] * u + ay[2] * v) * S];
+    const q = (u: number, v: number) => {
+      const d = c(u, v);
+      const outward = L > 1e-3 ? d[0] * out[0] + d[1] * out[1] + d[2] * out[2] : d[1] * 0.5;
+      const hy = Math.max(0, Math.min(1, (lc[1] + d[1] * r + 1) / 2));
+      const ao = (0.55 + 0.45 * Math.max(0, Math.min(1, 0.5 + 0.5 * outward))) * (0.62 + 0.38 * hy);
+      t.v(d, [nx, ny, nz], [lc[0], lc[1], lc[2], r], [2, ao, hash, 0], [(u + 1) / 2, (v + 1) / 2]);
+    };
+    q(-1, -1); q(1, -1); q(1, 1);
+    q(-1, -1); q(1, 1); q(-1, 1);
+  }
+}
+
 /** lobe centres: a Fibonacci shell plus a core, crown-unit space (the union reaches ≈ 1) */
 function lobeCentres(n: number, shell: number): number[][] {
   const out: number[][] = [];
@@ -104,13 +124,12 @@ function octa(rot: number): number[][] {
   return out;
 }
 
-/** LOBED family, high detail: 14 lobes (detail-0 icosahedra) + 6-sided trunk + 4 limbs ≈ 336 tris */
+/** LOBED family, high detail: 14 lobes of 5 leaf cards + 6-sided trunk + 4 limbs ≈ 176 tris */
 export function lobedHigh(): THREE.BufferGeometry {
   const t = new T();
   trunk(t, 6);
-  const ic = ico(0);
   const lobes = crownLobes();
-  lobes.forEach(([c, r], i) => lobe(t, c, r, ic, (i * 0.618) % 1));
+  lobes.forEach(([c, r], i) => cardLobe(t, c, r, (i * 0.618) % 1, 5));
   for (const k of [1, 4, 7, 10]) limb(t, lobes[k][0]);
   const g = t.build();
   g.userData.tris = t.tris;

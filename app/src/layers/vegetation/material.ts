@@ -127,11 +127,37 @@ function softShadow(m: THREE.MeshStandardNodeMaterial, k: number) {
   (m as unknown as { receivedShadowPositionNode: N }).receivedShadowPositionNode = positionWorld.add(U.sunDir.mul(k));
 }
 
-/** organic 3D noise (−1 … 1) at ~0.5 m (scale 1) from sines with domain warp (world-space: stable under motion) */
-function leafNoise(p: N, scale: number) {
-  const q = p.mul(scale);
-  const w = q.add(sin(q.yzx.mul(1.9)).mul(1.3));
-  return sin(w.x.mul(3.1)).mul(sin(w.y.mul(2.7))).mul(sin(w.z.mul(3.3)));
+let leafTex: THREE.CanvasTexture | null = null;
+
+/** leaf cluster: alpha = leaf coverage, red = per-leaf light variation */
+function leafTexture(): THREE.CanvasTexture {
+  if (leafTex) return leafTex;
+  const S = 256;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = S;
+  const g = cv.getContext('2d')!;
+  let h = 7;
+  const rnd = () => { h = (h * 16807) % 2147483647; return h / 2147483647; };
+  for (let i = 0; i < 150; i++) {
+    const a = rnd() * Math.PI * 2, rr = Math.sqrt(rnd()) * 0.43;
+    const x = S * (0.5 + Math.cos(a) * rr), y = S * (0.5 + Math.sin(a) * rr);
+    const l = S * (0.035 + rnd() * 0.03);
+    const shade = Math.round(120 + rnd() * 135);
+    g.save();
+    g.translate(x, y);
+    g.rotate(rnd() * Math.PI * 2);
+    g.fillStyle = `rgb(${shade},${shade},${shade})`;
+    g.beginPath();
+    g.ellipse(0, 0, l, l * 0.45, 0, 0, Math.PI * 2);
+    g.fill();
+    g.restore();
+  }
+  leafTex = new THREE.CanvasTexture(cv);
+  leafTex.colorSpace = THREE.NoColorSpace;
+  leafTex.generateMipmaps = true;
+  leafTex.minFilter = THREE.LinearMipmapLinearFilter;
+  leafTex.anisotropy = 4;
+  return leafTex;
 }
 
 /** instance frame: yaw (hedges: their own heading), hedge length */
@@ -230,19 +256,16 @@ export function lobedMaterial(level: 0 | 1) {
   const vCol = varying(vec4(col, select(kind.lessThan(1.5), float(0), float(1))), 'vVegC');
   const vA = varying(ls.alpha, 'vVegA');
   let edge: N = null;
+  let c: N = vCol.xyz;
   if (level === 0) {
-    // leafy, ragged silhouettes on near crowns only (world-space noise: stable
-    // under motion); the cut fades out by 55 m, well before the switch to mid
-    const vP = varying(vec4(wl.sub(VU.cam), ls.d), 'vVegP');
-    const rim = float(1).sub(abs(dot(normalize(vN), normalize(vP.xyz.negate()))));
-    const cutK = float(1).sub(linstep(float(30), float(55), vP.w));
-    const n1 = leafNoise(positionWorld, 0.8).mul(0.5).add(0.5);
-    edge = n1.greaterThan(rim.sub(0.5).mul(2.0).mul(cutK).sub(0.001)).or(vCol.w.lessThan(0.5));
+    m.side = THREE.DoubleSide;
+    const lt = T.texture(leafTexture(), T.uv());
+    edge = lt.a.greaterThan(0.5).or(vCol.w.lessThan(0.5));
+    c = select(vCol.w.lessThan(0.5), c, c.mul(lt.r.mul(0.5).add(0.6)));
   }
   const vCov = varying(select(kind.lessThan(1.5), float(1), crownCover(fol.w)), 'vVegCov');
   applyFade(m, vA, edge, vCov);
   softShadow(m, 2.2);
-  const c: N = vCol.xyz;
   m.colorNode = baseTone(c);
   return m;
 }
