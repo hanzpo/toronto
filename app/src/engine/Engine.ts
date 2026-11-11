@@ -106,8 +106,8 @@ export class Engine {
     this.backend = backendAny.isWebGPUBackend ? 'WebGPU' : 'WebGL2';
     this.backend += renderer.reversedDepthBuffer ? ' · reversed-Z' : ' · log-depth';
     renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFShadowMap;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.NeutralToneMapping;
     renderer.toneMappingExposure = 1.0;
     this.quality.setMode(useApp.getState().quality);
     renderer.setPixelRatio(this.quality.dpr);
@@ -120,6 +120,7 @@ export class Engine {
     this.container.appendChild(renderer.domElement);
 
     this.atmosphere = new Atmosphere(this.scene);
+    this.atmosphere.attach(renderer);
     // Render the sun's shadow map once at full size before any tile material
     // binds it. Otherwise materials built while shadows are faded out (e.g.
     // starting zoomed out) bind a placeholder shadow texture that the first

@@ -29,8 +29,15 @@ export class Atmosphere {
   private shadowSun = new THREE.Vector3();
   private tmpC = new THREE.Color();
   private tmpC2 = new THREE.Color();
+  private scene: THREE.Scene;
+  private pmrem: THREE.PMREMGenerator | null = null;
+  private envScene = new THREE.Scene();
+  private envTarget: THREE.RenderTarget | null = null;
+  private envKey = '';
+  private envAt = -Infinity;
 
   constructor(scene: THREE.Scene, shadowMapSize = 2048) {
+    this.scene = scene;
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(shadowMapSize, shadowMapSize);
     this.sun.shadow.bias = -0.0004;
@@ -51,6 +58,17 @@ export class Atmosphere {
       const s = max(dot(d, U.sunDir), 0);
       const glow = U.sunColor.mul(pow(s, 900).mul(4).add(pow(s, 12).mul(0.22))).mul(float(1).sub(U.analytics));
       return vec4(sky.add(glow), 1);
+    })();
+
+    this.envScene.backgroundNode = Fn(() => {
+      const d = positionWorldDirection;
+      const up = max(d.y, 0);
+      const raw = mix(U.skyHorizon, U.skyZenith, pow(up, 0.45));
+      const sky = mix(raw, vec3(dot(raw, vec3(0.3, 0.59, 0.11))), 0.6);
+      const ground = mix(sky.mul(0.55), U.envGround, smoothstep(0, -0.2, d.y));
+      const s = max(dot(d, U.sunDir), 0);
+      const glow = U.sunColor.mul(pow(s, 24).mul(0.5)).mul(float(1).sub(U.analytics));
+      return vec4(d.y.greaterThan(0).select(sky.add(glow), ground), 1);
     })();
 
     // haze: exponential in true distance, capped; colour = horizon
@@ -78,6 +96,22 @@ export class Atmosphere {
     this.water.renderOrder = -1;
     this.water.name = 'lakePlane';
     scene.add(this.water);
+  }
+
+  attach(renderer: THREE.WebGPURenderer) {
+    this.pmrem = new THREE.PMREMGenerator(renderer);
+  }
+
+  private updateEnv(ctx: FrameContext) {
+    if (!this.pmrem || ctx.time - this.envAt < 0.5) return;
+    const q = (c: THREE.Color) => `${Math.round(c.r * 64)},${Math.round(c.g * 64)},${Math.round(c.b * 64)}`;
+    const d = U.sunDir.value;
+    const key = `${q(U.skyZenith.value)}|${q(U.skyHorizon.value)}|${q(U.sunColor.value)}|${Math.round(d.x * 20)},${Math.round(d.y * 20)},${Math.round(d.z * 20)}|${Math.round(U.analytics.value * 8)}`;
+    if (key === this.envKey) return;
+    this.envKey = key;
+    this.envAt = ctx.time;
+    this.envTarget = this.pmrem.fromScene(this.envScene, 0, 0.1, 100, { size: 128, renderTarget: this.envTarget ?? undefined });
+    this.scene.environment = this.envTarget.texture;
   }
 
   update(ctx: FrameContext, sunDir: THREE.Vector3) {
@@ -117,12 +151,13 @@ export class Atmosphere {
     // lights
     this.sun.color.copy(U.sunColor.value);
     // strong key light, modest sky fill: sunlit vs shaded faces and shadows read clearly
-    this.sun.intensity = 3.1 * day * (1 - a * 0.5);
-    // sky fill follows the skylight (twilight keeps a cool blue fill after the sun has set)
-    const twi = Math.max(THREE.MathUtils.smoothstep(h, -10, 0) * 0.75, day);
-    this.hemi.intensity = 0.42 + 0.43 * twi;
-    this.hemi.color.setRGB(0.45 + 0.4 * sky + 0.1 * day, 0.52 + 0.38 * sky + 0.05 * day, 0.75 + 0.25 * sky);
-    this.hemi.groundColor.setRGB(0.5 * day + 0.08 + 0.08 * sky, 0.48 * day + 0.08 + 0.08 * sky, 0.42 * day + 0.1 + 0.1 * sky);
+    this.sun.intensity = 4.4 * day * (1 - a * 0.5);
+    U.envGround.value.setRGB(0.3 * day + 0.03 + 0.03 * sky, 0.27 * day + 0.03 + 0.03 * sky, 0.22 * day + 0.035 + 0.035 * sky);
+    this.hemi.intensity = 0.06 + 0.05 * (1 - day);
+    this.hemi.color.copy(U.skyZenith.value);
+    this.hemi.groundColor.copy(U.envGround.value);
+    this.scene.environmentIntensity = 0.3 + 0.4 * Math.max(sky, 0.05);
+    this.updateEnv(ctx);
 
     // Shadow frustum around the focus point. castShadow is never toggled:
     // flipping it rebuilds every lit material's shader (a multi-100 ms stall

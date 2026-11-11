@@ -118,6 +118,8 @@ export class GroundPage {
 
 function terrainMaterial(groundTex: THREE.DataArrayTexture): THREE.MeshStandardNodeMaterial {
   const m = new THREE.MeshStandardNodeMaterial();
+  m.roughness = 0.9;
+  m.metalness = 0;
   m.name = 'terrain';
   const layer = uniform(0).onObjectUpdate(({ object }) => (object?.userData.groundLayer as number) ?? 0);
   const tileSize = uniform(1024).onObjectUpdate(({ object }) => (object?.userData.tileSize as number) ?? 1024);
@@ -183,7 +185,9 @@ function terrainMaterial(groundTex: THREE.DataArrayTexture): THREE.MeshStandardN
 
 /** Lambert with vertex colours (+ optional instance colour), analytics toning. */
 export function vertexColorMaterial(name: string, opts: { pull?: number; pullConst?: number; emissiveWindows?: boolean } = {}) {
-  const m = new THREE.MeshLambertNodeMaterial();
+  const m = new THREE.MeshStandardNodeMaterial();
+  m.roughness = 0.9;
+  m.metalness = 0;
   m.name = name;
   // vertex colours are sRGB bytes; convert to linear here (vertexColors stays false
   // so NodeMaterial does not multiply them in a second time)

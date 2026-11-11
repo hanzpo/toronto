@@ -66,8 +66,10 @@ interface MatOpts { far: number; near?: number; row: number; double?: boolean; g
 const hash2 = (a: N, b: N): N => fract(sin(a.mul(12.9898).add(b.mul(78.233))).mul(43758.5453));
 const box1 = (x: N, a: N, b: N, w: N): N => smoothstep(a.sub(w), a.add(w), x).mul(float(1).sub(smoothstep(b.sub(w), b.add(w), x)));
 
-function urbanMaterial(name: string, o: MatOpts): THREE.MeshLambertNodeMaterial {
-  const m = new THREE.MeshLambertNodeMaterial();
+function urbanMaterial(name: string, o: MatOpts): THREE.MeshStandardNodeMaterial {
+  const m = new THREE.MeshStandardNodeMaterial();
+  m.roughness = 0.85;
+  m.metalness = 0;
   m.name = name;
   if (o.double) m.side = THREE.DoubleSide;
   const tbl = paletteTex();

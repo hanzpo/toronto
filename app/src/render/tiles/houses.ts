@@ -318,7 +318,9 @@ const lin = (r: number, g: number, b: number) => vec3(Math.pow(r, 2.2), Math.pow
 
 /** house shader: part colours, window / door / garage door layout, brick or siding, shingles */
 function houseMaterial(name: string) {
-  const m = new THREE.MeshLambertNodeMaterial();
+  const m = new THREE.MeshStandardNodeMaterial();
+  m.roughness = 0.85;
+  m.metalness = 0;
   m.name = name;
   applyCutaway(m);
   const pal = palette();

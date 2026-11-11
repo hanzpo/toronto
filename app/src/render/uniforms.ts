@@ -15,6 +15,7 @@ export const U = {
   skyZenith: uniform(new THREE.Color(0x6f9fd8)),
   skyHorizon: uniform(new THREE.Color(0xd6e2ec)),
   sunColor: uniform(new THREE.Color(0xfff1d6)),
+  envGround: uniform(new THREE.Color(0x2a2824)),
   /** seconds; drives water animation */
   time: uniform(0),
 };

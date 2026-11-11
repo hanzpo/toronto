@@ -130,8 +130,8 @@ const hash2 = (a: N, b: N): N => fract(sin(a.mul(12.9898).add(b.mul(78.233))).mu
 const box = (x: N, a: N, b: N, w: N): N => smoothstep(a.sub(w), a.add(w), x).mul(float(1).sub(smoothstep(b.sub(w), b.add(w), x)));
 const lin = (r: number, g: number, b: number) => vec3(Math.pow(r, 2.2), Math.pow(g, 2.2), Math.pow(b, 2.2));
 
-export function facadeMaterial(): THREE.MeshLambertNodeMaterial {
-  const m = new THREE.MeshLambertNodeMaterial();
+export function facadeMaterial(): THREE.MeshStandardNodeMaterial {
+  const m = new THREE.MeshStandardNodeMaterial();
   m.name = 'buildings';
   const tbl = styleTable();
   const vc = vertexColor();
@@ -471,13 +471,15 @@ export function facadeMaterial(): THREE.MeshLambertNodeMaterial {
   col = mix(col, mix(signC, letterC, cGlyph.mul(float(1).sub(shopFar))), cSign);
 
   m.colorNode = baseTone(col);
+  m.metalness = 0;
+  (m as unknown as { roughnessNode: N }).roughnessNode = mix(float(0.88), float(0.07), clamp(win.mul(float(1).sub(clamp(frameM, 0, 1))).add(shopGlassMask), 0, 1));
   // buildings in the camera's line of sight dither away (render/cutaway.ts)
   applyCutaway(m);
 
   // ---- emissive: glass reflections by day, lights at night
   const night = U.night;
   const dayRefl = float(1).sub(night.mul(0.75));
-  let em: N = reflCol(wr).mul(refl).mul(win).mul(dayRefl);
+  let em: N = reflCol(wr).mul(refl).mul(win).mul(dayRefl).mul(0.6);
   // shop glass at street level mostly mirrors the street and the facades across it, not the sky
   em = em.add(mix(min(reflCol(rs), vec3(0.35)), vec3(0.12, 0.125, 0.13), 0.5).mul(fres.mul(0.12).add(0.035)).mul(shopGlassMask).mul(dayRefl));
   em = em.add(reflCol(float(0.5)).mul(fres.mul(0.5).add(0.15)).mul(lobbyZone).mul(float(1).sub(clamp(mull, 0, 1))).mul(dayRefl));

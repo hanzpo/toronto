@@ -88,7 +88,7 @@ function crownCover(leaf: N) {
 }
 
 /** fragment: alpha-to-coverage does the LOD fade (× crown cover); shadows switch at half way */
-function applyFade(m: THREE.MeshLambertNodeMaterial, fade: N, extraMask: N | null, cover: N | null = null) {
+function applyFade(m: THREE.MeshStandardNodeMaterial, fade: N, extraMask: N | null, cover: N | null = null) {
   m.alphaToCoverage = true;
   m.opacityNode = cover ? fade.mul(cover) : fade;
   const half = fade.greaterThanEqual(0.5);
@@ -123,7 +123,7 @@ function foliage(sp: N, seed: N, top: N) {
  * receive shadows from a point pushed toward the sun: crowns are shaded by
  * other objects (and by other trees), not by their own facets
  */
-function softShadow(m: THREE.MeshLambertNodeMaterial, k: number) {
+function softShadow(m: THREE.MeshStandardNodeMaterial, k: number) {
   (m as unknown as { receivedShadowPositionNode: N }).receivedShadowPositionNode = positionWorld.add(U.sunDir.mul(k));
 }
 
@@ -153,7 +153,9 @@ function sway(y: N, H: N, seed: N) {
 }
 
 function commonMaterial(name: string) {
-  const m = new THREE.MeshLambertNodeMaterial();
+  const m = new THREE.MeshStandardNodeMaterial();
+  m.roughness = 0.95;
+  m.metalness = 0;
   m.name = name;
   return m;
 }
