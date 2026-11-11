@@ -303,7 +303,7 @@ export function craneTopLufferFar(): THREE.BufferGeometry {
 /** concrete core walls (unit box: x, z ∈ ±½, y ∈ [0, 1]) */
 export function core(): THREE.BufferGeometry {
   const g = new Geo();
-  g.box(-0.5, 0, -0.5, 0.5, 1, 0.5, lin(0xa3a098));
+  g.box(-0.5, 0, -0.5, 0.5, 0.985, 0.5, lin(0xa3a098));
   g.box(-0.502, 0.985, -0.502, 0.502, 1.0, 0.502, lin(0x77746e));
   return g.build();
 }
