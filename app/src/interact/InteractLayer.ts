@@ -33,6 +33,9 @@ interface TrafficApi {
   takeOverCar?(id: number): Promise<boolean> | boolean;
   getPlayer?(): { e: number; n: number; elev?: number; heading?: number; speed?: number; roadName?: string | null; drawZ?: number } | null;
   pickCarMajor?(e: number, n: number, radius?: number, perClass?: number): number | null;
+  handles?(trip: number): boolean;
+  tripPose?(trip: number): { e: number; n: number; z: number; h: number } | null;
+  hideTrip?(trip: number | null): void;
   transitBodies?(): { trip: number; ae: number; an: number; be: number; bn: number; z: number }[];
   pickPed?(e: number, n: number, radius?: number): { e: number; n: number; z: number; heading: number; colour: number } | null;
   removePedNear?(e: number, n: number): void;
@@ -511,7 +514,8 @@ export class InteractLayer implements Layer {
       this.transit.overrides.delete(this.op.info.trip);
       this.op = null;
     }
-    if (this.trip !== null) this.transit.overrides.delete(this.trip);
+    if (this.trip !== null && !this.traffic()?.handles?.(this.trip)) this.transit.overrides.delete(this.trip);
+    this.traffic()?.hideTrip?.(null);
     if (this.drivingCar) {
       try { this.traffic()?.releasePlayer?.(); } catch { /* ignore */ }
       this.drivingCar = false;
@@ -562,6 +566,13 @@ export class InteractLayer implements Layer {
       return true;
     }
     if (this.trip === null) return false;
+    const sp = this.traffic()?.tripPose?.(this.trip);
+    if (sp) {
+      Object.assign(this.pose, { e: sp.e, n: sp.n, z: sp.z, heading: sp.h, pitch: 0 });
+      this.vsTmp = this.system.vehicleAt(this.trip, t);
+      this.agentAt = null;
+      return true;
+    }
     // a rail agent: sit on the consist the sim drives (late / early / off its timetable,
     // and on into its next trip or empty-stock move), not on the timetable ghost
     const at = this.transit.agentTrack(this.trip, this.agentId);
@@ -896,8 +907,10 @@ export class InteractLayer implements Layer {
       hl.set(trip, OUTLINE_SELECTED);
       if (this.op && this.op.info.trip === trip) tagAt = { x: this.pose.e, y: this.pose.n, z: this.pose.z, hd: this.pose.heading, L: this.op.dyn.length };
       else {
-        const dv = this.transit.drawnVehicle(trip);
-        if (dv) tagAt = { x: dv.x, y: dv.y, z: dv.z, hd: dv.heading, L: dv.length };
+        const sp = this.traffic()?.tripPose?.(trip);
+        const dv = sp ? null : this.transit.drawnVehicle(trip);
+        if (sp) tagAt = { x: sp.e, y: sp.n, z: sp.z, hd: sp.h, L: this.transit.vehicleLength(trip) };
+        else if (dv) tagAt = { x: dv.x, y: dv.y, z: dv.z, hd: dv.heading, L: dv.length };
       }
     } else if (sel?.kind === 'stop' && this.stopsCache) {
       const p = sys.stopPosition(+sel.id);
@@ -925,12 +938,16 @@ export class InteractLayer implements Layer {
     const inside = this.mode !== 'free' && this.mode !== 'walk' && this.mode !== 'drive' && (this.view !== 'chase' || camUnder);
     document.body.classList.toggle('interact-inside', inside);
     document.body.classList.toggle('interact-ground', this.mode === 'walk' || this.mode === 'drive');
-    this.routeHi.setVisible(!inside);
-    this.routeHiUnder.setVisible(!inside);
+    const mapView = !inside && ctx.altitude > 400;
+    this.routeHi.setVisible(mapView);
+    this.routeHiUnder.setVisible(mapView);
     this.transit.hideLines = inside;
     // hide the vehicle we sit in (its body would block the camera)
     if (this.trip !== null && !this.op) {
-      if (this.mode !== 'follow' && this.view !== 'chase') this.transit.overrides.set(this.trip, null);
+      const tr = this.traffic();
+      const hide = this.mode !== 'follow' && this.view !== 'chase';
+      if (tr?.handles?.(this.trip)) tr.hideTrip?.(hide ? this.trip : null);
+      else if (hide) this.transit.overrides.set(this.trip, null);
       else this.transit.overrides.delete(this.trip);
     }
     this.routeHi.update(ctx);

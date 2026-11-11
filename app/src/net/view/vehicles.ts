@@ -39,6 +39,9 @@ export class NetVehicles {
   private phase = new Map<number, number>();
   private tmp = new Float32Array(600);
   private white = new THREE.Color(1, 1, 1);
+  readonly poses = new Map<number, { e: number; n: number; z: number; h: number }>();
+  hide: number | null = null;
+  highlight: Map<number, number> | null = null;
 
   constructor() {
     this.group.name = 'net-vehicles';
@@ -83,6 +86,7 @@ export class NetVehicles {
     for (const p of this.carsLo) p.count = 0;
     for (const p of this.peds) p.count = 0;
     this.consists.begin();
+    this.poses.clear();
     const seen = new Set<number>();
     for (const [id, b1] of f1.bodies) {
       const b0 = f0.bodies.get(id);
@@ -116,10 +120,15 @@ export class NetVehicles {
         if (k >= 0 && pool.extra) { const e = pool.extra.array as Float32Array; e[k * 3] = ph; e[k * 3 + 1] = h; e[k * 3 + 2] = b1.v > 0.2 ? 1 : 0; }
         continue;
       }
+      if (b1.trip >= 0) {
+        const k = Math.floor((n - 1) / 2) * 3;
+        this.poses.set(b1.trip, { e: P[k], n: P[k + 1], z: P[k + 2], h: Math.atan2(P[1] - P[(n - 1) * 3 + 1], P[0] - P[(n - 1) * 3]) });
+        if (b1.trip === this.hide) continue;
+      }
       const m = b1.trip >= 0 ? meta(b1.trip) : null;
       const mode: Mode = m?.mode ?? (b1.kind === BUS ? 'bus' : b1.kind === TRAM ? 'streetcar' : b1.variant === 1 ? 'subway' : 'commuter_rail');
       const lay = layoutFor(mode, m?.route);
-      this.placeConsist(lay, P, n, ax, az, d > 400, m?.color ?? this.white, b1.flags);
+      this.placeConsist(lay, P, n, ax, az, d > 400, m?.color ?? this.white, b1.flags, b1.trip >= 0 ? this.highlight?.get(b1.trip) ?? 0 : 0);
     }
     for (const id of this.phase.keys()) if (!seen.has(id)) this.phase.delete(id);
     for (const p of this.cars) p.commit();
@@ -153,7 +162,7 @@ export class NetVehicles {
     out[2] = P[i * 3 + 2] + (P[i * 3 + 5] - P[i * 3 + 2]) * t;
   }
 
-  private placeConsist(lay: ConsistLayout, P: Float32Array, n: number, ax: number, az: number, low: boolean, color: THREE.Color, flags: number) {
+  private placeConsist(lay: ConsistLayout, P: Float32Array, n: number, ax: number, az: number, low: boolean, color: THREE.Color, flags: number, outline = 0) {
     const fp = [0, 0, 0], rp = [0, 0, 0];
     for (let i = 0; i < lay.cars.length; i++) {
       const c = lay.centre[i];
@@ -167,7 +176,7 @@ export class NetVehicles {
       const mx = (fp[0] + rp[0]) / 2, my = (fp[1] + rp[1]) / 2, mz = (fp[2] + rp[2]) / 2;
       const off = (pf + pr) / 2;
       const cx = mx - Math.cos(h) * off, cy = my - Math.sin(h) * off;
-      this.consists.add(lay.cars[i], low, cx - ax, mz, -cy - az, h, pitch, color, flags | (i === 0 ? 16 : 0));
+      this.consists.add(lay.cars[i], low, cx - ax, mz, -cy - az, h, pitch, color, flags | (i === 0 ? 16 : 0), outline);
     }
   }
 

@@ -81,6 +81,7 @@ export class SimLayer implements Layer {
       this.handoff();
     }
     if (this.frame) {
+      this.agents.highlight ??= this.transit()?.highlight ?? null;
       this.agents.update(performance.timeOrigin + performance.now(), ctx.anchor, ctx.cameraPos.x, -ctx.cameraPos.z, ctx.dt, (trip) => this.meta(trip));
       this.agents.group.visible = ctx.altitude < 3000;
     }
@@ -123,6 +124,12 @@ export class SimLayer implements Layer {
   pickCarMajor(e: number, n: number, radius = 150): number | null {
     return this.pickCar(e, n, radius);
   }
+
+  handles(trip: number): boolean { return this.handed.has(trip); }
+
+  tripPose(trip: number): { e: number; n: number; z: number; h: number } | null { return this.agents.poses.get(trip) ?? null; }
+
+  hideTrip(trip: number | null) { this.agents.hide = trip; }
 
   transitBodies(): { trip: number; ae: number; an: number; be: number; bn: number; z: number }[] {
     const f = this.frame?.agents;
